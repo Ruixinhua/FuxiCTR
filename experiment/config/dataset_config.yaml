@@ -1,14 +1,14 @@
 ### Tiny data for tests only
 tiny_npz:
-    data_root: ../../data/
+    data_root: ../data/
     data_format: npz
-    train_data: ../../data/tiny_npz/train.npz
-    valid_data: ../../data/tiny_npz/valid.npz
-    test_data: ../../data/tiny_npz/test.npz
+    train_data: ../data/tiny_npz/train.npz
+    valid_data: ../data/tiny_npz/valid.npz
+    test_data: ../data/tiny_npz/test.npz
 
 avazu_x1:
     data_format: csv
-    data_root: ../../data/Avazu/
+    data_root: ../data/Avazu/
     feature_cols:
     -   active: true
         dtype: float
@@ -18,6 +18,6 @@ avazu_x1:
         type: categorical
     label_col: {dtype: float, name: label}
     min_categr_count: 1
-    test_data: ../../datasets/Avazu/Avazu_x1/test.csv
-    train_data: ../../datasets/Avazu/Avazu_x1/train.csv
-    valid_data: ../../datasets/Avazu/Avazu_x1/valid.csv
+    test_data: ../datasets/Avazu/Avazu_x1/test.csv
+    train_data: ../datasets/Avazu/Avazu_x1/train.csv
+    valid_data: ../datasets/Avazu/Avazu_x1/valid.csv
