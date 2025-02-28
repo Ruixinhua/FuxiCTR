@@ -38,7 +38,7 @@ DualMLP_20240225: # This is a config template
     monitor: {'AUC': 1, 'logloss': -1}
     monitor_mode: 'max'
 
-FinalMLP_202502251630: # This is a config template
+FinalMLP_avazu_x1_20250225: # This is a config template
     model: FinalMLP
     dataset_id: avazu_x1
     loss: binary_crossentropy
