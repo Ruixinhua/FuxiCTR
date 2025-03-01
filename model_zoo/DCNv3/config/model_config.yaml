@@ -15,7 +15,7 @@ Base:
 DCNv3_avazu_x1_20250228:
     model: DCNv3
     dataset_id: avazu_x1_tfrecord
-    rebuild_dataset: True
+    rebuild_dataset: False
     loss: 'binary_crossentropy'
     metrics: ['logloss', 'AUC']
     task: binary_classification
