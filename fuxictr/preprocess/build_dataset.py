@@ -48,15 +48,55 @@ def split_train_test(train_ddf=None, valid_ddf=None, test_ddf=None, valid_size=0
     return train_ddf, valid_ddf, test_ddf
 
 
-def transform_block(feature_encoder, df_block, filename):
+def transform_block(feature_encoder, df_block, filename, saved_format="parquet"):
     df_block = feature_encoder.transform(df_block)
-    data_path = os.path.join(feature_encoder.data_dir, filename)
-    logging.info("Saving data to parquet: " + data_path)
+    data_path = os.path.join(feature_encoder.data_dir, f"{filename}.{saved_format}")
     os.makedirs(os.path.dirname(data_path), exist_ok=True)
-    df_block.to_parquet(data_path, index=False, engine="pyarrow")
+    logging.info(f"Saving data to {saved_format}: " + data_path)
+    if saved_format == "parquet":
+        df_block.to_parquet(data_path, index=False, engine="pyarrow")
+    elif saved_format == "tfrecord":
+        convert_to_tfrecord(feature_encoder, df_block, data_path)
+    else:
+        raise ValueError(f"Unsupported saved_format: {saved_format}")
 
 
-def transform(feature_encoder, ddf, filename, block_size=0):
+def convert_to_tfrecord(feature_encoder, df_block, data_path):
+    import tensorflow as tf
+    from tqdm import tqdm
+    options = tf.io.TFRecordOptions(compression_type="GZIP")
+    feature_spec = {}
+    for feature in feature_encoder.feature_cols:
+        if feature["type"] == "numeric":
+            feature_spec[feature["name"]] = tf.io.FixedLenFeature(1, tf.float32)
+        elif feature["type"] in ["categorical", "meta"]:
+            feature_spec[feature["name"]] = tf.io.FixedLenFeature(1, tf.int64)
+        elif feature["type"] == "sequence":
+            feature_spec[feature["name"]] = tf.io.FixedLenFeature([feature["max_len"]], tf.int64)
+        else:
+            raise ValueError(f"Unsupported feature type: {feature['type']}")
+    for label in feature_encoder.label_cols:
+        feature_spec[label["name"]] = tf.io.FixedLenFeature(1, tf.float32)
+    with tf.io.TFRecordWriter(data_path, options=options) as writer:
+        for _, row in tqdm(df_block.iterrows(), total=len(df_block)):
+            feature_dict = {}
+
+            # 处理所有特征
+            for feat, spec in feature_spec.items():
+                if feat in row:
+                    if spec.dtype == tf.float32:
+                        feature_dict[feat] = tf.train.Feature(float_list=tf.train.FloatList(value=[float(row[feat])]))
+                    elif spec.dtype == tf.int64:
+                        feature_dict[feat] = tf.train.Feature(int64_list=tf.train.Int64List(value=[int(row[feat])]))
+                    else:
+                        raise ValueError(f"Unsupported dtype for feature {feat}")
+
+            # 创建 TFRecord Example
+            example = tf.train.Example(features=tf.train.Features(feature=feature_dict))
+            writer.write(example.SerializeToString())
+
+
+def transform(feature_encoder, ddf, filename, block_size=0, saved_format="parquet"):
     ddf = ddf.collect().to_pandas()
     if block_size > 0:
         pool = mp.Pool(mp.cpu_count() // 2)
@@ -66,13 +106,13 @@ def transform(feature_encoder, ddf, filename, block_size=0):
             pool.apply_async(
                 transform_block,
                 args=(feature_encoder, df_block,
-                      '{}/part_{:05d}.parquet'.format(filename, block_id))
+                      '{}/part_{:05d}.{}'.format(filename, block_id, saved_format))
             )
             block_id += 1
         pool.close()
         pool.join()
     else:
-        transform_block(feature_encoder, ddf, filename + ".parquet")
+        transform_block(feature_encoder, ddf, filename, saved_format=saved_format)
 
 
 def build_dataset(feature_encoder, train_data=None, valid_data=None, test_data=None,
@@ -101,7 +141,8 @@ def build_dataset(feature_encoder, train_data=None, valid_data=None, test_data=N
             # fit and transform train_ddf
             train_ddf = feature_encoder.preprocess(train_ddf)
             feature_encoder.fit(train_ddf, rebuild_dataset=True, **kwargs)
-            transform(feature_encoder, train_ddf, 'train', block_size=data_block_size)
+            sf = kwargs.get("saved_format", "parquet")
+            transform(feature_encoder, train_ddf, 'train', block_size=data_block_size, saved_format=sf)
             del train_ddf
             gc.collect()
 
@@ -110,7 +151,7 @@ def build_dataset(feature_encoder, train_data=None, valid_data=None, test_data=N
                 valid_ddf = feature_encoder.read_data(valid_data, **kwargs)
             if valid_ddf is not None:
                 valid_ddf = feature_encoder.preprocess(valid_ddf)
-                transform(feature_encoder, valid_ddf, 'valid', block_size=data_block_size)
+                transform(feature_encoder, valid_ddf, 'valid', block_size=data_block_size, saved_format=sf)
                 del valid_ddf
                 gc.collect()
 
@@ -119,7 +160,7 @@ def build_dataset(feature_encoder, train_data=None, valid_data=None, test_data=N
                 test_ddf = feature_encoder.read_data(test_data, **kwargs)
             if test_ddf is not None:
                 test_ddf = feature_encoder.preprocess(test_ddf)
-                transform(feature_encoder, test_ddf, 'test', block_size=data_block_size)
+                transform(feature_encoder, test_ddf, 'test', block_size=data_block_size, saved_format=sf)
                 del test_ddf
                 gc.collect()
             logging.info("Transform csv data to parquet done.")

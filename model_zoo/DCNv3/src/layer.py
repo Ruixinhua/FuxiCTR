@@ -14,7 +14,7 @@ class MultiHeadFeatureEmbedding(layers.Layer):
         super(MultiHeadFeatureEmbedding, self).__init__()
         self.num_heads = num_heads
 
-    def call(self, inputs):
+    def call(self, inputs, **kwargs):
         feature_emb = inputs  # B × F × D
         multihead_feature_emb = tf.split(feature_emb, self.num_heads, axis=-1)  # B x F x D/H
         multihead_feature_emb = tf.stack(multihead_feature_emb, axis=1)  # B × H × F × D/H
@@ -71,7 +71,7 @@ class DeepCrossNetv3(layers.Layer):
 
         self.fc = Dense(1)
 
-    def call(self, x, training=False):
+    def call(self, x, training=False, **kwargs):
 
         for i in range(self.num_cross_layers):
             H = self.w[i](x)
@@ -119,7 +119,7 @@ class ShallowCrossNetv3(layers.Layer):
         self.masker = layers.ReLU()
         self.sfc = Dense(1)
 
-    def call(self, x):
+    def call(self, x, **kwargs):
         x0 = x
         for i in range(self.num_cross_layers):
             H = self.ws[i](x)
