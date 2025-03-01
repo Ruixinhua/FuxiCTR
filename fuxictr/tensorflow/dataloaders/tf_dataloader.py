@@ -46,6 +46,8 @@ class TFRecordDataLoader(object):
         def parse_example(example):
             example_dict = tf.io.parse_single_example(example, features=self.schema)
             return example_dict
+        if not filenames.endswith(".tfrecord"):
+            filenames = f"{filenames}.tfrecord"
         dataset = tf.data.TFRecordDataset(filenames, compression_type="GZIP").map(parse_example, num_parallel_calls=1)
         dataset = dataset.prefetch(buffer_size=1).batch(batch_size, drop_remainder=self.drop_remainder)
         if shuffle:
