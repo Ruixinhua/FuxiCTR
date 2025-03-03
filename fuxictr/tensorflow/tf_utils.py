@@ -18,8 +18,7 @@ import random
 import numpy as np
 import os
 import tensorflow as tf
-from tensorflow.keras import optimizers
-from tensorflow.keras.regularizers import l2, l1, l1_l2
+from tensorflow.keras.regularizers import l2
 from tensorflow.keras.initializers import *
 import logging
 
@@ -50,14 +49,14 @@ def get_activation(activation):
 def get_optimizer(optimizer, learning_rate=1.0e-3):
     if isinstance(optimizer, str):
         if optimizer.lower() == 'adam':
-            return optimizers.Adam(learning_rate=learning_rate)
+            return tf.keras.optimizers.legacy.Adam(learning_rate=learning_rate)
         elif optimizer.lower() == 'ftrl':
-            return optimizers.Ftrl(learning_rate=learning_rate, l1_regularization_strength=0.1)
+            return tf.keras.optimizers.legacy.Ftrl(learning_rate=learning_rate, l1_regularization_strength=0.1)
         elif optimizer.lower() == 'adagrad':
-            return optimizers.Adagrad(learning_rate=learning_rate)
+            return tf.keras.optimizers.legacy.Adagrad(learning_rate=learning_rate)
         else:
             try:
-                return getattr(optimizers, optimizer)(learning_rate=learning_rate)
+                return getattr(tf.keras.optimizers.legacy, optimizer)(learning_rate=learning_rate)
             except:
                 raise ValueError('optimizer={} is not supported.'.format(optimizer))
     return optimizer

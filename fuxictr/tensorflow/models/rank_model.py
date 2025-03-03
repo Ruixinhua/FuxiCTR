@@ -93,7 +93,7 @@ class BaseModel(Model):
 
     def lr_decay(self, factor=0.1, min_lr=1e-6):
         self.optimizer.learning_rate = max(self.optimizer.learning_rate * factor, min_lr)
-        return self.optimizer.lr.numpy()
+        return self.optimizer.learning_rate.numpy()
            
     def fit(self, data_generator, epochs=1, validation_data=None,
             max_gradient_norm=10., **kwargs):
