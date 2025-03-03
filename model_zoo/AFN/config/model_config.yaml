@@ -66,3 +66,29 @@ AFN_default: # This is a config template
     monitor: {'AUC': 1, 'logloss': -1}
     monitor_mode: 'max'
 
+AFN_criteo_x1: # This is a config template
+    model: AFN
+    dataset_id: criteo_x1
+    loss: binary_crossentropy
+    metrics: ['logloss', 'AUC']
+    task: binary_classification
+    optimizer: adam
+    learning_rate: 0.001
+    embedding_regularizer:  1e-5
+    net_regularizer: 0
+    batch_size: 4096
+    embedding_dim: 10
+    logarithmic_neurons: 100
+    afn_hidden_units: [200]
+    afn_activations: relu
+    afn_dropout: 0.4
+    ensemble_dnn: True
+    dnn_hidden_units: [400, 400, 400]
+    dnn_activations: relu
+    dnn_dropout: 0.1
+    batch_norm: True
+    epochs: 100
+    shuffle: True
+    seed: 2021
+    monitor: {'AUC': 1, 'logloss': -1}
+    monitor_mode: 'max'

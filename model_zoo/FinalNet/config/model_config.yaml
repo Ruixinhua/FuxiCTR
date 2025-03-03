@@ -2,16 +2,17 @@ Base:
     model_root: './checkpoints/'
     num_workers: 3
     verbose: 1
-    early_stop_patience: 10
+    early_stop_patience: 2
     pickle_feature_encoder: True
     save_best_only: True
     eval_steps: null
+    eval_interval: 1
     debug_mode: False
     group_id: null
-    ordered_features: null
-    feature_specs: null
+    ordered_features: None
+    feature_specs: Null
 
-FinalNet_20250225: # This is a config template
+FinalNet_avazu_x1: # This is a config template
     model: FinalNet
     dataset_id: avazu_x1
     loss: binary_crossentropy
@@ -19,23 +20,23 @@ FinalNet_20250225: # This is a config template
     task: binary_classification
     optimizer: adam
     learning_rate: 1.e-3
-    embedding_regularizer: 0
+    embedding_regularizer: 0.05
     net_regularizer: 0
-    batch_size: 10000
-    embedding_dim: 40
-    block_type: "2B"
+    batch_size: 4096
+    embedding_dim: 10
+    block_type: "1B"
     batch_norm: True
-    use_feature_gating: True
-    block1_hidden_units: [64, 64, 64]
-    block1_hidden_activations: null
-    block1_dropout: 0
+    use_feature_gating: False
+    block1_hidden_units: [400, 400, 400]
+    block1_hidden_activations: ReLU
+    block1_dropout: 0.2
     block2_hidden_units: [64, 64, 64]
-    block2_hidden_activations: null
+    block2_hidden_activations: None
     block2_dropout: 0
     residual_type: concat
     epochs: 100
     shuffle: True
-    seed: 20222023
+    seed: 2021
     monitor: {'AUC': 1, 'logloss': -1}
     monitor_mode: 'max'
 
@@ -94,5 +95,33 @@ FinalNet_test:
     epochs: 1
     shuffle: True
     seed: 20222023
+    monitor: {'AUC': 1, 'logloss': -1}
+    monitor_mode: 'max'
+
+FinalNet_criteo_x1: # This is a config template
+    model: FinalNet
+    dataset_id: criteo_x1
+    loss: binary_crossentropy
+    metrics: ['logloss', 'AUC']
+    task: binary_classification
+    optimizer: adam
+    learning_rate: 0.001
+    embedding_regularizer: 1e-5
+    net_regularizer: 0
+    batch_size: 4096
+    embedding_dim: 10
+    block_type: "1B"
+    batch_norm: True
+    use_feature_gating: True
+    block1_hidden_units: [1000,1000]
+    block1_hidden_activations: ReLU
+    block1_dropout: 0.2
+    block2_hidden_units: [64, 64, 64]
+    block2_hidden_activations: None
+    block2_dropout: 0
+    residual_type: concat
+    epochs: 100
+    shuffle: True
+    seed: 2021
     monitor: {'AUC': 1, 'logloss': -1}
     monitor_mode: 'max'

@@ -34,24 +34,47 @@ FiGNN_test:
     monitor: 'AUC'
     monitor_mode: 'max'
 
-FiGNN_default: # This is a config template
+FiGNN_avazu_x1: # This is the model tested on 2025.02.25.
     model: FiGNN
-    dataset_id: TBD
+    dataset_id: avazu_x1
     loss: 'binary_crossentropy'
     metrics: ['logloss', 'AUC']
     task: binary_classification
     optimizer: adam
     learning_rate: 1.e-3
-    embedding_regularizer: 0
+    embedding_regularizer: 0.0001
     net_regularizer: 0
-    batch_size: 10000
-    embedding_dim: 40
-    gnn_layers: 3
+    batch_size: 4096
+    embedding_dim: 10
+    gnn_layers: 8
+    use_residual: True
+    use_gru: False
+    reuse_graph_layer: False
+    epochs: 100
+    shuffle: True
+    seed: 2021
+    monitor: {'AUC': 1, 'logloss': -1}
+    monitor_mode: 'max'
+
+FiGNN_criteo_x1: # This is the model tested on
+    model: FiGNN
+    dataset_id: criteo_x1
+    loss: 'binary_crossentropy'
+    metrics: ['logloss', 'AUC']
+    task: binary_classification
+    optimizer: adam
+    learning_rate: 0.001
+    embedding_regularizer: 1e-5
+    net_regularizer: 0
+    batch_size: 4096
+    embedding_dim: 10
+    gnn_layers: 6
     use_residual: True
     use_gru: True
     reuse_graph_layer: False
     epochs: 100
     shuffle: True
-    seed: 2019
+    seed: 2021
     monitor: {'AUC': 1, 'logloss': -1}
     monitor_mode: 'max'
+
