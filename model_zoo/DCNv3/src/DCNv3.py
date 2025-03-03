@@ -7,13 +7,9 @@ from fuxictr.tensorflow.layers import FeatureEmbedding, Linear
 
 
 class DCNv3(BaseModel):
-    """
-    DCN, EDCN and GDCN 实现
-    """
-
     def __init__(self,
                  feature_map,
-                 model_id="DCN",
+                 model_id="DCNv3",
                  learning_rate=1e-3,
                  embedding_dim=10,
                  net_dropout=0,

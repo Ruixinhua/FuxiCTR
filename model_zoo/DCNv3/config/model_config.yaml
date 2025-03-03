@@ -21,7 +21,7 @@ DCNv3_avazu_x1_20250228:
     optimizer: adam
     learning_rate: 1.0e-3
     embedding_regularizer: 0
-    batch_size: 128
+    batch_size: 12800
     embedding_dim: 4
     num_cross_layers: 3
     use_layer_norm: True

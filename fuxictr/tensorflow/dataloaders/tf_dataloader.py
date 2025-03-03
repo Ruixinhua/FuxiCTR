@@ -48,10 +48,15 @@ class TFRecordDataLoader(object):
             return example_dict
         if not filenames.endswith(".tfrecord"):
             filenames = f"{filenames}.tfrecord"
-        dataset = tf.data.TFRecordDataset(filenames, compression_type="GZIP").map(parse_example, num_parallel_calls=1)
-        dataset = dataset.prefetch(buffer_size=1).batch(batch_size, drop_remainder=self.drop_remainder)
+        dataset = tf.data.TFRecordDataset(
+            filenames, compression_type="GZIP").map(
+            parse_example, num_parallel_calls=tf.data.experimental.AUTOTUNE
+        )
+        dataset = dataset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE).batch(
+            batch_size, drop_remainder=self.drop_remainder
+        )
         if shuffle:
-            dataset = dataset.shuffle(batch_size * 10)
+            dataset = dataset.shuffle(256)
         return dataset
 
     def make_iterator(self):
