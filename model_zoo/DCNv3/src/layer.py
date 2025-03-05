@@ -1,6 +1,99 @@
+import logging
 import tensorflow as tf
 from tensorflow.keras import layers
-from tensorflow.keras.layers import Concatenate, Dense, Layer
+from tensorflow.keras.layers import Concatenate, Dense, Layer, LayerNormalization
+
+
+class Attention(Layer):
+    def __init__(self, hidden_units=1, num_heads=2, key_dim=16, patch_nums=20, dropout_rate=0.1,
+                    self_att=False, use_mlp=True, use_ln=False, use_fc=True, **kwargs):
+        """
+        Attention层
+        输入shape：(batch_size, ..., input_dim)，2D输入时，(batch_size, input_dim)
+        输出shape：(batch_size, ..., hidden_size[-1])，2D输入时(batch_size, hidden_size[-1])
+
+        :param hidden_units: 每层神经元数量，一个整数列表
+        :param num_heads: attention的head数量
+        :param key_dim: attention的key_dim
+        :param patch_nums: attention 的patch_num
+        :param dropout_rate: [0, 1)之间的float参数，定义dropout率
+        :param self_att: 是否使用self attention替代attention
+        :param use_mlp: attention之后是否增加mlp层
+        :param use_fc: 是否使用fc层适配
+        :param kwargs: 其他参数
+        """
+
+        self.support_attention = True
+        self.atten = None
+        self.dropout_rate = dropout_rate
+        try:
+            from tensorflow.keras.layers import MultiHeadAttention
+            self.atten = [MultiHeadAttention(num_heads, key_dim,
+                          dropout=self.dropout_rate) for _ in range(hidden_units)]
+        except ImportError as e:
+            self.support_attention = False
+            logging.info("not support MultiHeadAttention")
+
+        self.hidden_units = hidden_units
+        self.num_heads = num_heads
+        self.key_dim = key_dim
+        self.patch_nums = patch_nums
+        self.dense_size = self.num_heads * self.key_dim
+        self.self_att = self_att
+        self.use_mlp = use_mlp
+        self.use_ln = use_ln
+        self.use_fc = use_fc
+
+        self.first_fc = Dense(self.num_heads * self.key_dim * self.patch_nums, use_bias=True, activation=None)
+        self.dense = [Dense(self.dense_size * 3,
+                            use_bias=True,
+                            activation=None) for _ in range(self.hidden_units)]
+
+        self.mlp1 = [Dense(self.num_heads * self.key_dim * 2,
+                           use_bias=True,
+                           activation=tf.keras.activations.gelu) for _ in range(self.hidden_units)]
+        self.mlp2 = [Dense(self.num_heads * self.key_dim,
+                           use_bias=True,
+                           activation=None) for _ in range(self.hidden_units)]
+        self.ln = [LayerNormalization() for _ in range(self.hidden_units)]
+
+        super(Attention, self).__init__(**kwargs)
+
+    def call(self, inputs, **kwargs):
+        deep_input = inputs
+        if self.use_fc:
+            deep_input = self.first_fc(deep_input)
+        deep_input = tf.reshape(deep_input, [-1, self.patch_nums, self.dense_size])
+
+        if self.support_attention:
+            for i in range(self.hidden_units):
+                if self.self_att:
+                    q = deep_input
+                    k = deep_input
+                    v = deep_input
+                else:
+                    qkv = self.dense[i](deep_input)
+                    qkv = tf.reshape(qkv, [-1, self.patch_nums, 3, self.dense_size])
+                    q = qkv[:, :, 0]
+                    k = qkv[:, :, 1]
+                    v = qkv[:, :, 2]
+                deep_input = self.atten[i](q, k, v)
+
+                if self.use_mlp:
+                    if self.use_ln:
+                        deep_input = self.ln[i](deep_input)
+                    deep_input = self.mlp1[i](deep_input)
+                    deep_input = self.mlp2[i](deep_input)
+
+        return deep_input
+
+    def get_config(self):
+        config = {'hidden_units': self.hidden_units, 'num_heads': self.num_heads, 'key_dim': self.key_dim,
+                  'patch_nums': self.patch_nums, 'dropout_rate': self.dropout_rate, 'self_att': self.self_att,
+                  'use_mlp': self.use_mlp, 'use_ln': self.use_ln, 'use_fc': self.use_fc}
+        base_config = super(Attention, self).get_config()
+        base_config.update(config)
+        return base_config
 
 
 class MultiHeadFeatureEmbedding(layers.Layer):
