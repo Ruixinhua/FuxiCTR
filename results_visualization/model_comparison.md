@@ -2,12 +2,6 @@
 
 The table below shows the best performance of each model on different datasets. For each model, we conducted extensive hyperparameter tuning experiments and selected the configuration with the best performance. Bold values indicate the best results for each metric across all models. Arrows (↑/↓) indicate whether higher or lower values are better.
 
-<style>
-table { border-collapse: collapse; width: 100%; }
-th, td { padding: 8px; text-align: center; border: 1px solid #ddd; }
-th { background-color: #f2f2f2; }
-</style>
-
 <table>
   <tr>
     <th>Model</th>
