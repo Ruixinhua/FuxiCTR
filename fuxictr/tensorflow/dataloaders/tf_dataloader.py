@@ -56,7 +56,7 @@ class TFRecordDataLoader(object):
             batch_size, drop_remainder=self.drop_remainder
         )
         if shuffle:
-            dataset = dataset.shuffle(256)
+            dataset = dataset.shuffle(1)
         return dataset
 
     def make_iterator(self):

@@ -141,7 +141,7 @@ class BaseModel(Model):
             logging.info("Train loss: {:.6f}".format(train_loss / (self._batch_index + 1)))
             self.eval_step()
 
-    @tf.function
+    # @tf.function
     def train_step(self, batch_data):
         with tf.GradientTape() as tape:
             loss = self.compute_loss(batch_data)

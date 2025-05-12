@@ -23,6 +23,10 @@ import gc
 import multiprocessing as mp
 import polars as pl
 
+# 设置日志级别为 DEBUG
+logging.basicConfig(level=logging.DEBUG,
+                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
 
 def split_train_test(train_ddf=None, valid_ddf=None, test_ddf=None, valid_size=0, 
                      test_size=0, split_type="sequential"):
@@ -49,12 +53,15 @@ def split_train_test(train_ddf=None, valid_ddf=None, test_ddf=None, valid_size=0
 
 
 def transform_block(feature_encoder, df_block, filename, saved_format="parquet"):
+    logging.debug(f"Starting transform_block for {filename}, block size: {len(df_block)}")
     df_block = feature_encoder.transform(df_block)
     data_path = os.path.join(feature_encoder.data_dir, f"{filename}.{saved_format}")
     os.makedirs(os.path.dirname(data_path), exist_ok=True)
     logging.info(f"Saving data to {saved_format}: " + data_path)
     if saved_format == "parquet":
+        logging.debug(f"Writing parquet file to {data_path}")
         df_block.to_parquet(data_path, index=False, engine="pyarrow")
+        logging.debug(f"Successfully wrote parquet file to {data_path}")
     elif saved_format == "tfrecord":
         convert_to_tfrecord(feature_encoder, df_block, data_path)
     else:
@@ -97,12 +104,16 @@ def convert_to_tfrecord(feature_encoder, df_block, data_path):
 
 
 def transform(feature_encoder, ddf, filename, block_size=0, saved_format="parquet"):
+    logging.debug(f"Starting transform for {filename}")
     ddf = ddf.collect().to_pandas()
+    logging.debug(f"Converted to pandas DataFrame, shape: {ddf.shape}")
     if block_size > 0:
+        logging.debug(f"Using block processing with block_size: {block_size}")
         pool = mp.Pool(mp.cpu_count() // 2)
         block_id = 0
         for idx in range(0, len(ddf), block_size):
             df_block = ddf.iloc[idx:(idx + block_size)]
+            logging.debug(f"Processing block {block_id}, size: {len(df_block)}")
             pool.apply_async(
                 transform_block,
                 args=(feature_encoder, df_block,
@@ -112,7 +123,9 @@ def transform(feature_encoder, ddf, filename, block_size=0, saved_format="parque
         pool.close()
         pool.join()
     else:
+        logging.debug("Processing entire dataset at once")
         transform_block(feature_encoder, ddf, filename, saved_format=saved_format)
+    logging.debug(f"Completed transform for {filename}")
 
 
 def build_dataset(feature_encoder, train_data=None, valid_data=None, test_data=None,

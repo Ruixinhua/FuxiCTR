@@ -16,10 +16,12 @@
 
 
 import os
+
+from fuxictr.pytorch.dataloaders import RankDataLoader
+
 os.chdir(os.path.dirname(os.path.realpath(__file__)))
 import sys
 import logging
-import fuxictr_version
 from datetime import datetime
 from fuxictr.utils import load_config, set_logger, print_to_json, print_to_list
 from fuxictr.features import FeatureMap
@@ -49,6 +51,7 @@ if __name__ == '__main__':
         tf.config.experimental.set_memory_growth(gpus[args['gpu']], True)
     experiment_id = args['expid']
     params = load_config(args['config'], experiment_id)
+    params['gpu'] = args['gpu']
     set_logger(params)
     logging.info("Params: " + print_to_json(params))
     seed_everything(seed=params['seed'])
@@ -58,15 +61,18 @@ if __name__ == '__main__':
     # Build feature_map and transform data
     feature_encoder = FeatureProcessor(**params)
     params["train_data"], params["valid_data"], params["test_data"] = \
-        build_dataset(feature_encoder, **params)
+            build_dataset(feature_encoder, **params)
     feature_map = FeatureMap(params['dataset_id'], data_dir)
     feature_map.load(feature_map_json, params)
     logging.info("Feature specs: " + print_to_json(feature_map.features))
     
     model_class = getattr(model_zoo, params['model'])
     model = model_class(feature_map, **params)
-
-    train_gen, valid_gen = TFRecordDataLoader(feature_map, stage='train', **params).make_iterator()
+    model.count_parameters() # print number of parameters used in model
+    if params["data_format"] == "csv":
+        train_gen, valid_gen = RankDataLoader(feature_map, stage='train', **params).make_iterator()
+    else:
+        train_gen, valid_gen = TFRecordDataLoader(feature_map, stage='train', **params).make_iterator()
     model.fit(train_gen, validation_data=valid_gen, **params)
 
     logging.info('****** Validation evaluation ******')
@@ -75,7 +81,10 @@ if __name__ == '__main__':
     gc.collect()
     
     logging.info('******** Test evaluation ********')
-    test_gen = TFRecordDataLoader(feature_map, stage='test', **params).make_iterator()
+    if params["data_format"] == "csv":
+        test_gen = RankDataLoader(feature_map, stage='test', **params).make_iterator()
+    else:
+        test_gen = TFRecordDataLoader(feature_map, stage='test', **params).make_iterator()
     test_result = {}
     if test_gen:
       test_result = model.evaluate(test_gen)

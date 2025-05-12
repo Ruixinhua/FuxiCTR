@@ -19,6 +19,7 @@
 from fuxictr.preprocess import FeatureProcessor
 from datetime import datetime, date
 import polars as pl
+import numpy as np
 
 
 class CustomizedFeatureProcessor(FeatureProcessor):
@@ -26,13 +27,22 @@ class CustomizedFeatureProcessor(FeatureProcessor):
         def _convert_weekday(timestamp):
             dt = date(int('20' + timestamp[0:2]), int(timestamp[2:4]), int(timestamp[4:6]))
             return int(dt.strftime('%w'))
-        return pl.col("hour").apply(_convert_weekday)
+        return pl.col("hour").map_elements(_convert_weekday, return_dtype=pl.Int32)
 
     def convert_weekend(self, col_name=None):
         def _convert_weekend(timestamp):
             dt = date(int('20' + timestamp[0:2]), int(timestamp[2:4]), int(timestamp[4:6]))
             return 1 if dt.strftime('%w') in ['6', '0'] else 0
-        return pl.col("hour").apply(_convert_weekend)
+        return pl.col("hour").map_elements(_convert_weekend, return_dtype=pl.Int32)
 
     def convert_hour(self, col_name=None):
-        return pl.col("hour").apply(lambda x: int(x[6:8]))
+        return pl.col("hour").map_elements(lambda x: int(x[6:8]), return_dtype=pl.Int32)
+
+    def convert_to_bucket(self, col_name):
+        def _convert_to_bucket(value):
+            if value > 2:
+                value = int(np.floor(np.log(value) ** 2))
+            else:
+                value = int(value)
+            return value
+        return pl.col(col_name).map_elements(_convert_to_bucket, return_dtype=pl.Int32).cast(pl.Int32)
