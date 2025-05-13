@@ -43,8 +43,8 @@ The table below shows the best performance of each model on different datasets. 
     <td>DCNv3</td>
     <td><b>0.815935</b></td>
     <td><b>0.436042</b></td>
-    <td><b>0.816022</b></td>
-    <td><b>0.436022</b></td>
+    <td><b>0.816082</b></td>
+    <td><b>0.435973</b></td>
     <td>0.763836</td>
     <td>0.366750</td>
     <td><b>0.797461</b></td>
