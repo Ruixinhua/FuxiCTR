@@ -10,6 +10,7 @@ The table below shows the best performance of each model on different datasets. 
     <th colspan="2" align="center">avazu_x1</th>
     <th colspan="2" align="center">avazu_x4</th>
     <th colspan="3" align="center">taobaoad_x1</th>
+    <th colspan="3" align="center">taobaoad_private_x1</th>
   </tr>
   <tr>
     <th>Metrics</th>
@@ -21,6 +22,9 @@ The table below shows the best performance of each model on different datasets. 
     <th>logloss↓</th>
     <th>AUC↑</th>
     <th>logloss↓</th>
+    <th>AUC↑</th>
+    <th>logloss↓</th>
+    <th>gAUC↑</th>
     <th>AUC↑</th>
     <th>logloss↓</th>
     <th>gAUC↑</th>
@@ -38,6 +42,9 @@ The table below shows the best performance of each model on different datasets. 
     <td><b>0.649314</b></td>
     <td>0.192884</td>
     <td>0.574243</td>
+    <td><b>0.647189</b></td>
+    <td>0.193022</td>
+    <td>0.574149</td>
   </tr>
   <tr>
     <td>DCNv3</td>
@@ -52,6 +59,9 @@ The table below shows the best performance of each model on different datasets. 
     <td>0.648585</td>
     <td>0.194355</td>
     <td>0.572273</td>
+    <td>0.646584</td>
+    <td>0.194337</td>
+    <td>0.572166</td>
   </tr>
   <tr>
     <td>FinalMLP</td>
@@ -66,6 +76,9 @@ The table below shows the best performance of each model on different datasets. 
     <td>0.645906</td>
     <td>0.194208</td>
     <td><b>0.574752</b></td>
+    <td>0.642289</td>
+    <td>0.193084</td>
+    <td>0.570920</td>
   </tr>
   <tr>
     <td>FinalNet</td>
@@ -80,6 +93,9 @@ The table below shows the best performance of each model on different datasets. 
     <td>0.648157</td>
     <td>0.193585</td>
     <td>0.572010</td>
+    <td>0.645506</td>
+    <td><b>0.192771</b></td>
+    <td>0.570864</td>
   </tr>
   <tr>
     <td>MaskNet</td>
@@ -94,6 +110,9 @@ The table below shows the best performance of each model on different datasets. 
     <td>0.646183</td>
     <td><b>0.192420</b></td>
     <td>0.569544</td>
+    <td>0.644471</td>
+    <td><b>0.192681</b></td>
+    <td>0.570723</td>
   </tr>
 </table>
 
