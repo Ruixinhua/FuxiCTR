@@ -33,9 +33,6 @@ class DCNv3(BaseModel):
         self.embedding_layer = FeatureEmbedding(feature_map, embedding_dim,
                                                 embedding_regularizer=embedding_regularizer)
         self.multi_head_feature_embed = MultiHeadFeatureEmbedding(num_heads=self.num_heads)
-        self.feature_att = Attention(
-            num_heads=1, key_dim=embedding_dim, patch_nums=int(len(feature_map.features)), use_fc=False, use_mlp=False
-        )
         num = embedding_dim / self.num_heads if self.num_heads != 0 else 1
         input_dim = int(len(feature_map.features) * num)
         self.deep_cross_net = DeepCrossNetv3(input_dim=input_dim,
@@ -62,13 +59,12 @@ class DCNv3(BaseModel):
         :return: a return_dict with key "y_pred" (logits)
         """
         feature_emb = self.embedding_layer(self.get_inputs(inputs), flatten_emb=False)
-        feature_emb = self.feature_att(feature_emb)  # feature_emb: (batch_size, feat_num, emb_dim)
         xl = self.multi_head_feature_embed(feature_emb)  # xl: (batch_size, head_num, (emb_dim / head_num) * feat_num)
         xld = self.deep_cross_net(xl)  # xld: (batch_size, head_num, (emb_dim / head_num) * feat_num)
         xls = self.shallow_cross_net(xl)  # xls: (batch_size, head_num, (emb_dim / head_num) * feat_num)
         self.logits_xld = self.fc1(Flatten()(xld))
         self.logits_xls = self.fc2(Flatten()(xls))
-        logit_mean = (self.logits_xld + self.logits_xls) * (0.5)
+        logit_mean = (self.logits_xld + self.logits_xls) * 0.5
         return_dict = {"y_pred": logit_mean}
         return return_dict
 
