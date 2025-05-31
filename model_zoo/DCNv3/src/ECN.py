@@ -61,7 +61,6 @@ class ECN(BaseModel):
         return_dict = {"y_pred": y_pred}
         return return_dict
 
-
 class MultiHeadFeatureEmbedding(nn.Module):
     def __init__(self, feature_map, embedding_dim, num_heads=2):
         super(MultiHeadFeatureEmbedding, self).__init__()
@@ -125,3 +124,4 @@ class ExponentialCrossNetwork(nn.Module):
                 x = self.dropout[i](x)
         logit = self.fc(x)
         return logit
+
