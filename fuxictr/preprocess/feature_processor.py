@@ -89,22 +89,31 @@ class FeatureProcessor(object):
                 for file_name in file_names
             ]
             ddf = pl.concat(dfs)
-            seq_cols = [x for x in ddf.columns if isinstance(ddf.select(x).dtypes[0], pl.List)]
+            # Use collect_schema() to avoid PerformanceWarning
+            schema = ddf.collect_schema()
+            seq_cols = [x for x in schema.names() if isinstance(schema[x], pl.List)]
             for col in seq_cols:
                 # Convert list to "^" seperated string for the same preprocessing as csv format
-                ddf = ddf.with_columns(pl.col(col).apply(lambda x: "^".join(map(str, x))))
+                ddf = ddf.with_columns(pl.col(col).map_elements(lambda x: "^".join(map(str, x)), return_dtype=pl.String))
         else:
             NotImplementedError(f"data_format={data_format} not supported.")
         return ddf
 
     def preprocess(self, ddf):
         logging.info("Preprocess feature columns...")
+        # Get schema once to avoid repeated schema resolution
+        if hasattr(ddf, 'collect_schema'):  # LazyFrame
+            schema = ddf.collect_schema()
+            column_names = schema.names()
+        else:  # DataFrame
+            column_names = ddf.columns
+        
         all_cols = self.label_cols + self.feature_cols[::-1]
         for col in all_cols:
             name = col["name"]
             fill_na = col.get("fill_na", 
                               "" if col["dtype"] in ["str", str] else 0)
-            col_exist = name in ddf.columns
+            col_exist = name in column_names
             if col_exist:
                 ddf = ddf.with_columns(pl.col(name).fill_null(fill_na))
             if col.get("preprocess"):
