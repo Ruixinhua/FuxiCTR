@@ -5,16 +5,16 @@ Base:
     early_stop_patience: 2
     pickle_feature_encoder: True
     save_best_only: True
-    eval_steps: null
+    eval_interval: 1
     debug_mode: False
     group_id: null
     use_features: null
     feature_specs: null
     feature_config: null
 
-DualMLP_default: # This is a config template
+DualMLP_20240225: # This is a config template
     model: DualMLP
-    dataset_id: TBD
+    dataset_id: avazu_x1
     loss: binary_crossentropy
     metrics: ['logloss', 'AUC']
     task: binary_classification
@@ -38,40 +38,40 @@ DualMLP_default: # This is a config template
     monitor: {'AUC': 1, 'logloss': -1}
     monitor_mode: 'max'
 
-FinalMLP_default: # This is a config template
+FinalMLP_avazu_x1: # This is a config template
     model: FinalMLP
-    dataset_id: TBD
+    dataset_id: avazu_x1
     loss: binary_crossentropy
     metrics: ['logloss', 'AUC']
     task: binary_classification
     optimizer: adam
-    learning_rate: 1.e-3
-    embedding_regularizer: 0
+    learning_rate: 0.001
+    embedding_regularizer: 0.05
     net_regularizer: 0
-    mlp1_hidden_units: [1024, 512]
+    mlp1_hidden_units: [400, 400, 400]
     mlp1_hidden_activations: relu
-    mlp1_dropout: 0
-    mlp1_batch_norm: False
-    mlp2_hidden_units: [1024, 512, 256]
+    mlp1_dropout: 0.3
+    mlp1_batch_norm: True
+    mlp2_hidden_units: [800]
     mlp2_hidden_activations: relu
-    mlp2_dropout: 0
-    mlp2_batch_norm: False
+    mlp2_dropout: 0.3
+    mlp2_batch_norm: True
     use_fs: True
-    fs_hidden_units: [1024, 512]
+    fs_hidden_units: [800]
     fs1_context: []
     fs2_context: []
-    num_heads: 2
-    batch_size: 10000
-    embedding_dim: 16
+    num_heads: 10
+    batch_size: 4096
+    embedding_dim: 10
     epochs: 100
     shuffle: True
-    seed: 20222023
+    seed: 2021
     monitor: {'AUC': 1, 'logloss': -1}
     monitor_mode: 'max'
 
 DualMLP_test:
     model: DualMLP
-    dataset_id: tiny_parquet
+    dataset_id: avazu_x1
     loss: binary_crossentropy
     metrics: ['logloss', 'AUC']
     task: binary_classification
@@ -97,7 +97,7 @@ DualMLP_test:
 
 FinalMLP_test:
     model: FinalMLP
-    dataset_id: tiny_parquet
+    dataset_id: avazu_x1
     loss: binary_crossentropy
     metrics: ['logloss', 'AUC']
     task: binary_classification
@@ -124,4 +124,35 @@ FinalMLP_test:
     shuffle: True
     seed: 2019
     monitor: 'AUC'
+    monitor_mode: 'max'
+
+FinalMLP_criteo_x1: # This is a config template
+    model: FinalMLP
+    dataset_id: criteo_x1
+    loss: binary_crossentropy
+    metrics: ['logloss', 'AUC']
+    task: binary_classification
+    optimizer: adam
+    learning_rate: 0.001
+    embedding_regularizer: 1e-5
+    net_regularizer: 0
+    mlp1_hidden_units: [400, 400, 400]
+    mlp1_hidden_activations: relu
+    mlp1_dropout: 0.2
+    mlp1_batch_norm: True
+    mlp2_hidden_units: [1000]
+    mlp2_hidden_activations: relu
+    mlp2_dropout: 0.3
+    mlp2_batch_norm: True
+    use_fs: True
+    fs_hidden_units: [800]
+    fs1_context: ['I1', 'I2', 'I3', 'I4', 'I5', 'I6', 'I7', 'I8', 'I9', 'I10', 'I11', 'I12', 'I13']
+    fs2_context: ['C6']
+    num_heads: 20
+    batch_size: 4096
+    embedding_dim: 10
+    epochs: 100
+    shuffle: True
+    seed: 2021
+    monitor: {'AUC': 1, 'logloss': -1}
     monitor_mode: 'max'

@@ -32,6 +32,8 @@ import sklearn.preprocessing as sklearn_preprocess
 from fuxictr.features import FeatureMap
 from .tokenizer import Tokenizer
 from .normalizer import Normalizer
+import psutil  # 添加内存监控
+import gc  # 添加垃圾回收
 
 
 class FeatureProcessor(object):
@@ -89,25 +91,32 @@ class FeatureProcessor(object):
                 for file_name in file_names
             ]
             ddf = pl.concat(dfs)
+            # Use collect_schema() to avoid PerformanceWarning
+            schema = ddf.collect_schema()
+            seq_cols = [x for x in schema.names() if isinstance(schema[x], pl.List)]
+            for col in seq_cols:
+                # Convert list to "^" seperated string for the same preprocessing as csv format
+                ddf = ddf.with_columns(pl.col(col).map_elements(lambda x: "^".join(map(str, x)), return_dtype=pl.String))
         else:
             NotImplementedError(f"data_format={data_format} not supported.")
         return ddf
 
     def preprocess(self, ddf):
         logging.info("Preprocess feature columns...")
+        # Get schema once to avoid repeated schema resolution
+        if hasattr(ddf, 'collect_schema'):  # LazyFrame
+            schema = ddf.collect_schema()
+            column_names = schema.names()
+        else:  # DataFrame
+            column_names = ddf.columns
+        
         all_cols = self.label_cols + self.feature_cols[::-1]
-        col_names = ddf.columns
         for col in all_cols:
             name = col["name"]
-            fill_na = None
-            if col["dtype"] in ["str", str]:
-                fill_na = col.get("fill_na", "")
-            elif col["dtype"] in ["int", int]:
-                fill_na = col.get("fill_na", 0)
-            elif col["dtype"] in ["float", float]:
-                fill_na = col.get("fill_na", 0.0)
-            col_exist = name in col_names
-            if (fill_na is not None) and col_exist:
+            fill_na = col.get("fill_na", 
+                              "" if col["dtype"] in ["str", str] else 0)
+            col_exist = name in column_names
+            if col_exist:
                 ddf = ddf.with_columns(pl.col(name).fill_null(fill_na))
             if col.get("preprocess"):
                 preprocess_args = re.split(r"\(|\)", col["preprocess"])
@@ -121,7 +130,7 @@ class FeatureProcessor(object):
                     .alias(name)
                     .cast(self.dtype_dict[name])
                 )
-            if (fill_na is not None) and (not col_exist):
+            if not col_exist:
                 ddf = ddf.with_columns(pl.col(name).fill_null(fill_na))
             if col.get("type") == "sequence" and isinstance(ddf.select(name).dtypes[0], pl.List):
                 # Convert list to "^" seperated string for unified preprocessing of parquet and csv formats
@@ -133,6 +142,12 @@ class FeatureProcessor(object):
     def fit(self, train_ddf, min_categr_count=1, num_buckets=10, rebuild_dataset=True, **kwargs):
         logging.info("Fit feature processor...")
         self.rebuild_dataset = rebuild_dataset
+        
+        # 内存监控 - 开始
+        memory_info = psutil.virtual_memory()
+        available_gb = memory_info.available / (1024**3)
+        logging.info(f"Available memory at start: {available_gb:.2f} GB ({memory_info.percent:.1f}% used)")
+        
         for col in self.feature_cols:
             name = col["name"]
             if col["active"]:
@@ -141,6 +156,7 @@ class FeatureProcessor(object):
                     train_ddf.select(name).collect().to_series().to_pandas() if self.rebuild_dataset
                     else None
                 )
+                
                 if col["type"] == "meta": # e.g. set group_id in gAUC
                     self.fit_meta_col(col)
                 elif col["type"] == "numeric":
@@ -156,7 +172,22 @@ class FeatureProcessor(object):
                                           min_categr_count=min_categr_count)
                 else:
                     raise NotImplementedError("feature type={}".format(col["type"]))
-        
+                
+                # 手动释放内存
+                if col_series is not None:
+                    del col_series
+                gc.collect()
+                
+                # 内存监控 - 每列处理后
+                memory_info = psutil.virtual_memory()
+                if memory_info.percent > 85:
+                    logging.warning(f"High memory usage after processing {name}: {memory_info.percent:.1f}%")
+                    gc.collect()
+
+        # 内存监控 - 结束
+        memory_info = psutil.virtual_memory()
+        logging.info(f"Memory usage after fit: {memory_info.percent:.1f}% ({memory_info.used / (1024**3):.2f} GB used)")
+
         # Expand vocab from pretrained_emb
         os.makedirs(self.data_dir, exist_ok=True)
         for col in self.feature_cols:

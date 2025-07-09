@@ -19,7 +19,7 @@ from collections import Counter
 import numpy as np
 import h5py
 from tqdm import tqdm
-import polars as pl
+import pandas as pd
 from keras_preprocessing.sequence import pad_sequences
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing as mp

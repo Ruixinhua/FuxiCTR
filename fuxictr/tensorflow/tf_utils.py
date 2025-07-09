@@ -19,8 +19,8 @@ import numpy as np
 import os
 import tensorflow as tf
 from tensorflow.keras import optimizers
-from tensorflow.python.keras.regularizers import l2, l1, l1_l2
-from tensorflow.python.keras.initializers import *
+from tensorflow.keras.regularizers import l2
+from tensorflow.keras.initializers import *
 import logging
 
 
@@ -65,7 +65,7 @@ def get_optimizer(optimizer, learning_rate=1.0e-3):
 def get_loss(loss):
     if isinstance(loss, str):
         if loss in ['bce', 'binary_crossentropy', 'binary_cross_entropy']:
-            loss = tf.keras.losses.BinaryCrossentropy(from_logits=False)
+            loss = tf.keras.losses.BinaryCrossentropy(from_logits=True)
         else:
             raise ValueError('loss={} is not supported.'.format(loss))
     return loss

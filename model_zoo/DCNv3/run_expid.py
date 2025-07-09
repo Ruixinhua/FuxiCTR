@@ -16,18 +16,20 @@
 
 
 import os
+
+from fuxictr.pytorch.dataloaders import RankDataLoader
+
 os.chdir(os.path.dirname(os.path.realpath(__file__)))
 import sys
 import logging
-import fuxictr_version
 from datetime import datetime
 from fuxictr.utils import load_config, set_logger, print_to_json, print_to_list
 from fuxictr.features import FeatureMap
-from fuxictr.pytorch.dataloaders import RankDataLoader
-from fuxictr.pytorch.torch_utils import seed_everything
+from fuxictr.tensorflow.tf_utils import seed_everything
+from fuxictr.tensorflow.dataloaders import TFRecordDataLoader
 from fuxictr.preprocess import FeatureProcessor, build_dataset
-from fuxictr.datasets.avazu import CustomizedFeatureProcessor
-import model_zoo
+import tensorflow as tf
+import src as model_zoo
 import gc
 import argparse
 import os
@@ -43,6 +45,10 @@ if __name__ == '__main__':
     parser.add_argument('--gpu', type=int, default=-1, help='The gpu index, -1 for cpu')
     args = vars(parser.parse_args())
     
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if args['gpu'] >= 0:
+        tf.config.set_visible_devices(gpus[args['gpu']], 'GPU')
+        tf.config.experimental.set_memory_growth(gpus[args['gpu']], True)
     experiment_id = args['expid']
     params = load_config(args['config'], experiment_id)
     params['gpu'] = args['gpu']
@@ -53,9 +59,9 @@ if __name__ == '__main__':
     data_dir = os.path.join(params['data_root'], params['dataset_id'])
     feature_map_json = os.path.join(data_dir, "feature_map.json")
     # Build feature_map and transform data
-    feature_encoder = CustomizedFeatureProcessor(**params)
+    feature_encoder = FeatureProcessor(**params)
     params["train_data"], params["valid_data"], params["test_data"] = \
-        build_dataset(feature_encoder, **params)
+            build_dataset(feature_encoder, **params)
     feature_map = FeatureMap(params['dataset_id'], data_dir)
     feature_map.load(feature_map_json, params)
     logging.info("Feature specs: " + print_to_json(feature_map.features))
@@ -63,8 +69,10 @@ if __name__ == '__main__':
     model_class = getattr(model_zoo, params['model'])
     model = model_class(feature_map, **params)
     model.count_parameters() # print number of parameters used in model
-
-    train_gen, valid_gen = RankDataLoader(feature_map, stage='train', **params).make_iterator()
+    if params["data_format"] == "csv":
+        train_gen, valid_gen = RankDataLoader(feature_map, stage='train', **params).make_iterator()
+    else:
+        train_gen, valid_gen = TFRecordDataLoader(feature_map, stage='train', **params).make_iterator()
     model.fit(train_gen, validation_data=valid_gen, **params)
 
     logging.info('****** Validation evaluation ******')
@@ -72,11 +80,14 @@ if __name__ == '__main__':
     del train_gen, valid_gen
     gc.collect()
     
-    test_result = {}
-    if params["test_data"]:
-        logging.info('******** Test evaluation ********')
+    logging.info('******** Test evaluation ********')
+    if params["data_format"] == "csv":
         test_gen = RankDataLoader(feature_map, stage='test', **params).make_iterator()
-        test_result = model.evaluate(test_gen)
+    else:
+        test_gen = TFRecordDataLoader(feature_map, stage='test', **params).make_iterator()
+    test_result = {}
+    if test_gen:
+      test_result = model.evaluate(test_gen)
     
     result_filename = Path(args['config']).name.replace(".yaml", "") + '.csv'
     with open(result_filename, 'a+') as fw:
@@ -84,4 +95,3 @@ if __name__ == '__main__':
             .format(datetime.now().strftime('%Y%m%d-%H%M%S'), 
                     ' '.join(sys.argv), experiment_id, params['dataset_id'],
                     "N.A.", print_to_list(valid_result), print_to_list(test_result)))
-

@@ -52,7 +52,7 @@ class BaseModel(Model):
         self.output_activation = self.get_output_activation(task)
         self.model_id = model_id
         self.model_dir = os.path.join(kwargs["model_root"], feature_map.dataset_id)
-        self.checkpoint = os.path.abspath(os.path.join(self.model_dir, self.model_id + ".model"))
+        self.checkpoint = os.path.abspath(os.path.join(self.model_dir, self.model_id + ".weights.h5"))
         self.validation_metrics = kwargs["metrics"]
 
     def compile(self, optimizer, loss, lr):
@@ -93,7 +93,7 @@ class BaseModel(Model):
 
     def lr_decay(self, factor=0.1, min_lr=1e-6):
         self.optimizer.learning_rate = max(self.optimizer.learning_rate * factor, min_lr)
-        return self.optimizer.lr.numpy()
+        return self.optimizer.learning_rate.numpy()
            
     def fit(self, data_generator, epochs=1, validation_data=None,
             max_gradient_norm=10., **kwargs):
@@ -141,7 +141,7 @@ class BaseModel(Model):
             logging.info("Train loss: {:.6f}".format(train_loss / (self._batch_index + 1)))
             self.eval_step()
 
-    @tf.function
+    # @tf.function
     def train_step(self, batch_data):
         with tf.GradientTape() as tape:
             loss = self.compute_loss(batch_data)

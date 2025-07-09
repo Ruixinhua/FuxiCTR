@@ -1,0 +1,472 @@
+### Tiny data for tests only
+tiny_npz:
+    data_root: ../data/
+    data_format: npz
+    train_data: ../data/tiny_npz/train.npz
+    valid_data: ../data/tiny_npz/valid.npz
+    test_data: ../data/tiny_npz/test.npz
+
+# TODO: Modify the path to your own dataset; data_root is the root directory of your processed dataset
+# Avazu Dataset used for testing
+avazu_x4:
+    data_format: csv
+    data_root: /project/home/p200499/dairui/rec_datasets/data/Avazu/
+    feature_cols:
+    - {active: false, dtype: str, name: id, type: categorical}
+    - {active: true, dtype: str, name: hour, preprocess: convert_hour, type: categorical}
+    -   active: true
+        dtype: str
+        name: [C1, banner_pos, site_id, site_domain, site_category, app_id, app_domain,
+            app_category, device_id, device_ip, device_model, device_type, device_conn_type,
+            C14, C15, C16, C17, C18, C19, C20, C21]
+        type: categorical
+    - {active: true, dtype: str, name: weekday, preprocess: convert_weekday, type: categorical}
+    - {active: true, dtype: str, name: weekend, preprocess: convert_weekend, type: categorical}
+    label_col: {dtype: float, name: click}
+    min_categr_count: 2
+    test_data: /project/home/p200499/dairui/rec_datasets/Avazu_x4/test.csv
+    train_data: /project/home/p200499/dairui/rec_datasets/Avazu_x4/train.csv
+    valid_data: /project/home/p200499/dairui/rec_datasets/Avazu_x4/valid.csv
+
+avazu_x4_private1:
+    data_format: csv
+    data_root: /project/home/p200499/dairui/rec_datasets/data/Avazu/
+    feature_cols:
+    - {active: false, dtype: str, name: id, type: categorical}
+    - {active: true, dtype: str, name: hour, preprocess: convert_hour, type: categorical}
+    -   active: true
+        dtype: str
+        name: [C1, banner_pos, site_id, site_domain, site_category, app_id, app_domain,
+            app_category, device_id, device_ip, device_model, device_type, device_conn_type,
+            C14, C15, C16, C17, C18, C19, C20, C21, is_personalization]
+        type: categorical
+    - {active: true, dtype: str, name: weekday, preprocess: convert_weekday, type: categorical}
+    - {active: true, dtype: str, name: weekend, preprocess: convert_weekend, type: categorical}
+    label_col: {dtype: float, name: click}
+    min_categr_count: 2
+    test_data: /project/home/p200499/dairui/rec_datasets/AvazuPrivate1_x4/test.csv
+    train_data: /project/home/p200499/dairui/rec_datasets/AvazuPrivate1_x4/train.csv
+    valid_data: /project/home/p200499/dairui/rec_datasets/AvazuPrivate1_x4/valid.csv
+avazu_x4_private2:
+    data_format: csv
+    data_root: /project/home/p200499/dairui/rec_datasets/data/Avazu/
+    feature_cols:
+    - {active: false, dtype: str, name: id, type: categorical}
+    - {active: true, dtype: str, name: hour, preprocess: convert_hour, type: categorical}
+    -   active: true
+        dtype: str
+        name: [C1, banner_pos, site_id, site_domain, site_category, app_id, app_domain,
+            app_category, device_id, device_ip, device_model, device_type, device_conn_type,
+            C14, C15, C16, C17, C18, C19, C20, C21, is_personalization]
+        type: categorical
+    - {active: true, dtype: str, name: weekday, preprocess: convert_weekday, type: categorical}
+    - {active: true, dtype: str, name: weekend, preprocess: convert_weekend, type: categorical}
+    label_col: {dtype: float, name: click}
+    min_categr_count: 2
+    test_data: /project/home/p200499/dairui/rec_datasets/AvazuPrivate2_x4/test.csv
+    train_data: /project/home/p200499/dairui/rec_datasets/AvazuPrivate2_x4/train.csv
+    valid_data: /project/home/p200499/dairui/rec_datasets/AvazuPrivate2_x4/valid.csv
+avazu_x4_private3:
+    data_format: csv
+    data_root: /project/home/p200499/dairui/rec_datasets/data/Avazu/
+    feature_cols:
+    - {active: false, dtype: str, name: id, type: categorical}
+    - {active: true, dtype: str, name: hour, preprocess: convert_hour, type: categorical}
+    -   active: true
+        dtype: str
+        name: [C1, banner_pos, site_id, site_domain, site_category, app_id, app_domain,
+            app_category, device_id, device_ip, device_model, device_type, device_conn_type,
+            C14, C15, C16, C17, C18, C19, C20, C21, is_personalization]
+        type: categorical
+    - {active: true, dtype: str, name: weekday, preprocess: convert_weekday, type: categorical}
+    - {active: true, dtype: str, name: weekend, preprocess: convert_weekend, type: categorical}
+    label_col: {dtype: float, name: click}
+    min_categr_count: 2
+    test_data: /project/home/p200499/dairui/rec_datasets/AvazuPrivate3_x4/test.csv
+    train_data: /project/home/p200499/dairui/rec_datasets/AvazuPrivate3_x4/train.csv
+    valid_data: /project/home/p200499/dairui/rec_datasets/AvazuPrivate3_x4/valid.csv
+avazu_x4_private4:
+    data_format: csv
+    data_root: /project/home/p200499/dairui/rec_datasets/data/Avazu/
+    feature_cols:
+    - {active: false, dtype: str, name: id, type: categorical}
+    - {active: true, dtype: str, name: hour, preprocess: convert_hour, type: categorical}
+    -   active: true
+        dtype: str
+        name: [C1, banner_pos, site_id, site_domain, site_category, app_id, app_domain,
+            app_category, device_id, device_ip, device_model, device_type, device_conn_type,
+            C14, C15, C16, C17, C18, C19, C20, C21, is_personalization]
+        type: categorical
+    - {active: true, dtype: str, name: weekday, preprocess: convert_weekday, type: categorical}
+    - {active: true, dtype: str, name: weekend, preprocess: convert_weekend, type: categorical}
+    label_col: {dtype: float, name: click}
+    min_categr_count: 2
+    test_data: /project/home/p200499/dairui/rec_datasets/AvazuPrivate4_x4/test.csv
+    train_data: /project/home/p200499/dairui/rec_datasets/AvazuPrivate4_x4/train.csv
+    valid_data: /project/home/p200499/dairui/rec_datasets/AvazuPrivate4_x4/valid.csv
+
+# Criteo Dataset used for testing
+criteo_x4:
+    data_format: csv
+    data_root: /project/home/p200499/dairui/rec_datasets/data/Criteo/
+    feature_cols:
+    -   active: true
+        dtype: float
+        fill_na: 0
+        name: [I1, I2, I3, I4, I5, I6, I7, I8, I9, I10, I11, I12, I13]
+        preprocess: convert_to_bucket
+        type: categorical
+    -   active: true
+        dtype: str
+        fill_na: ''
+        name: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13, C14, C15, C16,
+            C17, C18, C19, C20, C21, C22, C23, C24, C25, C26]
+        type: categorical
+    label_col: {dtype: float, name: Label}
+    min_categr_count: 10
+    test_data: /project/home/p200499/dairui/rec_datasets/Criteo_x4/test.csv
+    train_data: /project/home/p200499/dairui/rec_datasets/Criteo_x4/train.csv
+    valid_data: /project/home/p200499/dairui/rec_datasets/Criteo_x4/valid.csv
+
+criteo_clicklogs:
+    data_format: csv
+    data_root: /project/home/p200499/dairui/rec_datasets/data/Criteo/
+    data_block_size: 1024000
+    streaming: true
+    feature_cols:
+    -   active: true
+        dtype: float
+        fill_na: 0
+        name: [int_feature_1, int_feature_2, int_feature_3, int_feature_4,
+               int_feature_5, int_feature_6, int_feature_7, int_feature_8,
+               int_feature_9, int_feature_10, int_feature_11, int_feature_12,
+               int_feature_13]
+        preprocess: convert_to_bucket
+        type: categorical
+    -   active: true
+        dtype: str
+        fill_na: ''
+        name: [cat_feature_1, cat_feature_2, cat_feature_3, cat_feature_4,
+               cat_feature_5, cat_feature_6, cat_feature_7, cat_feature_8,
+               cat_feature_9, cat_feature_10, cat_feature_11, cat_feature_12,
+               cat_feature_13, cat_feature_14, cat_feature_15, cat_feature_16,
+               cat_feature_17, cat_feature_18, cat_feature_19, cat_feature_20,
+               cat_feature_21, cat_feature_22, cat_feature_23, cat_feature_24,
+               cat_feature_25, cat_feature_26]
+        type: categorical
+    label_col: {dtype: float, name: label}
+    min_categr_count: 10
+    test_data: /project/home/p200499/dairui/rec_datasets/criteo_clicklogs/test.csv
+    train_data: /project/home/p200499/dairui/rec_datasets/criteo_clicklogs/train.csv
+    valid_data: /project/home/p200499/dairui/rec_datasets/criteo_clicklogs/valid.csv
+
+criteo_private_ad_cat:
+    data_format: parquet
+    data_root: /Users/dairui/PycharmProjects/FuxiCTR/data/Criteo
+    data_block_size: 20480000
+#    streaming: true
+    buffer_size: 20480000
+    # 元数据特征 - 隐私标识符
+    feature_cols:
+    - {active: true, dtype: int, name: group_id, preprocess: copy_from(is_personalization), remap: false, type: meta}
+
+    # 非个性化分类特征 (数据为int但唯一值有限)
+    - active: true
+      dtype: int
+      name: [features_ctx_not_constrained_0, features_ctx_not_constrained_6]
+      type: categorical
+      description: "上下文分类特征，不包含个人信息"
+
+    # 非个性化数值特征
+    - active: true
+      dtype: float
+      name: [features_ctx_not_constrained_3]
+      type: categorical
+      description: "上下文数值特征，不包含个人信息"
+
+    # 出版商ID - 数值型但应视为分类特征
+    - active: true
+      dtype: float
+      name: [publisher_id]
+      type: categorical
+      description: "出版商标识符"
+
+    # 其他非个性化数值特征 (mixed types)
+    - active: true
+      dtype: int
+      name: [features_kv_not_constrained_3]
+      type: categorical
+      description: "KV数值型分类特征"
+
+    - active: true
+      dtype: float
+      name: [features_kv_not_constrained_4, features_kv_not_constrained_5, features_kv_not_constrained_6, features_kv_not_constrained_7]
+      type: categorical
+      description: "KV数值型特征"
+
+    - active: true
+      dtype: int
+      name: [display_order]
+      type: categorical
+      description: "显示顺序"
+
+    # 个性化约束特征 - 浏览器特征 (全部为Float64，但应视为分类特征)
+    - active: true
+      dtype: float
+      name: [features_browser_bits_constrained_0, features_browser_bits_constrained_2, features_browser_bits_constrained_3, features_browser_bits_constrained_4, features_browser_bits_constrained_5, features_browser_bits_constrained_6, features_browser_bits_constrained_7, features_browser_bits_constrained_8, features_browser_bits_constrained_9, features_browser_bits_constrained_10]
+      type: categorical
+      vocab_size: 4096  # 12位限制 = 2^12
+      description: "浏览器约束特征，12位隐私保护限制"
+
+    # 个性化约束特征 - KV特征 (mixed types，但都应视为分类特征)
+    - active: true
+      dtype: float
+      name: [features_kv_bits_constrained_0, features_kv_bits_constrained_2, features_kv_bits_constrained_4, features_kv_bits_constrained_6, features_kv_bits_constrained_7, features_kv_bits_constrained_8, features_kv_bits_constrained_9, features_kv_bits_constrained_10, features_kv_bits_constrained_11, features_kv_bits_constrained_12, features_kv_bits_constrained_13, features_kv_bits_constrained_15, features_kv_bits_constrained_16, features_kv_bits_constrained_18, features_kv_bits_constrained_19, features_kv_bits_constrained_20, features_kv_bits_constrained_21, features_kv_bits_constrained_22, features_kv_bits_constrained_24]
+      type: categorical
+      vocab_size: 4096  # 12位限制 = 2^12
+      description: "KV服务器约束特征（Float64类型），12位隐私保护限制"
+
+    - active: true
+      dtype: int
+      name: [features_kv_bits_constrained_25, features_kv_bits_constrained_28, features_kv_bits_constrained_29, features_kv_bits_constrained_30, features_browser_bits_constrained_1, features_kv_bits_constrained_23]
+      type: categorical
+      vocab_size: 4096  # 12位限制 = 2^12
+      description: "高 vocab 特征"
+
+    - active: true
+      dtype: int
+      name: [features_kv_bits_constrained_1, features_kv_bits_constrained_3, features_kv_bits_constrained_26]
+      type: categorical
+      vocab_size: 4096  # 12位限制 = 2^12
+      description: "KV服务器约束特征（Int64类型），12位隐私保护限制"
+
+    # 隐私标识符
+    - active: true
+      dtype: int
+      name: is_personalization
+      type: categorical
+      vocab_size: 2
+      description: "隐私偏好标识符 (0=隐私保护用户, 1=允许个性化用户)"
+
+    label_col: {dtype: float, name: is_clicked}  # 修正：实际为Int32
+    min_categr_count: 1  # 保留所有类别，因为有隐私约束
+    test_data: /Users/dairui/PycharmProjects/FuxiCTR/datasets/CriteoPrivateAd/test.parquet
+    train_data: /Users/dairui/PycharmProjects/FuxiCTR/datasets/CriteoPrivateAd/train.parquet
+    valid_data: /Users/dairui/PycharmProjects/FuxiCTR/datasets/CriteoPrivateAd/valid.parquet
+
+criteo_private_ad_catv1:
+#  删除掉了
+    data_format: parquet
+    data_root: /Users/dairui/PycharmProjects/FuxiCTR/data/Criteo
+    data_block_size: 20480000
+#    streaming: true
+    buffer_size: 20480000
+    # 元数据特征 - 隐私标识符
+    feature_cols:
+    - {active: true, dtype: int, name: group_id, preprocess: copy_from(is_personalization), remap: false, type: meta}
+
+    # 非个性化分类特征 (数据为int但唯一值有限)
+    - active: true
+      dtype: int
+      name: [features_ctx_not_constrained_0, features_ctx_not_constrained_6]
+      type: categorical
+      description: "上下文分类特征，不包含个人信息"
+
+    # 非个性化数值特征
+    - active: true
+      dtype: float
+      name: [features_ctx_not_constrained_3]
+      type: categorical
+      description: "上下文数值特征，不包含个人信息"
+
+    # 出版商ID - 数值型但应视为分类特征
+    - active: true
+      dtype: float
+      name: [publisher_id]
+      type: categorical
+      description: "出版商标识符"
+
+    # 其他非个性化数值特征 (mixed types)
+    - active: true
+      dtype: int
+      name: [features_kv_not_constrained_3]
+      type: categorical
+      description: "KV数值型分类特征"
+
+    - active: true
+      dtype: float
+      name: [features_kv_not_constrained_4, features_kv_not_constrained_5, features_kv_not_constrained_6, features_kv_not_constrained_7]
+      type: categorical
+      description: "KV数值型特征"
+
+    - active: true
+      dtype: int
+      name: [display_order]
+      type: categorical
+      description: "显示顺序"
+
+    # 个性化约束特征 - 浏览器特征 (全部为Float64，但应视为分类特征)
+    - active: true
+      dtype: float
+      name: [features_browser_bits_constrained_0, features_browser_bits_constrained_2, features_browser_bits_constrained_3, features_browser_bits_constrained_4, features_browser_bits_constrained_5, features_browser_bits_constrained_6, features_browser_bits_constrained_7, features_browser_bits_constrained_8, features_browser_bits_constrained_9, features_browser_bits_constrained_10]
+      type: categorical
+      vocab_size: 4096  # 12位限制 = 2^12
+      description: "浏览器约束特征，12位隐私保护限制"
+
+    # 个性化约束特征 - KV特征 (mixed types，但都应视为分类特征)
+    - active: true
+      dtype: float
+      name: [features_kv_bits_constrained_0, features_kv_bits_constrained_2, features_kv_bits_constrained_4, features_kv_bits_constrained_6, features_kv_bits_constrained_7, features_kv_bits_constrained_8, features_kv_bits_constrained_9, features_kv_bits_constrained_10, features_kv_bits_constrained_11, features_kv_bits_constrained_12, features_kv_bits_constrained_13, features_kv_bits_constrained_15, features_kv_bits_constrained_16, features_kv_bits_constrained_18, features_kv_bits_constrained_19, features_kv_bits_constrained_20, features_kv_bits_constrained_21, features_kv_bits_constrained_22, features_kv_bits_constrained_24]
+      type: categorical
+      vocab_size: 4096  # 12位限制 = 2^12
+      description: "KV服务器约束特征（Float64类型），12位隐私保护限制"
+
+    - active: false
+      dtype: int
+      name: [features_kv_bits_constrained_25, features_kv_bits_constrained_28, features_kv_bits_constrained_29, features_kv_bits_constrained_30, features_browser_bits_constrained_1, features_kv_bits_constrained_23]
+      type: categorical
+      vocab_size: 4096  # 12位限制 = 2^12
+      description: "高 vocab 特征"
+
+    - active: true
+      dtype: int
+      name: [features_kv_bits_constrained_1, features_kv_bits_constrained_3, features_kv_bits_constrained_26]
+      type: categorical
+      vocab_size: 4096  # 12位限制 = 2^12
+      description: "KV服务器约束特征（Int64类型），12位隐私保护限制"
+
+    # 隐私标识符
+    - active: true
+      dtype: int
+      name: is_personalization
+      type: categorical
+      vocab_size: 2
+      description: "隐私偏好标识符 (0=隐私保护用户, 1=允许个性化用户)"
+
+    label_col: {dtype: float, name: is_clicked}  # 修正：实际为Int32
+    min_categr_count: 1  # 保留所有类别，因为有隐私约束
+    test_data: /Users/dairui/PycharmProjects/FuxiCTR/datasets/CriteoPrivateAd/test.parquet
+    train_data: /Users/dairui/PycharmProjects/FuxiCTR/datasets/CriteoPrivateAd/train.parquet
+    valid_data: /Users/dairui/PycharmProjects/FuxiCTR/datasets/CriteoPrivateAd/valid.parquet
+
+taobaoad_x1:
+    data_format: csv
+    data_root: /project/home/p200499/dairui/rec_datasets/data/Taobao/
+    feature_cols:
+    - {active: true, dtype: int, name: group_id, preprocess: copy_from(userid), remap: false,
+        type: meta}
+    -   active: true
+        dtype: str
+        name: [userid, cms_segid, cms_group_id, final_gender_code, age_level, pvalue_level,
+            shopping_level, occupation, new_user_class_level, adgroup_id, cate_id,
+            campaign_id, customer, brand, pid, btag]
+        type: categorical
+    - {active: true, dtype: float, name: price, type: numeric}
+    - {active: true, dtype: str, max_len: 50, name: cate_his, padding: pre, share_embedding: cate_id,
+        splitter: ^, type: sequence}
+    - {active: true, dtype: str, max_len: 50, name: brand_his, padding: pre, share_embedding: brand,
+        splitter: ^, type: sequence}
+    - {active: true, dtype: str, max_len: 50, name: btag_his, padding: pre, share_embedding: btag,
+        splitter: ^, type: sequence}
+    label_col: {dtype: float, name: clk}
+    min_categr_count: 10
+    test_data: /project/home/p200499/dairui/rec_datasets/TaobaoAd_x1/test.csv
+    train_data: /project/home/p200499/dairui/rec_datasets/TaobaoAd_x1/train.csv
+    valid_data: /project/home/p200499/dairui/rec_datasets/TaobaoAd_x1/test.csv
+
+taobaoad_private1_x1:
+    data_format: csv
+    data_root: /project/home/p200499/dairui/rec_datasets/data/Taobao/
+    feature_cols:
+    - {active: true, dtype: int, name: group_id, preprocess: copy_from(userid), remap: false,
+        type: meta}
+    -   active: true
+        dtype: str
+        name: [userid, cms_segid, cms_group_id, final_gender_code, age_level, pvalue_level,
+            shopping_level, occupation, new_user_class_level, adgroup_id, cate_id,
+            campaign_id, customer, brand, pid, btag, is_personalization]
+        type: categorical
+    - {active: true, dtype: float, name: price, type: numeric}
+    - {active: true, dtype: str, max_len: 50, name: cate_his, padding: pre, share_embedding: cate_id,
+        splitter: ^, type: sequence}
+    - {active: true, dtype: str, max_len: 50, name: brand_his, padding: pre, share_embedding: brand,
+        splitter: ^, type: sequence}
+    - {active: true, dtype: str, max_len: 50, name: btag_his, padding: pre, share_embedding: btag,
+        splitter: ^, type: sequence}
+    label_col: {dtype: float, name: clk}
+    min_categr_count: 10
+    test_data: /project/home/p200499/dairui/rec_datasets/TaobaoAdPrivate1_x1/test.csv
+    train_data: /project/home/p200499/dairui/rec_datasets/TaobaoAdPrivate1_x1/train.csv
+    valid_data: /project/home/p200499/dairui/rec_datasets/TaobaoAdPrivate1_x1/test.csv
+taobaoad_private2_x1:
+    data_format: csv
+    data_root: /project/home/p200499/dairui/rec_datasets/data/Taobao/
+    feature_cols:
+    - {active: true, dtype: int, name: group_id, preprocess: copy_from(userid), remap: false,
+        type: meta}
+    -   active: true
+        dtype: str
+        name: [userid, cms_segid, cms_group_id, final_gender_code, age_level, pvalue_level,
+            shopping_level, occupation, new_user_class_level, adgroup_id, cate_id,
+            campaign_id, customer, brand, pid, btag, is_personalization]
+        type: categorical
+    - {active: true, dtype: float, name: price, type: numeric}
+    - {active: true, dtype: str, max_len: 50, name: cate_his, padding: pre, share_embedding: cate_id,
+        splitter: ^, type: sequence}
+    - {active: true, dtype: str, max_len: 50, name: brand_his, padding: pre, share_embedding: brand,
+        splitter: ^, type: sequence}
+    - {active: true, dtype: str, max_len: 50, name: btag_his, padding: pre, share_embedding: btag,
+        splitter: ^, type: sequence}
+    label_col: {dtype: float, name: clk}
+    min_categr_count: 10
+    test_data: /project/home/p200499/dairui/rec_datasets/TaobaoAdPrivate2_x1/test.csv
+    train_data: /project/home/p200499/dairui/rec_datasets/TaobaoAdPrivate2_x1/train.csv
+    valid_data: /project/home/p200499/dairui/rec_datasets/TaobaoAdPrivate2_x1/test.csv
+taobaoad_private3_x1:
+    data_format: csv
+    data_root: /project/home/p200499/dairui/rec_datasets/data/Taobao/
+    feature_cols:
+    - {active: true, dtype: int, name: group_id, preprocess: copy_from(userid), remap: false,
+        type: meta}
+    -   active: true
+        dtype: str
+        name: [userid, cms_segid, cms_group_id, final_gender_code, age_level, pvalue_level,
+            shopping_level, occupation, new_user_class_level, adgroup_id, cate_id,
+            campaign_id, customer, brand, pid, btag, is_personalization]
+        type: categorical
+    - {active: true, dtype: float, name: price, type: numeric}
+    - {active: true, dtype: str, max_len: 50, name: cate_his, padding: pre, share_embedding: cate_id,
+        splitter: ^, type: sequence}
+    - {active: true, dtype: str, max_len: 50, name: brand_his, padding: pre, share_embedding: brand,
+        splitter: ^, type: sequence}
+    - {active: true, dtype: str, max_len: 50, name: btag_his, padding: pre, share_embedding: btag,
+        splitter: ^, type: sequence}
+    label_col: {dtype: float, name: clk}
+    min_categr_count: 10
+    test_data: /project/home/p200499/dairui/rec_datasets/TaobaoAdPrivate3_x1/test.csv
+    train_data: /project/home/p200499/dairui/rec_datasets/TaobaoAdPrivate3_x1/train.csv
+    valid_data: /project/home/p200499/dairui/rec_datasets/TaobaoAdPrivate3_x1/test.csv
+taobaoad_private4_x1:
+    data_format: csv
+    data_root: /project/home/p200499/dairui/rec_datasets/data/Taobao/
+    feature_cols:
+    - {active: true, dtype: int, name: group_id, preprocess: copy_from(userid), remap: false,
+        type: meta}
+    -   active: true
+        dtype: str
+        name: [userid, cms_segid, cms_group_id, final_gender_code, age_level, pvalue_level,
+            shopping_level, occupation, new_user_class_level, adgroup_id, cate_id,
+            campaign_id, customer, brand, pid, btag, is_personalization]
+        type: categorical
+    - {active: true, dtype: float, name: price, type: numeric}
+    - {active: true, dtype: str, max_len: 50, name: cate_his, padding: pre, share_embedding: cate_id,
+        splitter: ^, type: sequence}
+    - {active: true, dtype: str, max_len: 50, name: brand_his, padding: pre, share_embedding: brand,
+        splitter: ^, type: sequence}
+    - {active: true, dtype: str, max_len: 50, name: btag_his, padding: pre, share_embedding: btag,
+        splitter: ^, type: sequence}
+    label_col: {dtype: float, name: clk}
+    min_categr_count: 10
+    test_data: /project/home/p200499/dairui/rec_datasets/TaobaoAdPrivate4_x1/test.csv
+    train_data: /project/home/p200499/dairui/rec_datasets/TaobaoAdPrivate4_x1/train.csv
+    valid_data: /project/home/p200499/dairui/rec_datasets/TaobaoAdPrivate4_x1/test.csv
