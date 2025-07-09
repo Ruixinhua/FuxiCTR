@@ -328,7 +328,7 @@ def transform(feature_encoder, ddf, filename, block_size=0, saved_format="parque
         
         # 合并所有part文件为单个文件
         logging.info(f"Merging {block_id} part files into single {saved_format} file")
-        # merge_part_files(feature_encoder.data_dir, filename, block_id, saved_format)
+        merge_part_files(feature_encoder.data_dir, filename, block_id, saved_format)
         
     else:
         # 小数据集或未指定分批大小，直接处理

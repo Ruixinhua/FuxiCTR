@@ -1,7 +1,7 @@
 import logging
 import tensorflow as tf
-from tensorflow.keras.layers import Flatten, Dense
-from .layer import MultiHeadFeatureEmbedding, DeepCrossNetv3, ShallowCrossNetv3, Attention
+from tensorflow.keras.layers import Flatten
+from .layer import MultiHeadFeatureEmbedding, DeepCrossNetv3, ShallowCrossNetv3
 from fuxictr.tensorflow.models import BaseModel
 from fuxictr.tensorflow.layers import FeatureEmbedding, Linear
 

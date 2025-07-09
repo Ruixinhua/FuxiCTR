@@ -144,11 +144,22 @@ class DCNv3(BaseModel):
             self.logits_xls = self.LCN(feature_emb).mean(dim=1)
         
         logit = (self.logits_xld + self.logits_xls) * 0.5
+        
+        # 应用输出激活函数
         y_pred = self.output_activation(logit)
+        y_d = self.output_activation(self.logits_xld)
+        y_s = self.output_activation(self.logits_xls)
+        
+        # 轻微的数值稳定化，避免过度限制模型表达能力
+        # 只处理极端的数值问题，不影响正常的梯度流
+        eps = 1e-6
+        y_pred = torch.clamp(y_pred, min=eps, max=1.0-eps)
+        y_d = torch.clamp(y_d, min=eps, max=1.0-eps)
+        y_s = torch.clamp(y_s, min=eps, max=1.0-eps)
         
         return_dict = {"y_pred": y_pred,
-                       "y_d": self.output_activation(self.logits_xld),
-                       "y_s": self.output_activation(self.logits_xls)}
+                       "y_d": y_d,
+                       "y_s": y_s}
         return return_dict
 
     def _generate_domain_aware_logits_pytorch(self, X_features, net_output):
@@ -230,10 +241,10 @@ class DCNv3(BaseModel):
         loss = self.loss_fn(y_pred, y_true, reduction='mean')
         loss_d = self.loss_fn(y_d, y_true, reduction='mean')
         loss_s = self.loss_fn(y_s, y_true, reduction='mean')
-        
+
         weight_d = loss_d - loss
         weight_s = loss_s - loss
-        
+
         weight_d = torch.where(weight_d > 0, weight_d, torch.zeros_like(weight_d))
         weight_s = torch.where(weight_s > 0, weight_s, torch.zeros_like(weight_s))
         
