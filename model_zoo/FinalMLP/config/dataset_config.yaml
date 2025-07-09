@@ -1,5 +1,5 @@
 ### Tiny data for tests only
-tiny_npz:
+tiny_parquet:
     data_root: ../../data/
     data_format: npz
     train_data: ../../data/tiny_npz/train.npz

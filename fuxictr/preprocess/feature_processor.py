@@ -132,6 +132,9 @@ class FeatureProcessor(object):
                 )
             if not col_exist:
                 ddf = ddf.with_columns(pl.col(name).fill_null(fill_na))
+            if col.get("type") == "sequence" and isinstance(ddf.select(name).dtypes[0], pl.List):
+                # Convert list to "^" seperated string for unified preprocessing of parquet and csv formats
+                ddf = ddf.with_columns(pl.col(name).apply(lambda x: "^".join(map(str, x))))
         active_cols = [col["name"] for col in all_cols if col.get("active") != False]
         ddf = ddf.select(active_cols)
         return ddf
@@ -263,6 +266,8 @@ class FeatureProcessor(object):
             self.feature_map.features[name]["feature_encoder"] = col["feature_encoder"]
         if "embedding_dim" in col:
             self.feature_map.features[name]["embedding_dim"] = col["embedding_dim"]
+        if "pretrain_dim" in col:
+            self.feature_map.features[name]["pretrain_dim"] = col["pretrain_dim"]
 
     def fit_categorical_col(self, col, col_series, min_categr_count=1, num_buckets=10):
         name = col["name"]
@@ -390,6 +395,10 @@ class FeatureProcessor(object):
                 elif feature_type == "sequence":
                     ddf[feature] = (self.processor_dict.get(feature + "::tokenizer")
                                     .encode_sequence(col_series))
+                elif feature_type == "embedding":
+                    continue
+                else:
+                    raise NotImplementedError
         return ddf
 
     def load_pickle(self, pickle_file=None):
