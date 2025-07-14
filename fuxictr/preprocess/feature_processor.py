@@ -53,6 +53,7 @@ class FeatureProcessor(object):
         self.feature_map = FeatureMap(dataset_id, self.data_dir)
         self.feature_map.labels = [col["name"] for col in self.label_cols]
         self.feature_map.group_id = kwargs.get("group_id", None)
+        self.feature_map.feature_group_id = kwargs.get("feature_group_id", None)
         self.dtype_dict = dict(
             (feat["name"], eval(feat["dtype"]) if type(feat["dtype"]) == str else feat["dtype"]) 
             for feat in self.feature_cols + self.label_cols

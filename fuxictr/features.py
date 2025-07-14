@@ -34,6 +34,7 @@ class FeatureMap(object):
         self.labels = []
         self.column_index = dict()
         self.group_id = None
+        self.feature_group_id = None
         self.default_emb_dim = None
 
     def load(self, json_file, params):
@@ -46,6 +47,7 @@ class FeatureMap(object):
         self.total_features = feature_map.get("total_features", 0)
         self.input_length = feature_map.get("input_length", 0)
         self.group_id = params.get("group_id", None)
+        self.feature_group_id = params.get("feature_group_id", None)
         self.default_emb_dim = params.get("embedding_dim", None)
         self.features = OrderedDict((k, v) for x in feature_map["features"] for k, v in x.items())
         self.num_fields = self.get_num_fields()

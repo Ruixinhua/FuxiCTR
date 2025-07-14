@@ -23,9 +23,24 @@ import multiprocessing as mp
 from collections import OrderedDict
 
 
-def evaluate_metrics(y_true, y_pred, metrics, group_id=None):
+def evaluate_metrics(y_true, y_pred, metrics, group_id=None, feature_group_id=None):
+    """
+    Evaluate metrics for predictions.
+    
+    Args:
+        y_true: True labels
+        y_pred: Predicted values
+        metrics: List of metrics to compute
+        group_id: Group IDs for group-based metrics (gAUC, avgAUC, etc.)
+        feature_group_id: Feature values for feature-based group metrics (e.g., is_personalization)
+        
+    Returns:
+        OrderedDict containing computed metrics
+    """
     return_dict = OrderedDict()
     group_metrics = []
+    
+    # 计算总体metrics
     for metric in metrics:
         if metric in ['logloss', 'binary_crossentropy']:
             return_dict[metric] = log_loss(y_true, y_pred)
@@ -36,6 +51,8 @@ def evaluate_metrics(y_true, y_pred, metrics, group_id=None):
             group_metrics.append(metric)
         else:
             raise ValueError("metric={} not supported.".format(metric))
+    
+    # 处理需要group_id的metrics（如gAUC）
     if len(group_metrics) > 0:
         assert group_id is not None, "group_index is required."
         metric_funcs = []
@@ -57,7 +74,70 @@ def evaluate_metrics(y_true, y_pred, metrics, group_id=None):
         sum_results = np.array(results).sum(0)
         average_result = list(sum_results[:, 0] / sum_results[:, 1])
         return_dict.update(dict(zip(group_metrics, average_result)))
+    
+    # 处理按特征分组的metrics
+    if feature_group_id is not None:
+        feature_group_results = compute_feature_group_metrics(
+            y_true, y_pred, metrics, feature_group_id
+        )
+        return_dict.update(feature_group_results)
+    
     return return_dict
+
+
+def compute_feature_group_metrics(y_true, y_pred, metrics, feature_group_id):
+    """
+    计算按特征分组的metrics
+    
+    Args:
+        y_true: True labels
+        y_pred: Predicted values  
+        metrics: List of metrics to compute
+        feature_group_id: Feature values for grouping
+        
+    Returns:
+        Dict containing group metrics and ratios
+    """
+    result_dict = {}
+    
+    # 创建DataFrame用于分组
+    df = pd.DataFrame({
+        'y_true': y_true,
+        'y_pred': y_pred,
+        'feature_group': feature_group_id
+    })
+    
+    # 计算每个组的样本数量和比例
+    total_samples = len(df)
+    group_counts = df['feature_group'].value_counts().sort_index()
+    
+    # 添加分组比例信息
+    for group_value, count in group_counts.items():
+        ratio = (count / total_samples) * 100
+        result_dict[f'group_{group_value}_ratio'] = ratio
+    
+    # 按特征分组计算metrics
+    for group_value, group_df in df.groupby('feature_group'):
+        group_y_true = group_df['y_true'].values
+        group_y_pred = group_df['y_pred'].values
+        
+        # 为每个组计算指定的metrics
+        for metric in metrics:
+            if metric in ['logloss', 'binary_crossentropy']:
+                if len(group_y_true) > 0:  # 确保组不为空
+                    group_metric_value = log_loss(group_y_true, group_y_pred)
+                    result_dict[f'{metric}_group_{group_value}'] = group_metric_value
+            elif metric == 'AUC':
+                # 确保组中有正负样本
+                if len(group_y_true) > 0 and len(np.unique(group_y_true)) > 1:
+                    group_metric_value = roc_auc_score(group_y_true, group_y_pred)
+                    result_dict[f'{metric}_group_{group_value}'] = group_metric_value
+                else:
+                    # 如果组中只有一种标签，设置为0
+                    result_dict[f'{metric}_group_{group_value}'] = 0.0
+            # 注意：对于group-based metrics如gAUC，我们不在这里处理，因为它们需要特殊的group_id参数
+    
+    return result_dict
 
 def evaluate_block(df, metric_funcs):
     res_list = []
