@@ -1,0 +1,43 @@
+  # 模型超参
+  "model_conf":
+    {
+       "model": "eulernet",
+       "model_specific_params":
+       {
+          "use_norm": True,
+          "drop_ex": 0.01,  # no effect
+          "drop_im": 0.01,  # no effect
+          "euler_layer": 2,
+          "euler_feature_interaction": "all"  # explicit, implicit, all
+       },
+      mtl_set:
+        {
+          task_label_name_list: [ "label" ],
+          output_task_index: 0,
+        },
+      "embedding_conf": # embedding table相关参数
+        {
+          "embedding_init_name": "truncate_norm",  #  embedding初始化参数
+          "embedding_init_stddev": 0.02,
+          "embedding_reg": 0.000003,
+          "autodis_params": # autodis
+            {
+              "temp": 0.02,
+              "bins": 80,
+              "dense_embedding_size": 32,
+              "use_dense_single_autodis": True,
+              "use_dense_multi_autodis": False,
+              "use_dense_emb_autodis": False,
+              "use_dense_pooling": True
+            }
+        },
+      "mlp_conf":
+        {
+          "activation": "relu",
+          "hidden_layers": [200, 200],
+          "dropout_list": 0.01,
+          "fc_init": "he_norm",
+          "use_bn": true,
+        },
+
+    }
