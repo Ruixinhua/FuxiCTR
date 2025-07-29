@@ -35,7 +35,8 @@ class xDeepFM(BaseModel):
                  net_dropout=0, 
                  batch_norm=False, 
                  embedding_regularizer=None, 
-                 net_regularizer=None, 
+                 net_regularizer=None,
+                 use_lr_layer=True,
                  **kwargs):
         super(xDeepFM, self).__init__(feature_map, 
                                       model_id=model_id, 
@@ -52,7 +53,9 @@ class xDeepFM(BaseModel):
                              dropout_rates=net_dropout, 
                              batch_norm=batch_norm) \
                    if dnn_hidden_units else None # in case of only CIN used
-        self.lr_layer = LogisticRegression(feature_map, use_bias=False)
+        self.use_lr_layer = use_lr_layer
+        if self.use_lr_layer:
+            self.lr_layer = LogisticRegression(feature_map, use_bias=False)
         self.cin = CompressedInteractionNet(feature_map.num_fields, cin_hidden_units, output_dim=1)
         self.compile(kwargs["optimizer"], kwargs["loss"], learning_rate)
         self.reset_parameters()
@@ -61,9 +64,12 @@ class xDeepFM(BaseModel):
     def forward(self, inputs):
         X = self.get_inputs(inputs)
         feature_emb = self.embedding_layer(X) # list of b x embedding_dim
-        lr_logit = self.lr_layer(X)
         cin_logit = self.cin(feature_emb)
-        y_pred = lr_logit + cin_logit # only LR + CIN
+        if self.use_lr_layer:
+            lr_logit = self.lr_layer(X)
+            y_pred = lr_logit + cin_logit # only LR + CIN
+        else:
+            y_pred = cin_logit  # only CIN
         if self.dnn is not None:
             dnn_logit = self.dnn(feature_emb.flatten(start_dim=1))
             y_pred += dnn_logit # LR + CIN + DNN

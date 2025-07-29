@@ -37,7 +37,8 @@ class FiBiNET(BaseModel):
                  net_dropout=0, 
                  batch_norm=False, 
                  embedding_regularizer=None,
-                 net_regularizer=None, 
+                 net_regularizer=None,
+                 use_lr_layer=True,
                  **kwargs):
         super(FiBiNET, self).__init__(feature_map, 
                                       model_id=model_id, 
@@ -50,7 +51,9 @@ class FiBiNET(BaseModel):
         self.senet_layer = SqueezeExcitation(num_fields, reduction_ratio, excitation_activation)
         self.bilinear_interaction1 = BilinearInteractionV2(num_fields, embedding_dim, bilinear_type)
         self.bilinear_interaction2 = BilinearInteractionV2(num_fields, embedding_dim, bilinear_type)
-        self.lr_layer = LogisticRegression(feature_map, use_bias=False)
+        self.use_lr_layer = use_lr_layer
+        if self.use_lr_layer:
+            self.lr_layer = LogisticRegression(feature_map, use_bias=False)
         input_dim = num_fields * (num_fields - 1) * embedding_dim
         self.dnn = MLP_Block(input_dim=input_dim,
                              output_dim=1, 
@@ -74,7 +77,10 @@ class FiBiNET(BaseModel):
         bilinear_q = self.bilinear_interaction2(senet_emb)
         comb_out = torch.flatten(torch.cat([bilinear_p, bilinear_q], dim=1), start_dim=1)
         dnn_out = self.dnn(comb_out)
-        y_pred = self.lr_layer(X) + dnn_out
+        if self.use_lr_layer:
+            y_pred = self.lr_layer(X) + dnn_out
+        else:
+            y_pred = dnn_out
         y_pred = self.output_activation(y_pred)
         return_dict = {"y_pred": y_pred}
         return return_dict
