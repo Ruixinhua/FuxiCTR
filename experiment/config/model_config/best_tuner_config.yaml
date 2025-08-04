@@ -1,0 +1,2312 @@
+PNNCL_taobaoad_x1_taobaoad_x1_006_070_010_001_MTOnly_032_0f03eba6:
+    batch_norm: false
+    batch_size: 8192
+    dataset_id: taobaoad_x1_006_070_010
+    debug_mode: false
+    default_value: 1
+    early_stop_patience: 2
+    embedding_dim: 32
+    embedding_dropout: 0
+    embedding_regularizer: 5.0e-06
+    epochs: 100
+    every_x_epochs: 1
+    feature2id_dict: {'0': 0, '1': 1}
+    feature_map_dict: {'0': 2, '1': 1}
+    group_id: group_id
+    hidden_activations: relu
+    hidden_units: [512, 256]
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mapping_feature_name: is_personalization
+    mapping_feature_type: sparse
+    metrics: [logloss, AUC]
+    model: PNNCL
+    model_root: /scratch/dliu2/FuxiCTR/slurm_logs/logs/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_regularizer: 0
+    optimizer: adam
+    pickle_feature_encoder: true
+    save_best_only: true
+    scene_num_shift: 0
+    seed: 20222023
+    shuffle: true
+    task: binary_classification
+    tower_activation: ReLU
+    tower_dropout_list: [0.0, 0.0]
+    tower_hidden_units_list:
+    - [512, 256]
+    - [512, 256, 128, 64]
+    tower_l2_reg_list: [0.0, 0.0]
+    use_bn_tower: false
+    use_domain_aware_structure: true
+    use_hdf5: true
+    use_scene_id_mapping: true
+    verbose: 0
+    workers: 3
+PNNCL_taobaoad_x1_006_070_010_001_MTOnly_031_fdd0c327:
+    batch_norm: false
+    batch_size: 8192
+    dataset_id: taobaoad_x1_006_070_010
+    debug_mode: false
+    default_value: 1
+    early_stop_patience: 2
+    embedding_dim: 32
+    embedding_dropout: 0
+    embedding_regularizer: 5.0e-06
+    epochs: 100
+    every_x_epochs: 1
+    feature2id_dict: {'0': 0, '1': 1}
+    feature_map_dict: {'0': 2, '1': 1}
+    group_id: group_id
+    hidden_activations: relu
+    hidden_units: [256, 128]
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mapping_feature_name: is_personalization
+    mapping_feature_type: sparse
+    metrics: [logloss, AUC]
+    model: PNNCL
+    model_root: /scratch/dliu2/FuxiCTR/slurm_logs/PNN_taobaoad_x1_MTOnly/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_regularizer: 0
+    optimizer: adam
+    pickle_feature_encoder: true
+    save_best_only: true
+    scene_num_shift: 0
+    seed: 20222023
+    shuffle: true
+    task: binary_classification
+    tower_activation: ReLU
+    tower_dropout_list: [0.0, 0.0]
+    tower_hidden_units_list:
+    - [512, 256]
+    - [512, 256, 128, 64]
+    tower_l2_reg_list: [0.0, 0.0]
+    use_bn_tower: false
+    use_domain_aware_structure: true
+    use_hdf5: true
+    use_scene_id_mapping: true
+    verbose: 0
+    workers: 3
+PNNCL_taobaoad_x1_006_070_010_001_MTOnly_001_c25a4e9a:
+    batch_norm: false
+    batch_size: 8192
+    dataset_id: taobaoad_x1_006_070_010
+    debug_mode: false
+    default_value: 1
+    early_stop_patience: 2
+    embedding_dim: 32
+    embedding_dropout: 0
+    embedding_regularizer: 5.0e-06
+    epochs: 100
+    every_x_epochs: 1
+    feature2id_dict: {'0': 0, '1': 1}
+    feature_map_dict: {'0': 2, '1': 1}
+    group_id: group_id
+    hidden_activations: relu
+    hidden_units: [512, 256]
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mapping_feature_name: is_personalization
+    mapping_feature_type: sparse
+    metrics: [logloss, AUC]
+    model: PNNCL
+    model_root: /scratch/dliu2/FuxiCTR/slurm_logs/PNN_taobaoad_x1_MTOnly/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_regularizer: 0
+    optimizer: adam
+    pickle_feature_encoder: true
+    save_best_only: true
+    scene_num_shift: 0
+    seed: 20222023
+    shuffle: true
+    task: binary_classification
+    tower_activation: ReLU
+    tower_dropout_list: [0.0, 0.0]
+    tower_hidden_units_list:
+    - [512, 256]
+    - [512, 256, 128, 64]
+    tower_l2_reg_list: [0.0, 0.0]
+    use_bn_tower: false
+    use_domain_aware_structure: true
+    use_hdf5: true
+    use_scene_id_mapping: true
+    verbose: 0
+    workers: 3
+PNNCL_taobaoad_x1_taobaoad_x1_006_070_010_001_CLOnly_kd_009_243d3898:
+    base_loss_weight: 1.0
+    batch_norm: false
+    batch_size: 8192
+    dataset_id: taobaoad_x1_006_070_010
+    debug_mode: false
+    distance_loss_weight: 0.0
+    early_stop_patience: 2
+    embedding_dim: 32
+    embedding_dropout: 0
+    embedding_regularizer: 5.0e-06
+    epochs: 100
+    every_x_epochs: 1
+    feature_alignment_loss_weight: 0.0
+    field_uniformity_loss_weight: 0.0
+    group_aware_loss_weight: 0.0
+    group_id: group_id
+    hidden_activations: relu
+    hidden_units: [512, 256]
+    knowledge_distillation_loss_weight: 0.01
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mask_strategy: zero
+    mask_type: Personalisation
+    metrics: [logloss, AUC]
+    model: PNNCL
+    model_root: /scratch/dliu2/FuxiCTR/slurm_logs/logs/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_regularizer: 0
+    optimizer: adam
+    personalization_feature_list: [userid, cms_segid, cms_group_id, final_gender_code,
+        age_level, pvalue_level, shopping_level, occupation, new_user_class_level]
+    pickle_feature_encoder: true
+    save_best_only: true
+    seed: 20222023
+    shuffle: true
+    task: binary_classification
+    temperature: 4.0
+    use_cl_mask: true
+    use_hdf5: true
+    verbose: 0
+    workers: 3
+PNNCL_taobaoad_x1_taobaoad_x1_006_070_010_001_CLOnly_filed_003_9dfa0fcf:
+    base_loss_weight: 1.0
+    batch_norm: false
+    batch_size: 8192
+    dataset_id: taobaoad_x1_006_070_010
+    debug_mode: false
+    distance_loss_weight: 0.002
+    early_stop_patience: 2
+    embedding_dim: 32
+    embedding_dropout: 0
+    embedding_regularizer: 5.0e-06
+    epochs: 100
+    every_x_epochs: 1
+    feature_alignment_loss_weight: 0.0
+    field_uniformity_loss_weight: 0.0
+    group_aware_loss_weight: 0.0
+    group_id: group_id
+    hidden_activations: relu
+    hidden_units: [512, 256]
+    knowledge_distillation_loss_weight: 0.0
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mask_strategy: zero
+    mask_type: Personalisation
+    metrics: [logloss, AUC]
+    model: PNNCL
+    model_root: /scratch/dliu2/FuxiCTR/slurm_logs/logs/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_regularizer: 0
+    optimizer: adam
+    personalization_feature_list: [userid, cms_segid, cms_group_id, final_gender_code,
+        age_level, pvalue_level, shopping_level, occupation, new_user_class_level]
+    pickle_feature_encoder: true
+    save_best_only: true
+    seed: 20222023
+    shuffle: true
+    task: binary_classification
+    use_cl_mask: true
+    use_hdf5: true
+    verbose: 0
+    workers: 3
+PNNCL_taobaoad_x1_taobaoad_x1_006_070_010_001_CLOnly_filed_002_7475ceff:
+    base_loss_weight: 1.0
+    batch_norm: false
+    batch_size: 8192
+    dataset_id: taobaoad_x1_006_070_010
+    debug_mode: false
+    distance_loss_weight: 0.001
+    early_stop_patience: 2
+    embedding_dim: 32
+    embedding_dropout: 0
+    embedding_regularizer: 5.0e-06
+    epochs: 100
+    every_x_epochs: 1
+    feature_alignment_loss_weight: 0.0
+    field_uniformity_loss_weight: 0.0
+    group_aware_loss_weight: 0.0
+    group_id: group_id
+    hidden_activations: relu
+    hidden_units: [512, 256]
+    knowledge_distillation_loss_weight: 0.0
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mask_strategy: zero
+    mask_type: Personalisation
+    metrics: [logloss, AUC]
+    model: PNNCL
+    model_root: /scratch/dliu2/FuxiCTR/slurm_logs/logs/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_regularizer: 0
+    optimizer: adam
+    personalization_feature_list: [userid, cms_segid, cms_group_id, final_gender_code,
+        age_level, pvalue_level, shopping_level, occupation, new_user_class_level]
+    pickle_feature_encoder: true
+    save_best_only: true
+    seed: 20222023
+    shuffle: true
+    task: binary_classification
+    use_cl_mask: true
+    use_hdf5: true
+    verbose: 0
+    workers: 3
+PNNCL_taobaoad_x1_taobaoad_x1_006_070_010_001_CLOnly_group_001_7475ceff:
+    base_loss_weight: 1.0
+    batch_norm: false
+    batch_size: 8192
+    dataset_id: taobaoad_x1_006_070_010
+    debug_mode: false
+    distance_loss_weight: 0.0
+    early_stop_patience: 2
+    embedding_dim: 32
+    embedding_dropout: 0
+    embedding_regularizer: 5.0e-06
+    epochs: 100
+    every_x_epochs: 1
+    feature_alignment_loss_weight: 0.0
+    field_uniformity_loss_weight: 0.0
+    group_aware_loss_weight: 0.001
+    group_id: group_id
+    hidden_activations: relu
+    hidden_units: [512, 256]
+    knowledge_distillation_loss_weight: 0.0
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mask_strategy: zero
+    mask_type: Personalisation
+    metrics: [logloss, AUC]
+    model: PNNCL
+    model_root: /scratch/dliu2/FuxiCTR/slurm_logs/logs/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_regularizer: 0
+    optimizer: adam
+    personalization_feature_list: [userid, cms_segid, cms_group_id, final_gender_code,
+        age_level, pvalue_level, shopping_level, occupation, new_user_class_level]
+    pickle_feature_encoder: true
+    save_best_only: true
+    seed: 20222023
+    shuffle: true
+    task: binary_classification
+    use_cl_mask: true
+    use_hdf5: true
+    verbose: 0
+    workers: 3
+PNNCL_taobaoad_x1_006_070_010_001_CLOnly_group_001_c7b94d8c:
+    base_loss_weight: 1.0
+    batch_norm: false
+    batch_size: 8192
+    dataset_id: taobaoad_x1_006_070_010
+    debug_mode: false
+    distance_loss_weight: 0.0
+    early_stop_patience: 2
+    embedding_dim: 32
+    embedding_dropout: 0
+    embedding_regularizer: 5.0e-06
+    epochs: 10
+    every_x_epochs: 1
+    feature_alignment_loss_weight: 0.0
+    field_uniformity_loss_weight: 0.0
+    group_aware_loss_weight: 0.001
+    group_id: group_id
+    hidden_activations: relu
+    hidden_units: [512, 256]
+    knowledge_distillation_loss_weight: 0.0
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mask_strategy: zero
+    mask_type: Personalisation
+    metrics: [logloss, AUC]
+    model: PNNCL
+    model_root: /scratch/dliu2/FuxiCTR/slurm_logs/PNNCL_CLOnly_group/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_regularizer: 0
+    optimizer: adam
+    personalization_feature_list: [userid, cms_segid, cms_group_id, final_gender_code,
+        age_level, pvalue_level, shopping_level, occupation, new_user_class_level]
+    pickle_feature_encoder: true
+    save_best_only: true
+    seed: 20222023
+    shuffle: true
+    task: binary_classification
+    use_cl_mask: true
+    use_hdf5: true
+    verbose: 0
+PNNCL_taobaoad_x1_006_070_010_001_CLOnly_010_075a091e:
+    base_loss_weight: 1.0
+    batch_norm: false
+    batch_size: 8192
+    dataset_id: taobaoad_x1_006_070_010
+    debug_mode: false
+    distance_loss_weight: 0.001
+    early_stop_patience: 2
+    embedding_dim: 32
+    embedding_dropout: 0
+    embedding_regularizer: 5.0e-06
+    epochs: 10
+    every_x_epochs: 1
+    feature_alignment_loss_weight: 0.0
+    field_uniformity_loss_weight: 0.0
+    group_aware_loss_weight: 0.0
+    group_id: group_id
+    hidden_activations: relu
+    hidden_units: [512, 256]
+    knowledge_distillation_loss_weight: 0.0
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mask_strategy: zero
+    mask_type: Personalisation
+    metrics: [logloss, AUC]
+    model: PNNCL
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_regularizer: 0
+    optimizer: adam
+    personalization_feature_list: [userid, cms_segid, cms_group_id, final_gender_code,
+        age_level, pvalue_level, shopping_level, occupation, new_user_class_level]
+    pickle_feature_encoder: true
+    save_best_only: true
+    seed: 20222023
+    shuffle: true
+    task: binary_classification
+    temperature: 4.0
+    use_cl_mask: true
+    use_hdf5: true
+    verbose: 0
+PNNCL_taobaoad_x1_taobaoad_x1_006_070_010_001_CLOnly_kd_012_efb1b40f:
+    base_loss_weight: 1.0
+    batch_norm: false
+    batch_size: 8192
+    dataset_id: taobaoad_x1_006_070_010
+    debug_mode: false
+    distance_loss_weight: 0.0
+    early_stop_patience: 2
+    embedding_dim: 32
+    embedding_dropout: 0
+    embedding_regularizer: 5.0e-06
+    epochs: 100
+    every_x_epochs: 1
+    feature_alignment_loss_weight: 0.0
+    field_uniformity_loss_weight: 0.0
+    group_aware_loss_weight: 0.0
+    group_id: group_id
+    hidden_activations: relu
+    hidden_units: [512, 256]
+    knowledge_distillation_loss_weight: 0.01
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mask_strategy: zero
+    mask_type: Personalisation
+    metrics: [logloss, AUC]
+    model: PNNCL
+    model_root: /scratch/dliu2/FuxiCTR/slurm_logs/logs/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_regularizer: 0
+    optimizer: adam
+    personalization_feature_list: [userid, cms_segid, cms_group_id, final_gender_code,
+        age_level, pvalue_level, shopping_level, occupation, new_user_class_level]
+    pickle_feature_encoder: true
+    save_best_only: true
+    seed: 20222023
+    shuffle: true
+    task: binary_classification
+    temperature: 10.0
+    use_cl_mask: true
+    use_hdf5: true
+    verbose: 0
+    workers: 3
+PNNCL_taobaoad_x1_taobaoad_x1_006_070_010_001_CLOnly_kd_003_2fa3a146:
+    base_loss_weight: 1.0
+    batch_norm: false
+    batch_size: 8192
+    dataset_id: taobaoad_x1_006_070_010
+    debug_mode: false
+    distance_loss_weight: 0.0
+    early_stop_patience: 2
+    embedding_dim: 32
+    embedding_dropout: 0
+    embedding_regularizer: 5.0e-06
+    epochs: 100
+    every_x_epochs: 1
+    feature_alignment_loss_weight: 0.0
+    field_uniformity_loss_weight: 0.0
+    group_aware_loss_weight: 0.0
+    group_id: group_id
+    hidden_activations: relu
+    hidden_units: [512, 256]
+    knowledge_distillation_loss_weight: 0.001
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mask_strategy: zero
+    mask_type: Personalisation
+    metrics: [logloss, AUC]
+    model: PNNCL
+    model_root: /scratch/dliu2/FuxiCTR/slurm_logs/logs/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_regularizer: 0
+    optimizer: adam
+    personalization_feature_list: [userid, cms_segid, cms_group_id, final_gender_code,
+        age_level, pvalue_level, shopping_level, occupation, new_user_class_level]
+    pickle_feature_encoder: true
+    save_best_only: true
+    seed: 20222023
+    shuffle: true
+    task: binary_classification
+    temperature: 8.0
+    use_cl_mask: true
+    use_hdf5: true
+    verbose: 0
+    workers: 3
+PNNCL_taobaoad_x1_006_070_010_001_CLOnly_011_86e466f1:
+    base_loss_weight: 1.0
+    batch_norm: false
+    batch_size: 8192
+    dataset_id: taobaoad_x1_006_070_010
+    debug_mode: false
+    distance_loss_weight: 0.001
+    early_stop_patience: 2
+    embedding_dim: 32
+    embedding_dropout: 0
+    embedding_regularizer: 5.0e-06
+    epochs: 10
+    every_x_epochs: 1
+    feature_alignment_loss_weight: 0.0
+    field_uniformity_loss_weight: 0.0
+    group_aware_loss_weight: 0.0
+    group_id: group_id
+    hidden_activations: relu
+    hidden_units: [512, 256]
+    knowledge_distillation_loss_weight: 0.005
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mask_strategy: zero
+    mask_type: Personalisation
+    metrics: [logloss, AUC]
+    model: PNNCL
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_regularizer: 0
+    optimizer: adam
+    personalization_feature_list: [userid, cms_segid, cms_group_id, final_gender_code,
+        age_level, pvalue_level, shopping_level, occupation, new_user_class_level]
+    pickle_feature_encoder: true
+    save_best_only: true
+    seed: 20222023
+    shuffle: true
+    task: binary_classification
+    temperature: 4.0
+    use_cl_mask: true
+    use_hdf5: true
+    verbose: 0
+PNNCL_taobaoad_x1_006_070_010_001_MTCL_006_8568a61d:
+    base_loss_weight: 1.0
+    batch_norm: false
+    batch_size: 8192
+    dataset_id: taobaoad_x1_006_070_010
+    debug_mode: false
+    default_value: 1
+    distance_loss_weight: 0.0
+    early_stop_patience: 2
+    embedding_dim: 32
+    embedding_dropout: 0
+    embedding_regularizer: 5.0e-06
+    epochs: 100
+    every_x_epochs: 1
+    feature2id_dict: {'0': 0, '1': 1}
+    feature_alignment_loss_weight: 0.0
+    feature_map_dict: {'0': 2, '1': 1}
+    field_uniformity_loss_weight: 0.0
+    group_aware_loss_weight: 0.001
+    group_id: group_id
+    hidden_activations: relu
+    hidden_units: [512, 256]
+    knowledge_distillation_loss_weight: 0.01
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mapping_feature_name: is_personalization
+    mapping_feature_type: sparse
+    mask_strategy: zero
+    mask_type: Personalisation
+    metrics: [logloss, AUC]
+    model: PNNCL
+    model_root: /scratch/dliu2/FuxiCTR/slurm_logs/PNNCL_taobaoad_x1_MTCL/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_regularizer: 0
+    optimizer: adam
+    personalization_feature_list: [userid, cms_segid, cms_group_id, final_gender_code,
+        age_level, pvalue_level, shopping_level, occupation, new_user_class_level]
+    pickle_feature_encoder: true
+    save_best_only: true
+    scene_num_shift: 0
+    seed: 20222023
+    shuffle: true
+    task: binary_classification
+    temperature: 4.0
+    tower_activation: ReLU
+    tower_dropout_list: [0.0, 0.0]
+    tower_hidden_units_list:
+    - [512, 256]
+    - [512, 256, 128, 64]
+    tower_l2_reg_list: [0.0, 0.0]
+    use_bn_tower: false
+    use_cl_mask: true
+    use_domain_aware_structure: true
+    use_hdf5: true
+    use_scene_id_mapping: true
+    verbose: 0
+    workers: 3
+
+PNNCL_avazu_x4_080_010_013_baseline_MT_108_06974113:
+    batch_norm: false
+    batch_size: 10000
+    dataset_id: avazu_x4_080_010
+    debug: false
+    debug_mode: false
+    default_value: 1
+    early_stop_patience: 2
+    embedding_dim: 40
+    embedding_dropout: 0
+    embedding_regularizer: 0
+    epochs: 5
+    feature2id_dict: {'0': 0, '1': 1}
+    feature_map_dict: {'0': 2, '1': 1}
+    hidden_activations: relu
+    hidden_units: [512, 256]
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mapping_feature_name: is_personalization
+    mapping_feature_type: sparse
+    metrics: [logloss, AUC]
+    model: PNNCL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/logs/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_regularizer: 0
+    optimizer: adam
+    pickle_feature_encoder: true
+    save_best_only: true
+    scene_num_shift: 0
+    seed: 2019
+    shuffle: true
+    task: binary_classification
+    tower_activation: ReLU
+    tower_dropout_list: [0.0, 0.0]
+    tower_hidden_units_list:
+    - [256, 128, 64]
+    - [512, 256, 128, 64]
+    tower_l2_reg_list: [0.0, 0.0]
+    use_bn_tower: false
+    use_domain_aware_structure: true
+    use_hdf5: true
+    use_scene_id_mapping: true
+    verbose: 0
+    workers: 3
+PNNCL_avazu_x4_080_010_013_baseline_phase2_023_1407aff9:  # CLOnly
+    base_loss_weight: 1.0
+    batch_norm: false
+    batch_size: 10000
+    dataset_id: avazu_x4_080_010
+    debug: false
+    debug_mode: false
+    distance_loss_weight: 0.001
+    early_stop_patience: 2
+    embedding_dim: 40
+    embedding_dropout: 0
+    embedding_regularizer: 0
+    epochs: 10
+    feature_alignment_loss_weight: 0.0
+    field_uniformity_loss_weight: 0.005
+    group_aware_loss_weight: 0.0
+    hidden_activations: relu
+    hidden_units: [400, 400, 400]
+    knowledge_distillation_loss_weight: 0.0
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mask_strategy: zero
+    mask_type: Personalisation
+    metrics: [logloss, AUC]
+    model: PNNCL
+    model_root: /work/gm85/m85000/FuxiCTR/logs/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_regularizer: 0
+    optimizer: adam
+    personalization_feature_list: [device_ip, device_id]
+    pickle_feature_encoder: true
+    save_best_only: true
+    seed: 2019
+    shuffle: true
+    task: binary_classification
+    use_cl_mask: true
+    use_hdf5: true
+    verbose: 0
+    workers: 3
+PNNCL_avazu_x4_080_010_013_baseline_CL_042_b37cb698:
+    base_loss_weight: 1.0
+    batch_norm: false
+    batch_size: 10000
+    dataset_id: avazu_x4_080_010
+    debug: false
+    debug_mode: false
+    distance_loss_weight: 0.001
+    early_stop_patience: 2
+    embedding_dim: 40
+    embedding_dropout: 0
+    embedding_regularizer: 0
+    epochs: 5
+    feature_alignment_loss_weight: 0.0
+    field_uniformity_loss_weight: 0.005
+    group_aware_loss_weight: 0.005
+    hidden_activations: relu
+    hidden_units: [400, 400, 400]
+    knowledge_distillation_loss_weight: 0.01
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mask_strategy: zero
+    mask_type: Personalisation
+    metrics: [logloss, AUC]
+    model: PNNCL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/PNNCL_CLOnly/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_regularizer: 0
+    optimizer: adam
+    personalization_feature_list: [device_ip, device_id]
+    pickle_feature_encoder: true
+    save_best_only: true
+    seed: 2019
+    shuffle: true
+    task: binary_classification
+    temperature: 4.0
+    use_cl_mask: true
+    use_hdf5: true
+    verbose: 0
+    workers: 3
+PNNCL_avazu_x4_080_010_013_baseline_MTCL_041_90cebc7f:
+    base_loss_weight: 1.0
+    batch_norm: false
+    batch_size: 10000
+    dataset_id: avazu_x4_080_010
+    debug: false
+    debug_mode: false
+    default_value: 1
+    distance_loss_weight: 0.0
+    early_stop_patience: 2
+    embedding_dim: 40
+    embedding_dropout: 0
+    embedding_regularizer: 0
+    epochs: 5
+    feature2id_dict: {'0': 0, '1': 1}
+    feature_alignment_loss_weight: 0.0
+    feature_map_dict: {'0': 2, '1': 1}
+    field_uniformity_loss_weight: 0.005
+    group_aware_loss_weight: 0.0
+    hidden_activations: relu
+    hidden_units: [512, 256]
+    knowledge_distillation_loss_weight: 0.0
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mapping_feature_name: is_personalization
+    mapping_feature_type: sparse
+    mask_strategy: zero
+    mask_type: Personalisation
+    metrics: [logloss, AUC]
+    model: PNNCL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/PNNCL_avazu_MTCL/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_regularizer: 0
+    num_workers: 0
+    optimizer: adam
+    personalization_feature_list: [device_ip, device_id]
+    pickle_feature_encoder: true
+    save_best_only: true
+    scene_num_shift: 0
+    seed: 2019
+    shuffle: true
+    task: binary_classification
+    tower_activation: ReLU
+    tower_dropout_list: [0.0, 0.0]
+    tower_hidden_units_list:
+    - [256, 128, 64]
+    - [512, 256, 128, 64]
+    tower_l2_reg_list: [0.0, 0.0]
+    use_bn_tower: false
+    use_cl_mask: true
+    use_domain_aware_structure: true
+    use_hdf5: true
+    use_scene_id_mapping: true
+    verbose: 0
+    workers: 3
+PNNCL_avazu_x4_080_010_013_baseline_MTCL_011_a27738fb:
+    base_loss_weight: 1.0
+    batch_norm: false
+    batch_size: 10000
+    dataset_id: avazu_x4_080_010
+    debug: false
+    debug_mode: false
+    default_value: 1
+    distance_loss_weight: 0.0
+    early_stop_patience: 2
+    embedding_dim: 40
+    embedding_dropout: 0
+    embedding_regularizer: 0
+    epochs: 5
+    feature2id_dict: {'0': 0, '1': 1}
+    feature_alignment_loss_weight: 0.0
+    feature_map_dict: {'0': 2, '1': 1}
+    field_uniformity_loss_weight: 0.005
+    group_aware_loss_weight: 0.005
+    hidden_activations: relu
+    hidden_units: [400, 400, 400]
+    knowledge_distillation_loss_weight: 0.0
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mapping_feature_name: is_personalization
+    mapping_feature_type: sparse
+    mask_strategy: zero
+    mask_type: Personalisation
+    metrics: [logloss, AUC]
+    model: PNNCL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/PNNCL_avazu_MTCL/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_regularizer: 0
+    num_workers: 0
+    optimizer: adam
+    personalization_feature_list: [device_ip, device_id]
+    pickle_feature_encoder: true
+    save_best_only: true
+    scene_num_shift: 0
+    seed: 2019
+    shuffle: true
+    task: binary_classification
+    tower_activation: ReLU
+    tower_dropout_list: [0.0, 0.0]
+    tower_hidden_units_list:
+    - [256, 128, 64]
+    - [512, 256, 128, 64]
+    tower_l2_reg_list: [0.0, 0.0]
+    use_bn_tower: false
+    use_cl_mask: true
+    use_domain_aware_structure: true
+    use_hdf5: true
+    use_scene_id_mapping: true
+    verbose: 0
+    workers: 3
+
+PNNCL_criteo_private_ad_cvr_002_69a1df28_MTOnly_006_7a250b05:
+    batch_norm: false
+    batch_size: 10000
+    dataset_id: criteo_private_ad_cvr
+    debug: false
+    debug_mode: false
+    default_value: 1
+    early_stop_patience: 2
+    embedding_dim: 16
+    embedding_dropout: 0
+    embedding_regularizer: 1.0e-05
+    epochs: 15
+    feature2id_dict: {'0': 0, '1': 1}
+    feature_map_dict: {'0': 2, '1': 1}
+    hidden_activations: relu
+    hidden_units: [1000, 1000]
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mapping_feature_name: is_personalization
+    mapping_feature_type: sparse
+    metrics: [logloss, AUC]
+    model: PNNCL
+    model_root: /scratch/dliu2/FuxiCTR/slurm_logs/PNNCL_CriteoP_MTOnly/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0.2
+    net_regularizer: 0
+    optimizer: adam
+    pickle_feature_encoder: true
+    save_best_only: true
+    scene_num_shift: 0
+    seed: 2019
+    shuffle: true
+    task: binary_classification
+    tower_activation: ReLU
+    tower_dropout_list: [0.0, 0.0]
+    tower_hidden_units_list:
+    - [256, 128]
+    - [256, 128]
+    tower_l2_reg_list: [0.0, 0.0]
+    use_bn_tower: false
+    use_domain_aware_structure: true
+    use_hdf5: true
+    use_scene_id_mapping: true
+    verbose: 0
+    workers: 3
+PNNCL_criteo_private_ad_cvr_002_69a1df28_MTOnly_001_0519e046:
+    batch_norm: false
+    batch_size: 10000
+    dataset_id: criteo_private_ad_cvr
+    debug: false
+    debug_mode: false
+    default_value: 1
+    early_stop_patience: 2
+    embedding_dim: 16
+    embedding_dropout: 0
+    embedding_regularizer: 1.0e-05
+    epochs: 15
+    feature2id_dict: {'0': 0, '1': 1}
+    feature_map_dict: {'0': 2, '1': 1}
+    hidden_activations: relu
+    hidden_units: [1000, 1000]
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mapping_feature_name: is_personalization
+    mapping_feature_type: sparse
+    metrics: [logloss, AUC]
+    model: PNNCL
+    model_root: /scratch/dliu2/FuxiCTR/slurm_logs/PNNCL_CriteoP_MTOnly/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0.2
+    net_regularizer: 0
+    optimizer: adam
+    pickle_feature_encoder: true
+    save_best_only: true
+    scene_num_shift: 0
+    seed: 2019
+    shuffle: true
+    task: binary_classification
+    tower_activation: ReLU
+    tower_dropout_list: [0.0, 0.0]
+    tower_hidden_units_list:
+    - [512, 256, 128, 64]
+    - [512, 256, 128, 64]
+    tower_l2_reg_list: [0.0, 0.0]
+    use_bn_tower: false
+    use_domain_aware_structure: true
+    use_hdf5: true
+    use_scene_id_mapping: true
+    verbose: 0
+    workers: 3
+
+
+DCNv3CL_taobaoad_x1_006_070_010_16_005_q9r1s2t3_MT_005_a3ee52ec:
+    batch_norm: true
+    batch_size: 10000
+    dataset_id: taobaoad_x1_006_070_010
+    debug_mode: false
+    deep_net_dropout: 0.1
+    default_value: 1
+    early_stop_patience: 1
+    embedding_dim: 32
+    embedding_regularizer: 1.0e-05
+    epochs: 5
+    feature2id_dict: {'0': 0, '1': 1}
+    feature_map_dict: {'0': 2, '1': 1}
+    group_id: group_id
+    layer_norm: true
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mapping_feature_name: is_personalization
+    mapping_feature_type: sparse
+    metrics: [AUC, logloss]
+    model: DCNv3CL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/DCNv3CL_taobao_MTOnly/
+    monitor: {AUC: 1}
+    monitor_mode: max
+    net_regularizer: 0
+    num_deep_cross_layers: 4
+    num_heads: 8
+    num_shallow_cross_layers: 4
+    num_workers: 1
+    optimizer: adam
+    pickle_feature_encoder: true
+    save_best_only: true
+    scene_num_shift: 0
+    seed: 2021
+    shallow_net_dropout: 0.1
+    shuffle: true
+    task: binary_classification
+    tower_activation: relu
+    tower_dropout_list: [0.0, 0.0]
+    tower_hidden_units_list:
+    - [256, 128]
+    - [256, 128]
+    tower_l2_reg_list: [0.0, 0.0]
+    use_bn_tower: false
+    use_domain_aware_structure: true
+    use_scene_id_mapping: true
+    verbose: 0
+DCNv3CL_taobaoad_x1_006_070_010_16_005_q9r1s2t3_MT16_003_4b839d2b:
+    batch_norm: true
+    batch_size: 10000
+    dataset_id: taobaoad_x1_006_070_010
+    debug_mode: false
+    deep_net_dropout: 0.1
+    default_value: 1
+    early_stop_patience: 1
+    embedding_dim: 16
+    embedding_regularizer: 1.0e-05
+    epochs: 5
+    feature2id_dict: {'0': 0, '1': 1}
+    feature_map_dict: {'0': 2, '1': 1}
+    group_id: group_id
+    layer_norm: true
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mapping_feature_name: is_personalization
+    mapping_feature_type: sparse
+    metrics: [AUC, logloss]
+    model: DCNv3CL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/DCNv3CL_taobao_MTOnly16/
+    monitor: {AUC: 1}
+    monitor_mode: max
+    net_regularizer: 0
+    num_deep_cross_layers: 4
+    num_heads: 4
+    num_shallow_cross_layers: 4
+    num_workers: 1
+    optimizer: adam
+    pickle_feature_encoder: true
+    save_best_only: true
+    scene_num_shift: 0
+    seed: 2021
+    shallow_net_dropout: 0.1
+    shuffle: true
+    task: binary_classification
+    tower_activation: relu
+    tower_dropout_list: [0.0, 0.0]
+    tower_hidden_units_list:
+    - [512, 256, 128]
+    - [512, 256, 128]
+    tower_l2_reg_list: [0.0, 0.0]
+    use_bn_tower: false
+    use_domain_aware_structure: true
+    use_scene_id_mapping: true
+    verbose: 0
+
+DCNv3CL_taobaoad_x1_006_070_010_16_005_q9r1s2t3_base_007_1d326f36:
+    batch_norm: true
+    batch_size: 10000
+    dataset_id: taobaoad_x1_006_070_010
+    debug_mode: false
+    deep_net_dropout: 0.1
+    early_stop_patience: 1
+    embedding_dim: 16
+    embedding_regularizer: 1.0e-05
+    epochs: 5
+    group_id: group_id
+    layer_norm: true
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    metrics: [AUC, logloss]
+    model: DCNv3CL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/DCNv3CL_taobao_base/
+    monitor: {AUC: 1}
+    monitor_mode: max
+    net_regularizer: 0
+    num_deep_cross_layers: 5
+    num_heads: 4
+    num_shallow_cross_layers: 4
+    num_workers: 1
+    optimizer: adam
+    pickle_feature_encoder: true
+    save_best_only: true
+    seed: 2021
+    shallow_net_dropout: 0.1
+    shuffle: true
+    task: binary_classification
+    verbose: 0
+DCNv3CL_taobaoad_x1_006_070_010_16_005_q9r1s2t3_base_002_2f80881d:
+    batch_norm: true
+    batch_size: 10000
+    dataset_id: taobaoad_x1_006_070_010
+    debug_mode: false
+    deep_net_dropout: 0.1
+    early_stop_patience: 1
+    embedding_dim: 16
+    embedding_regularizer: 1.0e-05
+    epochs: 5
+    group_id: group_id
+    layer_norm: true
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    metrics: [AUC, logloss]
+    model: DCNv3CL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/DCNv3CL_taobao_base/
+    monitor: {AUC: 1}
+    monitor_mode: max
+    net_regularizer: 0
+    num_deep_cross_layers: 4
+    num_heads: 8
+    num_shallow_cross_layers: 4
+    num_workers: 1
+    optimizer: adam
+    pickle_feature_encoder: true
+    save_best_only: true
+    seed: 2021
+    shallow_net_dropout: 0.1
+    shuffle: true
+    task: binary_classification
+    verbose: 0
+DCNv3CL_taobaoad_x1_006_070_010_16_005_q9r1s2t3_base_003_1d326f36:
+    batch_norm: true
+    batch_size: 10000
+    dataset_id: taobaoad_x1_006_070_010
+    debug_mode: false
+    deep_net_dropout: 0.1
+    early_stop_patience: 1
+    embedding_dim: 16
+    embedding_regularizer: 1.0e-05
+    epochs: 5
+    group_id: group_id
+    layer_norm: true
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    metrics: [AUC, logloss]
+    model: DCNv3CL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/DCNv3CL_taobao_base/
+    monitor: {AUC: 1}
+    monitor_mode: max
+    net_regularizer: 0
+    num_deep_cross_layers: 4
+    num_heads: 4
+    num_shallow_cross_layers: 5
+    num_workers: 1
+    optimizer: adam
+    pickle_feature_encoder: true
+    save_best_only: true
+    seed: 2021
+    shallow_net_dropout: 0.1
+    shuffle: true
+    task: binary_classification
+    verbose: 0
+
+DCNv3CL_avazu_x4_080_010_16_005_q9r1s2t3_CL_003_2546d26d:
+    base_loss_weight: 1.0
+    batch_norm: true
+    batch_size: 10000
+    dataset_id: avazu_x4_080_010
+    debug_mode: false
+    deep_net_dropout: 0.1
+    distance_loss_weight: 0.001
+    early_stop_patience: 1
+    embedding_dim: 32
+    embedding_regularizer: 0.0
+    epochs: 2
+    feature_alignment_loss_weight: 0.0
+    field_uniformity_loss_weight: 0.001
+    group_aware_loss_weight: 0.002
+    group_id: null
+    knowledge_distillation_loss_weight: 0.005
+    layer_norm: true
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mask_strategy: zero
+    mask_type: Personalisation
+    metrics: [AUC, logloss]
+    model: DCNv3CL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/DCNv3CL_CLOnly_avazu/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_regularizer: 0
+    num_deep_cross_layers: 3
+    num_heads: 8
+    num_shallow_cross_layers: 4
+    num_workers: 1
+    optimizer: adam
+    personalization_feature_list: [device_ip, device_id]
+    pickle_feature_encoder: true
+    save_best_only: true
+    seed: 2019
+    shallow_net_dropout: 0.1
+    shuffle: true
+    task: binary_classification
+    temperature: 4.0
+    use_cl_mask: true
+    verbose: 0
+DCNv3CL_avazu_x4_080_010_16_005_q9r1s2t3_MT_001_e063cc09:
+    batch_norm: true
+    batch_size: 10000
+    dataset_id: avazu_x4_080_010
+    debug_mode: false
+    deep_net_dropout: 0.1
+    default_value: 1
+    early_stop_patience: 1
+    embedding_dim: 32
+    embedding_regularizer: 0.0
+    epochs: 2
+    feature2id_dict: {'0': 0, '1': 1}
+    feature_map_dict: {'0': 2, '1': 1}
+    group_id: null
+    layer_norm: true
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mapping_feature_name: is_personalization
+    mapping_feature_type: sparse
+    metrics: [AUC, logloss]
+    model: DCNv3CL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/DCNv3CL_avazu_x4_MT/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_regularizer: 0
+    num_deep_cross_layers: 3
+    num_heads: 8
+    num_shallow_cross_layers: 3
+    num_workers: 1
+    optimizer: adam
+    pickle_feature_encoder: true
+    save_best_only: true
+    scene_num_shift: 0
+    seed: 2019
+    shallow_net_dropout: 0.1
+    shuffle: true
+    task: binary_classification
+    tower_activation: relu
+    tower_dropout_list: [0.0, 0.0]
+    tower_hidden_units_list:
+    - [256, 128, 64]
+    - [256, 128, 64]
+    tower_l2_reg_list: [0.0, 0.0]
+    use_bn_tower: false
+    use_domain_aware_structure: true
+    use_scene_id_mapping: true
+    verbose: 0
+DCNv3CL_avazu_x4_080_010_16_005_q9r1s2t3_MT_008_4c59ed17:
+    batch_norm: true
+    batch_size: 10000
+    dataset_id: avazu_x4_080_010
+    debug_mode: false
+    deep_net_dropout: 0.1
+    default_value: 1
+    early_stop_patience: 1
+    embedding_dim: 32
+    embedding_regularizer: 0.0
+    epochs: 2
+    feature2id_dict: {'0': 0, '1': 1}
+    feature_map_dict: {'0': 2, '1': 1}
+    group_id: null
+    layer_norm: true
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mapping_feature_name: is_personalization
+    mapping_feature_type: sparse
+    metrics: [AUC, logloss]
+    model: DCNv3CL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/DCNv3CL_avazu_x4_MT/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_regularizer: 0
+    num_deep_cross_layers: 3
+    num_heads: 8
+    num_shallow_cross_layers: 4
+    num_workers: 1
+    optimizer: adam
+    pickle_feature_encoder: true
+    save_best_only: true
+    scene_num_shift: 0
+    seed: 2019
+    shallow_net_dropout: 0.1
+    shuffle: true
+    task: binary_classification
+    tower_activation: relu
+    tower_dropout_list: [0.0, 0.0]
+    tower_hidden_units_list:
+    - [512, 256, 128, 64]
+    - [512, 256, 128, 64]
+    tower_l2_reg_list: [0.0, 0.0]
+    use_bn_tower: false
+    use_domain_aware_structure: true
+    use_scene_id_mapping: true
+    verbose: 0
+DCNv3CL_avazu_x4_080_010_16_005_q9r1s2t3_MT_002_9cebfa61:
+    batch_norm: true
+    batch_size: 10000
+    dataset_id: avazu_x4_080_010
+    debug_mode: false
+    deep_net_dropout: 0.1
+    default_value: 1
+    early_stop_patience: 1
+    embedding_dim: 32
+    embedding_regularizer: 0.0
+    epochs: 2
+    feature2id_dict: {'0': 0, '1': 1}
+    feature_map_dict: {'0': 2, '1': 1}
+    group_id: null
+    layer_norm: true
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mapping_feature_name: is_personalization
+    mapping_feature_type: sparse
+    metrics: [AUC, logloss]
+    model: DCNv3CL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/DCNv3CL_avazu_x4_MT/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_regularizer: 0
+    num_deep_cross_layers: 3
+    num_heads: 8
+    num_shallow_cross_layers: 3
+    num_workers: 1
+    optimizer: adam
+    pickle_feature_encoder: true
+    save_best_only: true
+    scene_num_shift: 0
+    seed: 2019
+    shallow_net_dropout: 0.1
+    shuffle: true
+    task: binary_classification
+    tower_activation: relu
+    tower_dropout_list: [0.0, 0.0]
+    tower_hidden_units_list:
+    - [512, 256, 128, 64]
+    - [512, 256, 128, 64]
+    tower_l2_reg_list: [0.0, 0.0]
+    use_bn_tower: false
+    use_domain_aware_structure: true
+    use_scene_id_mapping: true
+    verbose: 0
+DCNv3CL_avazu_x4_080_010_16_005_q9r1s2t3_MT_006_eaeeec20:
+    batch_norm: true
+    batch_size: 10000
+    dataset_id: avazu_x4_080_010
+    debug_mode: false
+    deep_net_dropout: 0.1
+    default_value: 1
+    early_stop_patience: 1
+    embedding_dim: 32
+    embedding_regularizer: 0.0
+    epochs: 2
+    feature2id_dict: {'0': 0, '1': 1}
+    feature_map_dict: {'0': 2, '1': 1}
+    group_id: null
+    layer_norm: true
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mapping_feature_name: is_personalization
+    mapping_feature_type: sparse
+    metrics: [AUC, logloss]
+    model: DCNv3CL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/DCNv3CL_avazu_x4_MT/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_regularizer: 0
+    num_deep_cross_layers: 3
+    num_heads: 8
+    num_shallow_cross_layers: 3
+    num_workers: 1
+    optimizer: adam
+    pickle_feature_encoder: true
+    save_best_only: true
+    scene_num_shift: 0
+    seed: 2019
+    shallow_net_dropout: 0.1
+    shuffle: true
+    task: binary_classification
+    tower_activation: relu
+    tower_dropout_list: [0.0, 0.0]
+    tower_hidden_units_list:
+    - [64, 32]
+    - [64, 32]
+    tower_l2_reg_list: [0.0, 0.0]
+    use_bn_tower: false
+    use_domain_aware_structure: true
+    use_scene_id_mapping: true
+    verbose: 0
+DCNv3CL_avazu_x4_080_010_16_005_q9r1s2t3_CL_group_003_180473cf:
+    base_loss_weight: 1.0
+    batch_norm: true
+    batch_size: 10000
+    dataset_id: avazu_x4_080_010
+    debug_mode: false
+    deep_net_dropout: 0.1
+    distance_loss_weight: 0.0
+    early_stop_patience: 1
+    embedding_dim: 32
+    embedding_regularizer: 0.0
+    epochs: 2
+    feature_alignment_loss_weight: 0.0
+    field_uniformity_loss_weight: 0.0
+    group_aware_loss_weight: 0.001
+    group_id: null
+    knowledge_distillation_loss_weight: 0.0
+    layer_norm: true
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mask_strategy: noise
+    mask_type: Personalisation
+    metrics: [AUC, logloss]
+    model: DCNv3CL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/DCNv3CL_avazu_CL_group/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_regularizer: 0
+    num_deep_cross_layers: 3
+    num_heads: 8
+    num_shallow_cross_layers: 4
+    num_workers: 0
+    optimizer: adam
+    personalization_feature_list: [device_ip, device_id]
+    pickle_feature_encoder: true
+    save_best_only: true
+    seed: 2019
+    shallow_net_dropout: 0.1
+    shuffle: true
+    task: binary_classification
+    temperature: 4.0
+    use_cl_mask: true
+    verbose: 0
+DCNv3CL_avazu_x4_080_010_16_005_q9r1s2t3_CL_group_004_d03a74b8:
+    base_loss_weight: 1.0
+    batch_norm: true
+    batch_size: 10000
+    dataset_id: avazu_x4_080_010
+    debug_mode: false
+    deep_net_dropout: 0.1
+    distance_loss_weight: 0.0
+    early_stop_patience: 1
+    embedding_dim: 32
+    embedding_regularizer: 0.0
+    epochs: 2
+    feature_alignment_loss_weight: 0.0
+    field_uniformity_loss_weight: 0.0
+    group_aware_loss_weight: 0.002
+    group_id: null
+    knowledge_distillation_loss_weight: 0.0
+    layer_norm: true
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mask_strategy: noise
+    mask_type: Personalisation
+    metrics: [AUC, logloss]
+    model: DCNv3CL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/DCNv3CL_avazu_CL_group/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_regularizer: 0
+    num_deep_cross_layers: 3
+    num_heads: 8
+    num_shallow_cross_layers: 4
+    num_workers: 0
+    optimizer: adam
+    personalization_feature_list: [device_ip, device_id]
+    pickle_feature_encoder: true
+    save_best_only: true
+    seed: 2019
+    shallow_net_dropout: 0.1
+    shuffle: true
+    task: binary_classification
+    temperature: 4.0
+    use_cl_mask: true
+    verbose: 0
+DCNv3CL_avazu_x4_080_010_16_005_q9r1s2t3_CL_012_70bd1c4f:
+    base_loss_weight: 1.0
+    batch_norm: true
+    batch_size: 10000
+    dataset_id: avazu_x4_080_010
+    debug_mode: false
+    deep_net_dropout: 0.1
+    distance_loss_weight: 0.0
+    early_stop_patience: 1
+    embedding_dim: 32
+    embedding_regularizer: 0.0
+    epochs: 2
+    feature_alignment_loss_weight: 0.0
+    field_uniformity_loss_weight: 0.001
+    group_aware_loss_weight: 0.0
+    group_id: null
+    knowledge_distillation_loss_weight: 0.0
+    layer_norm: true
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mask_strategy: noise
+    mask_type: Personalisation
+    metrics: [AUC, logloss]
+    model: DCNv3CL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/DCNv3CL_avazu_CLOnly/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_regularizer: 0
+    num_deep_cross_layers: 3
+    num_heads: 8
+    num_shallow_cross_layers: 4
+    num_workers: 1
+    optimizer: adam
+    personalization_feature_list: [device_ip, device_id]
+    pickle_feature_encoder: true
+    save_best_only: true
+    seed: 2019
+    shallow_net_dropout: 0.1
+    shuffle: true
+    task: binary_classification
+    temperature: 4.0
+    use_cl_mask: true
+    verbose: 0
+
+DCNv3_multitower_criteo_private_ad_cvr_002_50_010_16_019_i3j4k5l6:
+    model: DCNv3
+    early_stop_patience: 2
+    dataset_id: criteo_private_ad_cvr_002_50_010
+    loss: binary_crossentropy
+    metrics: [AUC, logloss]
+    task: binary_classification
+    optimizer: adam
+    learning_rate: 0.001
+    embedding_regularizer: 1.0e-05
+    net_regularizer: 0
+    batch_size: 10000
+    embedding_dim: 16
+    num_deep_cross_layers: 3
+    num_shallow_cross_layers: 4
+    deep_net_dropout: 0.2
+    shallow_net_dropout: 0.2
+    layer_norm: true
+    batch_norm: true
+    num_heads: 4
+    epochs: 100
+    shuffle: true
+    seed: 2021
+    monitor: {AUC: 1}
+    monitor_mode: max
+    model_id: DCNv3_multitower_criteo_private_ad_cvr_002_50_010_16_base
+    num_workers: 1
+    patience: 2
+    group_id: null
+    pickle_feature_encoder: true
+    save_best_only: true
+    verbose: 0
+  # Domain-aware structure (多塔) 配置
+    use_domain_aware_structure: true
+  # 每个塔的隐藏层单元数配置，这里假设有2个场景/塔
+    tower_hidden_units_list:
+      - [ 256, 128, 64 ]   # 塔1的隐藏层配置
+      - [ 256, 128, 64 ]   # 塔2的隐藏层配置
+      # - [512, 256, 128]  # 塔3的隐藏层配置
+  # 塔的激活函数
+    tower_activation: relu
+  # 每个塔的L2正则化系数
+    tower_l2_reg_list: [ 0.0, 0.0 ]
+  # 每个塔的dropout率
+    tower_dropout_list: [ 0.0, 0.0 ]
+  # 是否在塔中使用batch normalization
+    use_bn_tower: false
+  # 场景特征名称（用于选择使用哪个塔）
+  # scene_name: 2
+  # 场景ID偏移量（如果场景ID从1开始，设为1；如果从0开始，设为0）
+    scene_num_shift: 0
+  # 是否使用场景ID映射（如果需要将特征值映射到场景ID）
+  # use_scene_id_mapping: false
+  # 如果use_scene_id_mapping为true，需要配置以下参数：
+    use_scene_id_mapping: true
+    mapping_feature_name: is_personalization
+    mapping_feature_type: sparse  # 或 dense
+  # feature2id_dict的键应该是原始特征值（作为字符串），值是目标塔索引
+  # 原始值0映射到塔0（非个性化塔），原始值1映射到塔1（个性化塔）
+    feature2id_dict:
+      "0": 0  # 原始值0（非个性化用户）-> 塔0
+      "1": 1  # 原始值1（个性化用户）-> 塔1
+    default_value: 1  # 默认使用塔1（个性化塔），注意这是基于scene_num_shift的
+  # feature_map_dict定义原始值到转换后值的映射
+  # 这个应该与特征工程中的映射保持一致
+    feature_map_dict:
+      "0": 2  # 原始值0在特征中变成2
+      "1": 1  # 原始值1在特征中变成1
+
+MaskNetCL_taobaoad_x1_006_070_010_005_a867ff31_MTOnly_004_7a34c2a7:
+    batch_norm: true
+    batch_size: 10000
+    dataset_id: taobaoad_x1_006_070_010
+    debug_mode: false
+    default_value: 1
+    dnn_hidden_units: [1000, 1000, 1000]
+    early_stop_patience: 2
+    embedding_dim: 32
+    embedding_regularizer: 0
+    epochs: 10
+    eval_interval: 1
+    feature2id_dict: {'0': 0, '1': 1}
+    feature_map_dict: {'0': 2, '1': 1}
+    feature_specs: null
+    group_id: group_id
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mapping_feature_name: is_personalization
+    mapping_feature_type: sparse
+    mask_dropout: 0.2
+    mask_threshold: 0.01
+    metrics: [AUC, logloss]
+    model: MaskNetCL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/MaskNetCL_taobao_MTOnly/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_regularizer: 0
+    num_experts: 4
+    num_workers: 0
+    optimizer: adam
+    ordered_features: null
+    pickle_feature_encoder: true
+    save_best_only: true
+    scene_num_shift: 0
+    seed: 2021
+    shuffle: true
+    task: binary_classification
+    tower_activation: relu
+    tower_dropout_list: [0.0, 0.0]
+    tower_hidden_units_list:
+    - [128, 64, 32, 16]
+    - [128, 64, 32, 16]
+    tower_l2_reg_list: [0.0, 0.0]
+    use_bn_tower: false
+    use_domain_aware_structure: true
+    use_scene_id_mapping: true
+    verbose: 0
+MaskNetCL_taobaoad_x1_006_070_010_005_a867ff31_MTOnly_005_17a0a66c:
+    batch_norm: true
+    batch_size: 10000
+    dataset_id: taobaoad_x1_006_070_010
+    debug_mode: false
+    default_value: 1
+    dnn_hidden_units: [1000, 1000, 1000]
+    early_stop_patience: 2
+    embedding_dim: 32
+    embedding_regularizer: 0
+    epochs: 10
+    eval_interval: 1
+    feature2id_dict: {'0': 0, '1': 1}
+    feature_map_dict: {'0': 2, '1': 1}
+    feature_specs: null
+    group_id: group_id
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mapping_feature_name: is_personalization
+    mapping_feature_type: sparse
+    mask_dropout: 0.2
+    mask_threshold: 0.01
+    metrics: [AUC, logloss]
+    model: MaskNetCL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/MaskNetCL_taobao_MTOnly/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_regularizer: 0
+    num_experts: 4
+    num_workers: 0
+    optimizer: adam
+    ordered_features: null
+    pickle_feature_encoder: true
+    save_best_only: true
+    scene_num_shift: 0
+    seed: 2021
+    shuffle: true
+    task: binary_classification
+    tower_activation: relu
+    tower_dropout_list: [0.0, 0.0]
+    tower_hidden_units_list:
+    - [128, 64, 32]
+    - [128, 64, 32]
+    tower_l2_reg_list: [0.0, 0.0]
+    use_bn_tower: false
+    use_domain_aware_structure: true
+    use_scene_id_mapping: true
+    verbose: 0
+MaskNetCL_taobaoad_x1_006_070_010_005_a867ff31_CLOnly_010_0f82e1c7:
+    base_loss_weight: 1.0
+    batch_norm: true
+    batch_size: 10000
+    dataset_id: taobaoad_x1_006_070_010
+    debug_mode: false
+    distance_loss_weight: 0.001
+    dnn_hidden_units: [1000, 1000, 1000]
+    early_stop_patience: 2
+    embedding_dim: 32
+    embedding_regularizer: 0
+    epochs: 10
+    eval_interval: 1
+    feature_alignment_loss_weight: 0.0
+    feature_specs: null
+    field_uniformity_loss_weight: 0.001
+    group_aware_loss_weight: 0.001
+    group_id: group_id
+    knowledge_distillation_loss_weight: 0.0
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mask_dropout: 0.2
+    mask_strategy: zero
+    mask_threshold: 0.01
+    mask_type: Personalisation
+    metrics: [AUC, logloss]
+    model: MaskNetCL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/MaskNetCL_taobao_CLOnly/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_regularizer: 0
+    num_experts: 4
+    num_workers: 3
+    optimizer: adam
+    ordered_features: null
+    personalization_feature_list: [userid, cms_segid, cms_group_id, final_gender_code,
+        age_level, pvalue_level, shopping_level, occupation, new_user_class_level]
+    pickle_feature_encoder: true
+    save_best_only: true
+    seed: 2021
+    shuffle: true
+    task: binary_classification
+    use_cl_mask: true
+    verbose: 0
+MaskNetCL_taobaoad_x1_006_070_010_005_a867ff31_CLOnly_025_a79764e5:
+    base_loss_weight: 1.0
+    batch_norm: true
+    batch_size: 10000
+    dataset_id: taobaoad_x1_006_070_010
+    debug_mode: false
+    distance_loss_weight: 0.002
+    dnn_hidden_units: [1000, 1000, 1000]
+    early_stop_patience: 2
+    embedding_dim: 32
+    embedding_regularizer: 0
+    epochs: 10
+    eval_interval: 1
+    feature_alignment_loss_weight: 0.0
+    feature_specs: null
+    field_uniformity_loss_weight: 0.001
+    group_aware_loss_weight: 0.002
+    group_id: group_id
+    knowledge_distillation_loss_weight: 0.0
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mask_dropout: 0.2
+    mask_strategy: zero
+    mask_threshold: 0.01
+    mask_type: Personalisation
+    metrics: [AUC, logloss]
+    model: MaskNetCL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/MaskNetCL_taobao_CLOnly/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_regularizer: 0
+    num_experts: 4
+    num_workers: 3
+    optimizer: adam
+    ordered_features: null
+    personalization_feature_list: [userid, cms_segid, cms_group_id, final_gender_code,
+        age_level, pvalue_level, shopping_level, occupation, new_user_class_level]
+    pickle_feature_encoder: true
+    save_best_only: true
+    seed: 2021
+    shuffle: true
+    task: binary_classification
+    use_cl_mask: true
+    verbose: 0
+MaskNetCL_taobaoad_x1_006_070_010_005_a867ff31_MTCL_001_cda7c27b:
+    base_loss_weight: 1.0
+    batch_norm: true
+    batch_size: 10000
+    dataset_id: taobaoad_x1_006_070_010
+    debug_mode: false
+    default_value: 1
+    distance_loss_weight: 0.001
+    dnn_hidden_units: [1000, 1000, 1000]
+    early_stop_patience: 2
+    embedding_dim: 32
+    embedding_regularizer: 0
+    epochs: 10
+    eval_interval: 1
+    feature2id_dict: {'0': 0, '1': 1}
+    feature_alignment_loss_weight: 0.0
+    feature_map_dict: {'0': 2, '1': 1}
+    feature_specs: null
+    field_uniformity_loss_weight: 0.001
+    group_aware_loss_weight: 0.001
+    group_id: group_id
+    knowledge_distillation_loss_weight: 0.0
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mapping_feature_name: is_personalization
+    mapping_feature_type: sparse
+    mask_dropout: 0.2
+    mask_strategy: zero
+    mask_threshold: 0.01
+    mask_type: Personalisation
+    metrics: [AUC, logloss]
+    model: MaskNetCL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/MaskNetCL_taobao_MTCL/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_regularizer: 0
+    num_experts: 4
+    num_workers: 0
+    optimizer: adam
+    ordered_features: null
+    personalization_feature_list: [userid, cms_segid, cms_group_id, final_gender_code,
+        age_level, pvalue_level, shopping_level, occupation, new_user_class_level]
+    pickle_feature_encoder: true
+    save_best_only: true
+    scene_num_shift: 0
+    seed: 2021
+    shuffle: true
+    task: binary_classification
+    tower_activation: relu
+    tower_dropout_list: [0.0, 0.0]
+    tower_hidden_units_list:
+    - [128, 64, 32, 16]
+    - [128, 64, 32, 16]
+    tower_l2_reg_list: [0.0, 0.0]
+    use_bn_tower: false
+    use_cl_mask: true
+    use_domain_aware_structure: true
+    use_scene_id_mapping: true
+    verbose: 0
+MaskNetCL_taobaoad_x1_006_070_010_005_a867ff31_MTCL_002_1efc524e:
+    base_loss_weight: 1.0
+    batch_norm: true
+    batch_size: 10000
+    dataset_id: taobaoad_x1_006_070_010
+    debug_mode: false
+    default_value: 1
+    distance_loss_weight: 0.001
+    dnn_hidden_units: [1000, 1000, 1000]
+    early_stop_patience: 2
+    embedding_dim: 32
+    embedding_regularizer: 0
+    epochs: 10
+    eval_interval: 1
+    feature2id_dict: {'0': 0, '1': 1}
+    feature_alignment_loss_weight: 0.0
+    feature_map_dict: {'0': 2, '1': 1}
+    feature_specs: null
+    field_uniformity_loss_weight: 0.001
+    group_aware_loss_weight: 0.001
+    group_id: group_id
+    knowledge_distillation_loss_weight: 0.0
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mapping_feature_name: is_personalization
+    mapping_feature_type: sparse
+    mask_dropout: 0.2
+    mask_strategy: zero
+    mask_threshold: 0.01
+    mask_type: Personalisation
+    metrics: [AUC, logloss]
+    model: MaskNetCL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/MaskNetCL_taobao_MTCL/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_regularizer: 0
+    num_experts: 4
+    num_workers: 0
+    optimizer: adam
+    ordered_features: null
+    personalization_feature_list: [userid, cms_segid, cms_group_id, final_gender_code,
+        age_level, pvalue_level, shopping_level, occupation, new_user_class_level]
+    pickle_feature_encoder: true
+    save_best_only: true
+    scene_num_shift: 0
+    seed: 2021
+    shuffle: true
+    task: binary_classification
+    tower_activation: relu
+    tower_dropout_list: [0.0, 0.0]
+    tower_hidden_units_list:
+    - [128, 64, 32]
+    - [128, 64, 32]
+    tower_l2_reg_list: [0.0, 0.0]
+    use_bn_tower: false
+    use_cl_mask: true
+    use_domain_aware_structure: true
+    use_scene_id_mapping: true
+    verbose: 0
+
+MaskNetCL_avazu_x4_080_010_001_030_09_20693171_CLOnly_005_d44857e4:
+    base_loss_weight: 1.0
+    batch_size: 10000
+    dataset_id: avazu_x4_080_010
+    debug_mode: false
+    distance_loss_weight: 0.001
+    dnn_hidden_activations: relu
+    dnn_hidden_units: [2000, 2000, 2000]
+    early_stop_patience: 1
+    emb_layernorm: false
+    embedding_dim: 32
+    embedding_regularizer: 1.0e-09
+    epochs: 100
+    eval_steps: null
+    feature_alignment_loss_weight: 0.0
+    feature_config: null
+    feature_specs: null
+    field_uniformity_loss_weight: 0.001
+    group_aware_loss_weight: 0.005
+    group_id: null
+    knowledge_distillation_loss_weight: 0.005
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mask_strategy: zero
+    mask_type: Personalisation
+    metrics: [AUC, logloss]
+    model: MaskNetCL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/MaskNetCL_CLOnly/
+    model_type: ParallelMaskNet
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_layernorm: false
+    net_regularizer: 0
+    num_workers: 1
+    optimizer: adam
+    parallel_block_dim: 500
+    parallel_num_blocks: 10
+    pickle_feature_encoder: true
+    reduction_ratio: 0.4
+    save_best_only: true
+    seed: 2019
+    shuffle: true
+    task: binary_classification
+    temperature: 4.0
+    use_cl_mask: true
+    use_features: null
+    verbose: 0
+MaskNetCL_avazu_x4_080_010_001_030_09_20693171_CLOnly_023_e1e10390:
+    base_loss_weight: 1.0
+    batch_size: 10000
+    dataset_id: avazu_x4_080_010
+    debug_mode: false
+    distance_loss_weight: 0.001
+    dnn_hidden_activations: relu
+    dnn_hidden_units: [2000, 2000, 2000]
+    early_stop_patience: 1
+    emb_layernorm: false
+    embedding_dim: 32
+    embedding_regularizer: 1.0e-09
+    epochs: 100
+    eval_steps: null
+    feature_alignment_loss_weight: 0.0
+    feature_config: null
+    feature_specs: null
+    field_uniformity_loss_weight: 0.002
+    group_aware_loss_weight: 0.005
+    group_id: null
+    knowledge_distillation_loss_weight: 0.005
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mask_strategy: zero
+    mask_type: Personalisation
+    metrics: [AUC, logloss]
+    model: MaskNetCL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/MaskNetCL_CLOnly/
+    model_type: ParallelMaskNet
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_layernorm: false
+    net_regularizer: 0
+    num_workers: 1
+    optimizer: adam
+    parallel_block_dim: 500
+    parallel_num_blocks: 10
+    pickle_feature_encoder: true
+    reduction_ratio: 0.4
+    save_best_only: true
+    seed: 2019
+    shuffle: true
+    task: binary_classification
+    temperature: 4.0
+    use_cl_mask: true
+    use_features: null
+    verbose: 0
+MaskNetCL_avazu_x4_080_010_001_030_09_20693171_CLOnly_020_745b4ee7:
+    base_loss_weight: 1.0
+    batch_size: 10000
+    dataset_id: avazu_x4_080_010
+    debug_mode: false
+    distance_loss_weight: 0.001
+    dnn_hidden_activations: relu
+    dnn_hidden_units: [2000, 2000, 2000]
+    early_stop_patience: 1
+    emb_layernorm: false
+    embedding_dim: 32
+    embedding_regularizer: 1.0e-09
+    epochs: 100
+    eval_steps: null
+    feature_alignment_loss_weight: 0.0
+    feature_config: null
+    feature_specs: null
+    field_uniformity_loss_weight: 0.002
+    group_aware_loss_weight: 0.001
+    group_id: null
+    knowledge_distillation_loss_weight: 0.01
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mask_strategy: zero
+    mask_type: Personalisation
+    metrics: [AUC, logloss]
+    model: MaskNetCL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/MaskNetCL_CLOnly/
+    model_type: ParallelMaskNet
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_layernorm: false
+    net_regularizer: 0
+    num_workers: 1
+    optimizer: adam
+    parallel_block_dim: 500
+    parallel_num_blocks: 10
+    pickle_feature_encoder: true
+    reduction_ratio: 0.4
+    save_best_only: true
+    seed: 2019
+    shuffle: true
+    task: binary_classification
+    temperature: 4.0
+    use_cl_mask: true
+    use_features: null
+    verbose: 0
+MaskNetCL_avazu_x4_080_010_001_030_09_20693171_CLOnly_021_1cb45f74:
+    base_loss_weight: 1.0
+    batch_size: 10000
+    dataset_id: avazu_x4_080_010
+    debug_mode: false
+    distance_loss_weight: 0.001
+    dnn_hidden_activations: relu
+    dnn_hidden_units: [2000, 2000, 2000]
+    early_stop_patience: 1
+    emb_layernorm: false
+    embedding_dim: 32
+    embedding_regularizer: 1.0e-09
+    epochs: 100
+    eval_steps: null
+    feature_alignment_loss_weight: 0.0
+    feature_config: null
+    feature_specs: null
+    field_uniformity_loss_weight: 0.002
+    group_aware_loss_weight: 0.002
+    group_id: null
+    knowledge_distillation_loss_weight: 0.005
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mask_strategy: zero
+    mask_type: Personalisation
+    metrics: [AUC, logloss]
+    model: MaskNetCL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/MaskNetCL_CLOnly/
+    model_type: ParallelMaskNet
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_layernorm: false
+    net_regularizer: 0
+    num_workers: 1
+    optimizer: adam
+    parallel_block_dim: 500
+    parallel_num_blocks: 10
+    pickle_feature_encoder: true
+    reduction_ratio: 0.4
+    save_best_only: true
+    seed: 2019
+    shuffle: true
+    task: binary_classification
+    temperature: 4.0
+    use_cl_mask: true
+    use_features: null
+    verbose: 0
+MaskNetCL_avazu_x4_080_010_MT_001_030_09_20693171:
+    batch_size: 10000
+    dataset_id: avazu_x4_080_010
+    debug_mode: false
+    dnn_hidden_activations: relu
+    dnn_hidden_units: [2000, 2000, 2000]
+    early_stop_patience: 2
+    emb_layernorm: false
+    embedding_dim: 32
+    embedding_regularizer: 1.0e-09
+    epochs: 100
+    eval_steps: null
+    feature_config: null
+    feature_specs: null
+    group_id: null
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    metrics: [AUC, logloss]
+    model: MaskNetCL
+    model_type: ParallelMaskNet
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_layernorm: false
+    net_regularizer: 0
+    num_workers: 1
+    optimizer: adam
+    parallel_block_dim: 500
+    parallel_num_blocks: 10
+    pickle_feature_encoder: true
+    reduction_ratio: 0.4
+    save_best_only: true
+    seed: 2019
+    shuffle: true
+    task: binary_classification
+    use_features: null
+    verbose: 0
+  # Domain-aware structure (多塔) 配置
+    use_domain_aware_structure: true
+  # 每个塔的隐藏层单元数配置，这里假设有2个场景/塔
+    tower_hidden_units_list:
+      - [ 128, 64 ]  # 塔1的隐藏层配置
+      - [ 128, 64 ]  # 塔2的隐藏层配置
+      # - [512, 256, 128]  # 塔3的隐藏层配置
+  # 塔的激活函数
+    tower_activation: relu
+  # 每个塔的L2正则化系数
+    tower_l2_reg_list: [ 0.0, 0.0 ]
+  # 每个塔的dropout率
+    tower_dropout_list: [ 0.0, 0.0 ]
+  # 是否在塔中使用batch normalization
+    use_bn_tower: true
+  # 场景特征名称（用于选择使用哪个塔）
+  # scene_name: 2
+  # 场景ID偏移量（如果场景ID从1开始，设为1；如果从0开始，设为0）
+    scene_num_shift: 0
+  # 是否使用场景ID映射（如果需要将特征值映射到场景ID）
+  # use_scene_id_mapping: false
+  # 如果use_scene_id_mapping为true，需要配置以下参数：
+    use_scene_id_mapping: true
+    mapping_feature_name: is_personalization
+    mapping_feature_type: sparse  # 或 dense
+  # feature2id_dict的键应该是原始特征值（作为字符串），值是目标塔索引
+  # 原始值0映射到塔0（非个性化塔），原始值1映射到塔1（个性化塔）
+    feature2id_dict:
+      "0": 0  # 原始值0（非个性化用户）-> 塔0
+      "1": 1  # 原始值1（个性化用户）-> 塔1
+    default_value: 1  # 默认使用塔1（个性化塔），注意这是基于scene_num_shift的
+  # feature_map_dict定义原始值到转换后值的映射
+  # 这个应该与特征工程中的映射保持一致
+    feature_map_dict:
+      "0": 2  # 原始值0在特征中变成2
+      "1": 1  # 原始值1在特征中变成1
+MaskNetCL_avazu_x4_080_010_001_030_09_20693171_MTOnly_006_8592b427:
+    batch_size: 10000
+    dataset_id: avazu_x4_080_010
+    debug_mode: false
+    default_value: 1
+    dnn_hidden_activations: relu
+    dnn_hidden_units: [2000, 2000, 2000]
+    early_stop_patience: 1
+    emb_layernorm: false
+    embedding_dim: 32
+    embedding_regularizer: 1.0e-09
+    epochs: 100
+    eval_steps: null
+    feature2id_dict: {'0': 0, '1': 1}
+    feature_config: null
+    feature_map_dict: {'0': 2, '1': 1}
+    feature_specs: null
+    group_id: null
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mapping_feature_name: is_personalization
+    mapping_feature_type: sparse
+    metrics: [AUC, logloss]
+    model: MaskNetCL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/MaskNetCL_avazu_x4_MT/
+    model_type: ParallelMaskNet
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_layernorm: false
+    net_regularizer: 0
+    num_workers: 0
+    optimizer: adam
+    parallel_block_dim: 500
+    parallel_num_blocks: 10
+    pickle_feature_encoder: true
+    reduction_ratio: 0.4
+    save_best_only: true
+    scene_num_shift: 0
+    seed: 2019
+    shuffle: true
+    task: binary_classification
+    tower_activation: relu
+    tower_dropout_list: [0.0, 0.0]
+    tower_hidden_units_list:
+    - [256, 128]
+    - [256, 128]
+    tower_l2_reg_list: [0.0, 0.0]
+    use_bn_tower: true
+    use_domain_aware_structure: true
+    use_features: null
+    use_scene_id_mapping: true
+    verbose: 0
+MaskNetCL_avazu_x4_080_010_001_030_09_20693171_MTCL_003_9a859a07:
+    base_loss_weight: 1.0
+    batch_size: 10000
+    dataset_id: avazu_x4_080_010
+    debug_mode: false
+    default_value: 1
+    distance_loss_weight: 0.001
+    dnn_hidden_activations: relu
+    dnn_hidden_units: [2000, 2000, 2000]
+    early_stop_patience: 1
+    emb_layernorm: false
+    embedding_dim: 32
+    embedding_regularizer: 1.0e-09
+    epochs: 100
+    eval_steps: null
+    feature2id_dict: {'0': 0, '1': 1}
+    feature_alignment_loss_weight: 0.0
+    feature_config: null
+    feature_map_dict: {'0': 2, '1': 1}
+    feature_specs: null
+    field_uniformity_loss_weight: 0.001
+    group_aware_loss_weight: 0.001
+    group_id: null
+    knowledge_distillation_loss_weight: 0.0
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mapping_feature_name: is_personalization
+    mapping_feature_type: sparse
+    mask_strategy: zero
+    mask_type: Personalisation
+    metrics: [AUC, logloss]
+    model: MaskNetCL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/MaskNetCL_avazu_MTCL/
+    model_type: ParallelMaskNet
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_layernorm: false
+    net_regularizer: 0
+    num_workers: 0
+    optimizer: adam
+    parallel_block_dim: 500
+    parallel_num_blocks: 10
+    pickle_feature_encoder: true
+    reduction_ratio: 0.4
+    save_best_only: true
+    scene_num_shift: 0
+    seed: 2019
+    shuffle: true
+    task: binary_classification
+    temperature: 4.0
+    tower_activation: relu
+    tower_dropout_list: [0.0, 0.0]
+    tower_hidden_units_list:
+    - [256, 128]
+    - [256, 128]
+    tower_l2_reg_list: [0.0, 0.0]
+    use_bn_tower: true
+    use_cl_mask: true
+    use_domain_aware_structure: true
+    use_features: null
+    use_scene_id_mapping: true
+    verbose: 0
+
+MaskNetWithMultiTower_criteo_private_ad_cvr_001_018_dbb18303:
+    batch_size: 10000
+    dataset_id: criteo_private_ad_cvr
+    debug_mode: false
+    dnn_hidden_activations: relu
+    dnn_hidden_units: [1000, 1000, 1000, 1000, 1000]
+    early_stop_patience: 3
+    emb_layernorm: false
+    embedding_dim: 16
+    embedding_regularizer: 1.0e-05
+    epochs: 100
+    eval_steps: null
+    feature_config: null
+    feature_specs: null
+    group_id: null
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    metrics: [AUC, logloss]
+    model: MaskNetWithMultiTower
+    model_type: ParallelMaskNet
+    monitor: {AUC: 1}
+    monitor_mode: max
+    net_dropout: 0.3
+    net_layernorm: true
+    net_regularizer: 0
+    num_workers: 1
+    optimizer: adam
+    parallel_block_dim: 500
+    parallel_num_blocks: 2
+    pickle_feature_encoder: true
+    reduction_ratio: 0.1
+    save_best_only: true
+    seed: 2019
+    shuffle: true
+    task: binary_classification
+    use_features: null
+    verbose: 0
+  # Domain-aware structure (多塔) 配置
+    use_domain_aware_structure: true
+  # 每个塔的隐藏层单元数配置，这里假设有2个场景/塔
+    tower_hidden_units_list:
+      - [ 256, 128, 64 ]   # 塔1的隐藏层配置
+      - [ 256, 128, 64 ]   # 塔2的隐藏层配置
+      # - [512, 256, 128]  # 塔3的隐藏层配置
+  # 塔的激活函数
+    tower_activation: relu
+  # 每个塔的L2正则化系数
+    tower_l2_reg_list: [ 0.0, 0.0 ]
+  # 每个塔的dropout率
+    tower_dropout_list: [ 0.0, 0.0 ]
+  # 是否在塔中使用batch normalization
+    use_bn_tower: false
+  # 场景特征名称（用于选择使用哪个塔）
+  # scene_name: 2
+  # 场景ID偏移量（如果场景ID从1开始，设为1；如果从0开始，设为0）
+    scene_num_shift: 0
+  # 是否使用场景ID映射（如果需要将特征值映射到场景ID）
+  # use_scene_id_mapping: false
+  # 如果use_scene_id_mapping为true，需要配置以下参数：
+    use_scene_id_mapping: true
+    mapping_feature_name: is_personalization
+    mapping_feature_type: sparse  # 或 dense
+  # feature2id_dict的键应该是原始特征值（作为字符串），值是目标塔索引
+  # 原始值0映射到塔0（非个性化塔），原始值1映射到塔1（个性化塔）
+    feature2id_dict:
+      "0": 0  # 原始值0（非个性化用户）-> 塔0
+      "1": 1  # 原始值1（个性化用户）-> 塔1
+    default_value: 1  # 默认使用塔1（个性化塔），注意这是基于scene_num_shift的
+  # feature_map_dict定义原始值到转换后值的映射
+  # 这个应该与特征工程中的映射保持一致
+    feature_map_dict:
+      "0": 2  # 原始值0在特征中变成2
+      "1": 1  # 原始值1在特征中变成1
