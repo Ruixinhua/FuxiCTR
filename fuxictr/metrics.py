@@ -42,6 +42,12 @@ def evaluate_metrics(y_true, y_pred, metrics, group_id=None, feature_group_id=No
     
     # 计算总体metrics
     for metric in metrics:
+        if 'group' in metric:
+            metric = metric.split('_')[0]  # 处理如group_AUC等
+            feature_group_results = compute_feature_group_metrics(
+                y_true, y_pred, [metric], feature_group_id
+            )
+            return_dict.update(feature_group_results)
         if metric in ['logloss', 'binary_crossentropy']:
             return_dict[metric] = log_loss(y_true, y_pred)
         elif metric == 'AUC':

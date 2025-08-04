@@ -10,7 +10,7 @@ class DCNv3CL(DCN):
     """
     DCNv3CL.
     Reference:
-    DCNv3CL: A Contrastive Learning Framework for CTR Prediction
+    CL4CTR: A Contrastive Learning Framework for CTR Prediction
     The FI encoder is built upon DCN, its performance will be maximised when DCN version == "v3s"
     """
 

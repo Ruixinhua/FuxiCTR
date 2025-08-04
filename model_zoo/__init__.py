@@ -4,8 +4,9 @@ from .AOANet.src import AOANet
 from .AutoInt.src import AutoInt
 from .BST.src import BST
 from .CCPM.src import CCPM
+from .CL.src import PNNCL, DCNv2CL, DCNv3CL, MaskNetCL
 from .DCN.DCN_torch.src import DCN
-from .DCNv2.src import DCNv2
+from .DCNv2.src import DCNv2, DCNv2WithMultiTower
 from .DCNv3.src import DCNv3
 from .DeepCrossing.src import DeepCrossing
 from .DeepFM.DeepFM_torch.src import DeepFM
@@ -35,6 +36,7 @@ from .InterHAt.src import InterHAt
 from .LorentzFM.src import LorentzFM
 from .LR.src import LR
 from .MaskNet.src import MaskNet
+from .MaskNet.src import MaskNetWithMultiTower
 from .NFM.src import NFM
 from .ONN.ONN_torch.src import ONN, ONNv2
 from .PNN.src import PNN
@@ -47,3 +49,4 @@ from .multitask import ShareBottom, MMoE, PLE
 from .EulerNet.src import EulerNet
 from .WuKong.src import WuKong
 from .GDCN.src import GDCN
+from .MTCL.src import MTCL

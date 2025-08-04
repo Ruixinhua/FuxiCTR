@@ -41,6 +41,8 @@ if __name__ == '__main__':
     parser.add_argument('--config', type=str, default='./config/', help='The config directory.')
     parser.add_argument('--expid', type=str, default='DeepFM_test', help='The experiment id to run.')
     parser.add_argument('--gpu', type=int, default=-1, help='The gpu index, -1 for cpu')
+    parser.add_argument('--save_predictions', action='store_true', help='Whether to save prediction results for model ensemble')
+    parser.add_argument('--predictions_dir', type=str, default='./predictions', help='Directory to save prediction results')
     args = vars(parser.parse_args())
     
     experiment_id = args['expid']
@@ -63,12 +65,34 @@ if __name__ == '__main__':
     model_class = getattr(model_zoo, params['model'])
     model = model_class(feature_map, **params)
     model.count_parameters() # print number of parameters used in model
+    
+    # Print model structure
+    logging.info("Model structure:")
+    logging.info(str(model))
 
     train_gen, valid_gen = RankDataLoader(feature_map, stage='train', **params).make_iterator()
     model.fit(train_gen, validation_data=valid_gen, **params)
 
     logging.info('****** Validation evaluation ******')
-    valid_result = model.evaluate(valid_gen)
+    # 检查是否为MTCL模型且启用了分塔最优保存
+    if hasattr(model, 'use_tower_optimal_saving') and model.use_tower_optimal_saving:
+        logging.info('Using tower optimal combination evaluation for validation')
+        valid_result = model.evaluate_with_tower_optimal(valid_gen)
+        
+        # 同时提供标准评估结果作为对比
+        logging.info('Standard evaluation for comparison:')
+        valid_result_standard = model.evaluate(valid_gen, save_predictions=args['save_predictions'], save_dir=os.path.join(args['predictions_dir'], 'validation'))
+        logging.info('[Standard] ' + ' - '.join([f'{k}: {v}' for k, v in valid_result_standard.items() if isinstance(v, (int, float))]))
+        logging.info('[Tower Optimal] ' + ' - '.join([f'{k}: {v}' for k, v in valid_result.items() if isinstance(v, (int, float)) and k != 'optimal_epochs']))
+        
+        if 'optimal_epochs' in valid_result:
+            logging.info('[Tower Optimal Epochs] ' + ' - '.join([f'{k}: epoch {v}' for k, v in valid_result['optimal_epochs'].items()]))
+        valid_result = {
+            k: float(v) for k, v in valid_result.items() if not isinstance(v, bool) and isinstance(v, (int, float))
+        }
+    else:
+        valid_result = model.evaluate(valid_gen, save_predictions=args['save_predictions'], save_dir=os.path.join(args['predictions_dir'], 'validation'))
+    
     del train_gen, valid_gen
     gc.collect()
     
@@ -76,7 +100,25 @@ if __name__ == '__main__':
     if params["test_data"]:
         logging.info('******** Test evaluation ********')
         test_gen = RankDataLoader(feature_map, stage='test', **params).make_iterator()
-        test_result = model.evaluate(test_gen)
+        
+        # 同样对测试集使用分塔最优评估
+        if hasattr(model, 'use_tower_optimal_saving') and model.use_tower_optimal_saving:
+            logging.info('Using tower optimal combination evaluation for test')
+            test_result = model.evaluate_with_tower_optimal(test_gen)
+            
+            # 同时提供标准评估结果作为对比
+            logging.info('Standard test evaluation for comparison:')
+            test_result_standard = model.evaluate(test_gen, save_predictions=args['save_predictions'], save_dir=os.path.join(args['predictions_dir'], 'test'))
+            logging.info('[Standard Test] ' + ' - '.join([f'{k}: {v}' for k, v in test_result_standard.items() if isinstance(v, (int, float))]))
+            logging.info('[Tower Optimal Test] ' + ' - '.join([f'{k}: {v}' for k, v in test_result.items() if isinstance(v, (int, float)) and k != 'optimal_epochs']))
+            
+            if 'optimal_epochs' in test_result:
+                logging.info('[Test Tower Optimal Epochs] ' + ' - '.join([f'{k}: epoch {v}' for k, v in test_result['optimal_epochs'].items()]))
+            test_result = {
+                k: float(v) for k, v in test_result.items() if not isinstance(v, bool) and isinstance(v, (int, float))
+            }
+        else:
+            test_result = model.evaluate(test_gen, save_predictions=args['save_predictions'], save_dir=os.path.join(args['predictions_dir'], 'test'))
     
     result_filename = Path(args['config']).name.replace(".yaml", "") + '.csv'
     with open(result_filename, 'a+') as fw:

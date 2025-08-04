@@ -45,16 +45,20 @@ class PNN(BaseModel):
         self.embedding_layer = FeatureEmbedding(feature_map, embedding_dim)
         if product_type != "inner":
             raise NotImplementedError("product_type={} has not been implemented.".format(product_type))
-        self.inner_product_layer = InnerProductInteraction(feature_map.num_fields, output="inner_product")
-        input_dim = int(feature_map.num_fields * (feature_map.num_fields - 1) / 2) \
-                  + feature_map.num_fields * embedding_dim
+        self.remove_feature = kwargs.get("remove_feature")
+        if self.remove_feature is not None:
+            num_fields = feature_map.num_fields - 1
+        else:
+            num_fields = feature_map.num_fields
+        self.inner_product_layer = InnerProductInteraction(num_fields, output="inner_product")
+        input_dim = int(num_fields * (num_fields - 1) / 2)  + num_fields * embedding_dim
         self.dnn = MLP_Block(input_dim=input_dim,
                              output_dim=1, 
                              hidden_units=hidden_units,
                              hidden_activations=hidden_activations,
                              output_activation=self.output_activation,
                              dropout_rates=net_dropout, 
-                             batch_norm=batch_norm) 
+                             batch_norm=batch_norm)
         self.compile(kwargs["optimizer"], kwargs["loss"], learning_rate)
         self.reset_parameters()
         self.model_to_device()
@@ -63,6 +67,8 @@ class PNN(BaseModel):
         """
         Inputs: [X, y]
         """
+        if self.remove_feature is not None and self.remove_feature in inputs:
+            del inputs[self.remove_feature]
         X = self.get_inputs(inputs)
         feature_emb = self.embedding_layer(X)
         inner_products = self.inner_product_layer(feature_emb)

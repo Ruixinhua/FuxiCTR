@@ -121,6 +121,7 @@ class MultiTaskModel(BaseModel):
             y_true_all = defaultdict(list)
             labels = self.feature_map.labels
             group_id = []
+            feature_group_id = []
             if self._verbose > 0:
                 data_generator = tqdm(data_generator, disable=False, file=sys.stdout)
             for batch_data in data_generator:
@@ -132,17 +133,20 @@ class MultiTaskModel(BaseModel):
                     y_true_all[labels[i]].extend(batch_y_true[i].data.cpu().numpy().reshape(-1))
                 if self.feature_map.group_id is not None:
                     group_id.extend(self.get_group_id(batch_data).numpy().reshape(-1))
+                if self.feature_map.feature_group_id is not None:
+                    feature_group_id.extend(self.get_feature_group_id(batch_data).numpy().reshape(-1))
             all_val_logs = {}
             mean_val_logs = defaultdict(list)
             group_id = np.array(group_id) if len(group_id) > 0 else None
+            feature_group_id = np.array(feature_group_id) if len(feature_group_id) > 0 else None
 
             for i in range(len(labels)):
                 y_pred = np.array(y_pred_all[labels[i]], np.float64)
                 y_true = np.array(y_true_all[labels[i]], np.float64)
                 if metrics is not None:
-                    val_logs = self.evaluate_metrics(y_true, y_pred, metrics, group_id)
+                    val_logs = self.evaluate_metrics(y_true, y_pred, metrics, group_id, feature_group_id)
                 else:
-                    val_logs = self.evaluate_metrics(y_true, y_pred, self.validation_metrics, group_id)
+                    val_logs = self.evaluate_metrics(y_true, y_pred, self.validation_metrics, group_id, feature_group_id)
                 logging.info('[Task: {}][Metrics] '.format(labels[i]) + ' - '.join(
                     '{}: {:.6f}'.format(k, v) for k, v in val_logs.items()))
                 for k, v in val_logs.items():

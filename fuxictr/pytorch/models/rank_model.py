@@ -130,6 +130,9 @@ class BaseModel(nn.Module):
     def get_group_id(self, inputs):
         return inputs[self.feature_map.group_id]
 
+    def get_feature_group_id(self, inputs):
+        return inputs[self.feature_map.feature_group_id]
+
     def model_to_device(self):
         self.to(device=self.device)
 
@@ -171,7 +174,8 @@ class BaseModel(nn.Module):
         if (self._monitor_mode == "min" and monitor_value > self._best_metric - min_delta) or \
            (self._monitor_mode == "max" and monitor_value < self._best_metric + min_delta):
             self._stopping_steps += 1
-            logging.info("Monitor({})={:.6f} STOP!".format(self._monitor_mode, monitor_value))
+            logging.info("Monitor({})={:.6f} Best=({:.6f}) STOP!".format(
+                self._monitor_mode, monitor_value, self._best_metric))
             if self._reduce_lr_on_plateau:
                 current_lr = self.lr_decay()
                 logging.info("Reduce learning rate on plateau: {:.6f}".format(current_lr))
@@ -224,12 +228,22 @@ class BaseModel(nn.Module):
             if self._stop_training:
                 break
 
-    def evaluate(self, data_generator, metrics=None):
+    def evaluate(self, data_generator, metrics=None, save_predictions=False, save_dir="./predictions"):
+        """
+        评估模型性能
+        
+        Args:
+            data_generator: 数据生成器
+            metrics: 评估指标
+            save_predictions: 是否保存预测结果，用于后续模型拼接
+            save_dir: 保存预测结果的目录
+        """
         self.eval()  # set to evaluation mode
         with torch.no_grad():
             y_pred = []
             y_true = []
             group_id = []
+            feature_group_id = []
             if self._verbose > 0:
                 data_generator = tqdm(data_generator, disable=False, file=sys.stdout)
             for batch_data in data_generator:
@@ -238,15 +252,115 @@ class BaseModel(nn.Module):
                 y_true.extend(self.get_labels(batch_data).data.cpu().numpy().reshape(-1))
                 if self.feature_map.group_id is not None:
                     group_id.extend(self.get_group_id(batch_data).numpy().reshape(-1))
+                if self.feature_map.feature_group_id is not None:
+                    feature_group_id.extend(self.get_feature_group_id(batch_data).numpy().reshape(-1))
             y_pred = np.array(y_pred, np.float64)
             y_true = np.array(y_true, np.float64)
             group_id = np.array(group_id) if len(group_id) > 0 else None
+            feature_group_id = np.array(feature_group_id) if len(feature_group_id) > 0 else None
             if metrics is not None:
-                val_logs = self.evaluate_metrics(y_true, y_pred, metrics, group_id)
+                val_logs = self.evaluate_metrics(y_true, y_pred, metrics, group_id, feature_group_id)
             else:
-                val_logs = self.evaluate_metrics(y_true, y_pred, self.validation_metrics, group_id)
+                val_logs = self.evaluate_metrics(y_true, y_pred, self.validation_metrics, group_id, feature_group_id)
             logging.info('[Metrics] ' + ' - '.join('{}: {:.6f}'.format(k, v) for k, v in val_logs.items()))
+            
+            # 保存预测结果用于后续模型拼接
+            if save_predictions and val_logs:
+                self._save_prediction_results(y_pred, y_true, group_id, feature_group_id, val_logs, save_dir)
+            
             return val_logs
+
+    def _save_prediction_results(self, y_pred, y_true, group_id, feature_group_id, val_logs, save_dir):
+        """
+        保存预测结果到文件，便于后续模型拼接
+        
+        Args:
+            y_pred: 预测值
+            y_true: 真实值  
+            group_id: 分组ID
+            feature_group_id: 特征分组ID
+            val_logs: 评估结果字典
+            save_dir: 保存目录
+        """
+        try:
+            # 创建保存目录
+            os.makedirs(save_dir, exist_ok=True)
+            
+            # 构建文件名
+            filename = self._build_prediction_filename(val_logs)
+            filepath = os.path.join(save_dir, filename + ".npz")
+            
+            # 准备保存的数据
+            save_data = {
+                'y_pred': y_pred,
+                'y_true': y_true,
+                'model_id': self.model_id
+            }
+            
+            # 添加group_id（如果存在）
+            if group_id is not None:
+                save_data['group_id'] = group_id
+                
+            # 添加feature_group_id（如果存在）
+            if feature_group_id is not None:
+                save_data['feature_group_id'] = feature_group_id
+            
+            # 添加评估指标
+            for key, value in val_logs.items():
+                if isinstance(value, (int, float)):
+                    save_data[f'metric_{key}'] = value
+            
+            # 保存数据
+            np.savez_compressed(filepath, **save_data)
+            logging.info(f"Prediction results saved to: {filepath}")
+            
+        except Exception as e:
+            logging.warning(f"Failed to save prediction results: {str(e)}")
+
+    def _build_prediction_filename(self, val_logs):
+        """
+        根据评估结果构建文件名
+        格式: {model_id}_AUC_{auc_value}_groupAUC_{name}_{auc_value}_groupAUC_{name}_{auc_value}
+        
+        Args:
+            val_logs: 评估结果字典
+            
+        Returns:
+            str: 构建的文件名
+        """
+        filename_parts = [self.model_id]
+        
+        # 添加主要AUC指标
+        if 'AUC' in val_logs:
+            auc_value = f"{val_logs['AUC']:.4f}"
+            filename_parts.extend(['AUC', auc_value])
+        
+        # 添加所有包含AUC的分组指标
+        group_auc_metrics = []
+        for key, value in val_logs.items():
+            if 'AUC' in key and key != 'AUC' and isinstance(value, (int, float)):
+                # 处理分组AUC指标
+                group_name = key.replace('_AUC', '').replace('AUC_', '')
+                group_value = f"{value:.4f}"
+                group_auc_metrics.extend(['groupAUC', group_name, group_value])
+        
+        filename_parts.extend(group_auc_metrics)
+        
+        # 如果没有找到任何AUC指标，使用其他主要指标
+        if len(filename_parts) == 1:  # 只有model_id
+            for key, value in val_logs.items():
+                if isinstance(value, (int, float)) and key in ['logloss', 'gAUC', 'avgAUC']:
+                    metric_value = f"{value:.4f}"
+                    filename_parts.extend([key, metric_value])
+                    break
+        
+        # 确保文件名不会过长，限制在200字符内
+        filename = '_'.join(filename_parts)
+        if len(filename) > 200:
+            # 截断过长的文件名，保留前180字符
+            filename = filename[:180] + '_truncated'
+            
+        return filename
 
     def predict(self, data_generator):
         self.eval()  # set to evaluation mode
@@ -260,8 +374,8 @@ class BaseModel(nn.Module):
             y_pred = np.array(y_pred, np.float64)
             return y_pred
 
-    def evaluate_metrics(self, y_true, y_pred, metrics, group_id=None):
-        return evaluate_metrics(y_true, y_pred, metrics, group_id)
+    def evaluate_metrics(self, y_true, y_pred, metrics, group_id=None, feature_group_id=None):
+        return evaluate_metrics(y_true, y_pred, metrics, group_id, feature_group_id)
 
     def save_weights(self, checkpoint):
         torch.save(self.state_dict(), checkpoint)

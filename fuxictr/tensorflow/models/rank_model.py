@@ -91,6 +91,9 @@ class BaseModel(Model):
     def get_group_id(self, inputs):
         return inputs[self.feature_map.group_id]
 
+    def get_feature_group_id(self, inputs):
+        return inputs[self.feature_map.feature_group_id]
+
     def lr_decay(self, factor=0.1, min_lr=1e-6):
         self.optimizer.learning_rate = max(self.optimizer.learning_rate * factor, min_lr)
         return self.optimizer.learning_rate.numpy()
@@ -181,6 +184,7 @@ class BaseModel(Model):
         y_pred = []
         y_true = []
         group_id = []
+        feature_group_id = []
         if self._verbose > 0:
             data_generator = tqdm(data_generator, disable=False, file=sys.stdout)
         for batch_data in data_generator:
@@ -189,18 +193,21 @@ class BaseModel(Model):
             y_true.extend(self.get_labels(batch_data).numpy().reshape(-1))
             if self.feature_map.group_id is not None:
                 group_id.extend(self.get_group_id(batch_data).numpy().reshape(-1))
+            if self.feature_map.feature_group_id is not None:
+                feature_group_id.extend(self.get_feature_group_id(batch_data).numpy().reshape(-1))
         y_pred = np.array(y_pred, np.float64)
         y_true = np.array(y_true, np.float64)
         group_id = np.array(group_id) if len(group_id) > 0 else None
+        feature_group_id = np.array(feature_group_id) if len(feature_group_id) > 0 else None
         if metrics is not None:
-            val_logs = self.evaluate_metrics(y_true, y_pred, metrics, group_id)
+            val_logs = self.evaluate_metrics(y_true, y_pred, metrics, group_id, feature_group_id)
         else:
-            val_logs = self.evaluate_metrics(y_true, y_pred, self.validation_metrics, group_id)
+            val_logs = self.evaluate_metrics(y_true, y_pred, self.validation_metrics, group_id, feature_group_id)
         logging.info('[Metrics] ' + ' - '.join('{}: {:.6f}'.format(k, v) for k, v in val_logs.items()))
         return val_logs
 
-    def evaluate_metrics(self, y_true, y_pred, metrics, group_id=None):
-        return evaluate_metrics(y_true, y_pred, metrics, group_id)
+    def evaluate_metrics(self, y_true, y_pred, metrics, group_id=None, feature_group_id=None):
+        return evaluate_metrics(y_true, y_pred, metrics, group_id, feature_group_id)
 
     def get_output_activation(self, task):
         if task == "binary_classification":
