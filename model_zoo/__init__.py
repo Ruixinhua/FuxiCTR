@@ -49,4 +49,4 @@ from .multitask import ShareBottom, MMoE, PLE
 from .EulerNet.src import EulerNet
 from .WuKong.src import WuKong
 from .GDCN.src import GDCN
-from .MTCL.src import MTCL
+from .MTCL.src import MTCL, DualTowerModel, DualTowerCL

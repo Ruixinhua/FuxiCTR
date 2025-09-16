@@ -103,7 +103,7 @@ class Tokenizer(object):
             self.vocab["__OOV__"] = self.vocab_size()
 
     def encode_meta(self, series):
-        word_counts = dict(series.value_counts())
+        word_counts = Counter(dict(series.value_counts()))
         if len(self.vocab) == 0:
             self.build_vocab(word_counts)
         else: # for considering meta data in test data

@@ -586,6 +586,38 @@ PNNCL_taobaoad_x1_006_070_010_001_MTCL_006_8568a61d:
     verbose: 0
     workers: 3
 
+PNNCL_taobaoad_x1_006_070_010_001_07202108:
+    model: PNNCL
+    dataset_id: taobaoad_x1_006_070_010
+    batch_norm: false
+    batch_size: 8192
+    debug: false
+    embedding_dim: 32
+    embedding_dropout: 0
+    embedding_regularizer: 5.0e-06
+    epochs: 100
+    group_id: group_id
+    hidden_activations: relu
+    hidden_units: [512, 256]
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    metrics: [logloss, AUC]
+    model_id: PNNCL
+    monitor: {AUC: 1, gAUC: 1}
+    monitor_mode: max
+    net_dropout: 0
+    net_regularizer: 0
+    optimizer: adam
+    early_stop_patience: 2
+    pickle_feature_encoder: true
+    save_best_only: true
+    seed: 20222023
+    shuffle: true
+    task: binary_classification
+    use_hdf5: true
+    verbose: 0
+    workers: 3
+
 PNNCL_avazu_x4_080_010_013_baseline_MT_108_06974113:
     batch_norm: false
     batch_size: 10000
@@ -829,6 +861,37 @@ PNNCL_avazu_x4_080_010_013_baseline_MTCL_011_a27738fb:
     use_scene_id_mapping: true
     verbose: 0
     workers: 3
+PNNCL_avazu_x4_080_010_013_1893e8ce:
+    batch_norm: false
+    batch_size: 10000
+    dataset_id: avazu_x4_080_010
+    debug: false
+    embedding_dim: 40
+    embedding_dropout: 0
+    embedding_regularizer: 0
+    epochs: 100
+    hidden_activations: relu
+    hidden_units: [400, 400, 400]
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    metrics: [logloss, AUC]
+    model: PNNCL
+    model_id: PNNCL_base
+    model_root: ./Avazu/PNNCL_avazu_x4_080_010_002/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_dropout: 0
+    net_regularizer: 0
+    optimizer: adam
+    early_stop_patience: 2
+    pickle_feature_encoder: true
+    save_best_only: true
+    seed: 2019
+    shuffle: true
+    task: binary_classification
+    use_hdf5: true
+    verbose: 0
+    workers: 3
 
 PNNCL_criteo_private_ad_cvr_002_69a1df28_MTOnly_006_7a250b05:
     batch_norm: false
@@ -1018,7 +1081,6 @@ DCNv3CL_taobaoad_x1_006_070_010_16_005_q9r1s2t3_MT16_003_4b839d2b:
     use_domain_aware_structure: true
     use_scene_id_mapping: true
     verbose: 0
-
 DCNv3CL_taobaoad_x1_006_070_010_16_005_q9r1s2t3_base_007_1d326f36:
     batch_norm: true
     batch_size: 10000
@@ -1475,6 +1537,94 @@ DCNv3CL_avazu_x4_080_010_16_005_q9r1s2t3_CL_012_70bd1c4f:
     task: binary_classification
     temperature: 4.0
     use_cl_mask: true
+    verbose: 0
+DCNv3CL_avazu_x4_080_010_16_005_q9r1s2t3_MTCL_006_0a5a1624:
+    base_loss_weight: 1.0
+    batch_norm: true
+    batch_size: 10000
+    dataset_id: avazu_x4_080_010
+    debug_mode: false
+    deep_net_dropout: 0.1
+    default_value: 1
+    distance_loss_weight: 0.0
+    early_stop_patience: 1
+    embedding_dim: 32
+    embedding_regularizer: 0.0
+    epochs: 2
+    feature2id_dict: {'0': 0, '1': 1}
+    feature_alignment_loss_weight: 0.0
+    feature_map_dict: {'0': 2, '1': 1}
+    field_uniformity_loss_weight: 0.001
+    group_aware_loss_weight: 0.002
+    group_id: null
+    knowledge_distillation_loss_weight: 0.0
+    layer_norm: true
+    learning_rate: 0.001
+    loss: binary_crossentropy
+    mapping_feature_name: is_personalization
+    mapping_feature_type: sparse
+    mask_strategy: zero
+    mask_type: Personalisation
+    metrics: [AUC, logloss]
+    model: DCNv3CL
+    model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/DCNv3CL_avazu_MTCL/
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    net_regularizer: 0
+    num_deep_cross_layers: 3
+    num_heads: 8
+    num_shallow_cross_layers: 4
+    num_workers: 1
+    optimizer: adam
+    personalization_feature_list: [device_ip, device_id]
+    pickle_feature_encoder: true
+    save_best_only: true
+    scene_num_shift: 0
+    seed: 2019
+    shallow_net_dropout: 0.1
+    shuffle: true
+    task: binary_classification
+    temperature: 4.0
+    tower_activation: relu
+    tower_dropout_list: [0.0, 0.0]
+    tower_hidden_units_list:
+    - [512, 256, 128, 64]
+    - [512, 256, 128, 64]
+    tower_l2_reg_list: [0.0, 0.0]
+    use_bn_tower: false
+    use_cl_mask: true
+    use_domain_aware_structure: true
+    use_scene_id_mapping: true
+    verbose: 0
+DCNv3_avazu_x4_080_010_005_q9r1s2t3:
+    model: DCNv3
+    dataset_id: avazu_x4_080_010
+    loss: binary_crossentropy
+    metrics: [AUC, logloss]
+    task: binary_classification
+    optimizer: adam
+    learning_rate: 0.001
+    embedding_regularizer: 0
+    net_regularizer: 0
+    batch_size: 10000
+    embedding_dim: 16
+    num_deep_cross_layers: 3
+    num_shallow_cross_layers: 4
+    deep_net_dropout: 0.1
+    shallow_net_dropout: 0.1
+    layer_norm: true
+    batch_norm: true
+    num_heads: 8
+    epochs: 100
+    shuffle: true
+    seed: 2019
+    monitor: {AUC: 1, logloss: -1}
+    monitor_mode: max
+    model_id: DCNv3_avazu_x4_base
+    num_workers: 1
+    patience: 2
+    pickle_feature_encoder: true
+    save_best_only: true
     verbose: 0
 
 DCNv3_multitower_criteo_private_ad_cvr_002_50_010_16_019_i3j4k5l6:

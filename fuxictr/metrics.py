@@ -121,6 +121,7 @@ def compute_feature_group_metrics(y_true, y_pred, metrics, feature_group_id):
     for group_value, count in group_counts.items():
         ratio = (count / total_samples) * 100
         result_dict[f'group_{group_value}_ratio'] = ratio
+        result_dict[f'group_{group_value}_count'] = count
     
     # 按特征分组计算metrics
     for group_value, group_df in df.groupby('feature_group'):

@@ -43,11 +43,13 @@ if __name__ == '__main__':
     parser.add_argument('--gpu', type=int, default=-1, help='The gpu index, -1 for cpu')
     parser.add_argument('--save_predictions', action='store_true', help='Whether to save prediction results for model ensemble')
     parser.add_argument('--predictions_dir', type=str, default='./predictions', help='Directory to save prediction results')
+    parser.add_argument('--save_checkpoints', action='store_true', help='Whether to save model checkpoints')
     args = vars(parser.parse_args())
     
     experiment_id = args['expid']
     params = load_config(args['config'], experiment_id)
     params['gpu'] = args['gpu']
+    params['save_checkpoints'] = args['save_checkpoints']
     set_logger(params)
     logging.info("Params: " + print_to_json(params))
     seed_everything(seed=params['seed'])

@@ -33,7 +33,8 @@ class BaseModel(nn.Module):
                  feature_map, 
                  model_id="BaseModel", 
                  task="binary_classification", 
-                 gpu=-1, 
+                 gpu=-1,
+                 save_checkpoints=True,
                  monitor="AUC", 
                  save_best_only=True, 
                  monitor_mode="max", 
@@ -50,6 +51,7 @@ class BaseModel(nn.Module):
         self._early_stop_patience = early_stop_patience
         self._eval_steps = eval_steps # None default, that is evaluating every epoch
         self._save_best_only = save_best_only
+        self._save_checkpoints = save_checkpoints
         self._embedding_regularizer = embedding_regularizer
         self._net_regularizer = net_regularizer
         self._reduce_lr_on_plateau = reduce_lr_on_plateau
@@ -168,6 +170,9 @@ class BaseModel(nn.Module):
         logging.info("Training finished.")
         logging.info("Load best model: {}".format(self.checkpoint))
         self.load_weights(self.checkpoint)
+        if not self._save_checkpoints:
+            logging.info("Remove checkpoints: {}".format(self.checkpoint))
+            os.remove(self.checkpoint)
 
     def checkpoint_and_earlystop(self, logs, min_delta=1e-6):
         monitor_value = self._monitor.get_value(logs)
