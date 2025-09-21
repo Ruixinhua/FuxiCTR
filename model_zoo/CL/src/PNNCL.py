@@ -86,7 +86,7 @@ class PNNCL(BaseModel, ContrastiveLearningBase):
             raise NotImplementedError("product_type={} has not been implemented.".format(product_type))
             
         self.remove_feature = kwargs.get("remove_feature")
-        if self.remove_feature is not None:
+        if self.remove_feature is not None and len(self.remove_feature):
             num_fields = feature_map.num_fields - 1
         else:
             num_fields = feature_map.num_fields

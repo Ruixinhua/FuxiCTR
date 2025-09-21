@@ -108,8 +108,8 @@ def enumerate_params(config_file, exclude_expid=[]):
     model_config = os.path.join(config_dir, "model_config.yaml")
     with open(model_config, "w") as fw:
         yaml.dump(merged_param_combs, fw, default_flow_style=None, indent=4)
-    print("Enumerate all tuner configurations done.")    
-    return config_dir
+    print(f"Enumerate all tuner configurations done. Total: {len(merged_param_combs)} experiments.")
+    return config_dir, tuner_keys
 
 def load_experiment_ids(config_dir):
     model_configs = glob.glob(os.path.join(config_dir, "model_config.yaml"))
@@ -122,7 +122,7 @@ def load_experiment_ids(config_dir):
             experiment_id_list += config_dict.keys()
     return sorted(experiment_id_list)
 
-def grid_search(config_dir, gpu_list, expid_tag=None, script='run_expid.py'):
+def grid_search(config_dir, gpu_list, expid_tag=None, script='run_expid.py', tunner_params_key=None):
     experiment_id_list = load_experiment_ids(config_dir)
     if expid_tag is not None:
         experiment_id_list = [expid for expid in experiment_id_list if str(expid_tag) in expid]
@@ -135,8 +135,8 @@ def grid_search(config_dir, gpu_list, expid_tag=None, script='run_expid.py'):
             idle_idx = idle_queue.pop(0)
             gpu_id = gpu_list[idle_idx]
             expid = experiment_id_list.pop(0)
-            cmd = "python -u {} --config {} --expid {} --gpu {}"\
-                    .format(script, config_dir, expid, gpu_id)
+            cmd = "python -u {} --config {} --expid {} --gpu {} --tunner_params_key {}"\
+                    .format(script, config_dir, expid, gpu_id, tunner_params_key)
             p = subprocess.Popen(cmd.split())
             processes[idle_idx] = p
         else:

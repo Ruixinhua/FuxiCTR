@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # =========================================================================
+import logging
 
 from torch import nn
 import torch
@@ -45,13 +46,8 @@ class PNN(BaseModel):
         self.embedding_layer = FeatureEmbedding(feature_map, embedding_dim)
         if product_type != "inner":
             raise NotImplementedError("product_type={} has not been implemented.".format(product_type))
-        self.remove_feature = kwargs.get("remove_feature")
-        if self.remove_feature is not None:
-            num_fields = feature_map.num_fields - 1
-        else:
-            num_fields = feature_map.num_fields
-        self.inner_product_layer = InnerProductInteraction(num_fields, output="inner_product")
-        input_dim = int(num_fields * (num_fields - 1) / 2)  + num_fields * embedding_dim
+        self.inner_product_layer = InnerProductInteraction(self.num_fields, output="inner_product")
+        input_dim = int(self.num_fields * (self.num_fields - 1) / 2)  + self.num_fields * embedding_dim
         self.dnn = MLP_Block(input_dim=input_dim,
                              output_dim=1, 
                              hidden_units=hidden_units,
@@ -67,9 +63,7 @@ class PNN(BaseModel):
         """
         Inputs: [X, y]
         """
-        if self.remove_feature is not None and self.remove_feature in inputs:
-            del inputs[self.remove_feature]
-        X = self.get_inputs(inputs)
+        X = self.get_inputs(self.drop_features(inputs))
         feature_emb = self.embedding_layer(X)
         inner_products = self.inner_product_layer(feature_emb)
         dense_input = torch.cat([feature_emb.flatten(start_dim=1), inner_products], dim=1)

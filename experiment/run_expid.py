@@ -19,13 +19,11 @@ import os
 os.chdir(os.path.dirname(os.path.realpath(__file__)))
 import sys
 import logging
-import fuxictr_version
-from datetime import datetime
-from fuxictr.utils import load_config, set_logger, print_to_json, print_to_list
+from fuxictr.utils import load_config, set_logger, print_to_json, save_results_to_csv
 from fuxictr.features import FeatureMap
 from fuxictr.pytorch.dataloaders import RankDataLoader
 from fuxictr.pytorch.torch_utils import seed_everything
-from fuxictr.preprocess import FeatureProcessor, build_dataset
+from fuxictr.preprocess import build_dataset
 from fuxictr.datasets.avazu import CustomizedFeatureProcessor
 import model_zoo
 import gc
@@ -44,12 +42,15 @@ if __name__ == '__main__':
     parser.add_argument('--save_predictions', action='store_true', help='Whether to save prediction results for model ensemble')
     parser.add_argument('--predictions_dir', type=str, default='./predictions', help='Directory to save prediction results')
     parser.add_argument('--save_checkpoints', action='store_true', help='Whether to save model checkpoints')
+    parser.add_argument('--tunner_params_key', type=str, default=None,
+                        help='Parameters for hyper-parameter tuning, in format of key1,key2,...,')
     args = vars(parser.parse_args())
     
     experiment_id = args['expid']
     params = load_config(args['config'], experiment_id)
     params['gpu'] = args['gpu']
     params['save_checkpoints'] = args['save_checkpoints']
+    params['tunner_params_key'] = args['tunner_params_key']
     set_logger(params)
     logging.info("Params: " + print_to_json(params))
     seed_everything(seed=params['seed'])
@@ -121,11 +122,6 @@ if __name__ == '__main__':
             }
         else:
             test_result = model.evaluate(test_gen, save_predictions=args['save_predictions'], save_dir=os.path.join(args['predictions_dir'], 'test'))
-    
+    # 使用抽离的保存函数
     result_filename = Path(args['config']).name.replace(".yaml", "") + '.csv'
-    with open(result_filename, 'a+') as fw:
-        fw.write(' {},[command] python {},[exp_id] {},[dataset_id] {},[train] {},[val] {},[test] {}\n' \
-            .format(datetime.now().strftime('%Y%m%d-%H%M%S'), 
-                    ' '.join(sys.argv), experiment_id, params['dataset_id'],
-                    "N.A.", print_to_list(valid_result), print_to_list(test_result)))
-
+    save_results_to_csv(params, experiment_id, result_filename, valid_result, test_result)

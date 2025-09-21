@@ -27,6 +27,8 @@ if __name__ == '__main__':
     parser.add_argument('--tag', type=str, default=None, 
                         help='Use the tag to determine which expid to run, e.g. 001 for the first expid.')
     parser.add_argument('--gpu', nargs='+', default=[-1], help='The list of gpu devices, -1 for cpu.')
+    parser.add_argument('--tuner_params_key', type=str, default=None,
+                        help='Parameters for hyper-parameter tuning, in format of key1,key2,...,')
     args = vars(parser.parse_args())
     gpu_list = args['gpu']
     expid_tag = args['tag']
@@ -34,6 +36,8 @@ if __name__ == '__main__':
     # generate parameter space combinations
     if os.path.isdir(args['config']):
         config_dir = args["config"]
+        tuner_params_key = args["tuner_params_key"]
     else:
-        config_dir = autotuner.enumerate_params(args['config'])
-    autotuner.grid_search(config_dir, gpu_list, expid_tag)
+        config_dir, tuner_params_key = autotuner.enumerate_params(args['config'])
+        tuner_params_key = ','.join(tuner_params_key)
+    autotuner.grid_search(config_dir, gpu_list, expid_tag, tunner_params_key=tuner_params_key)

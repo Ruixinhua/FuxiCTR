@@ -97,6 +97,90 @@ def print_to_list(data):
     return ' - '.join('{}: {:.6f}'.format(k, v) for k, v in data.items())
 
 
+def save_results_to_csv(params, experiment_id, result_filename, valid_result, test_result):
+    import csv
+    tunner_params_key = params.get('tunner_params_key')
+    tunner_params_key = tunner_params_key.split(',') if tunner_params_key is not None else []
+
+    base_dataset_id = str(params['dataset_id'])
+
+    group_ids = []
+    if isinstance(valid_result, dict):
+        for k in valid_result.keys():
+            if k.startswith('group_') and k.endswith('_ratio'):
+                gid = k[len('group_'):-len('_ratio')]
+                group_ids.append(gid)
+    group_ids = sorted(group_ids, key=lambda x: float(x)) if group_ids else []
+
+    header = [
+        'model_id', 'dataset_id', 'group_id', 'ratio', 'count',
+        'val_auc', 'val_logloss', 'test_auc', 'test_logloss'
+    ] + tunner_params_key
+
+    file_exists = os.path.exists(result_filename)
+    need_header = True
+    if file_exists:
+        try:
+            need_header = os.path.getsize(result_filename) == 0
+        except Exception:
+            need_header = True
+
+    with open(result_filename, 'a+', newline='') as fcsv:
+        writer = csv.writer(fcsv, lineterminator='\n')
+        if not file_exists or need_header:
+            writer.writerow(header)
+
+        def get_metric(result_dict, key, default=''):
+            if isinstance(result_dict, dict):
+                v = round(result_dict.get(key, 0), 6)
+                if 0.5 < v < 1:  # e.g. auc
+                    v  = '{:.2f}'.format(v*100)
+                elif 0 <= v <= 0.5:  # e.g. logloss
+                    v = '{:.4f}'.format(v)
+                return v
+            return default
+
+        model_id = params.get('model_id', experiment_id)
+
+        if group_ids:
+            for gid in group_ids:
+                ratio_key = f'group_{gid}_ratio'
+                count_key = f'group_{gid}_count'
+                val_auc_key = f'AUC_group_{gid}'
+                val_logloss_key = f'logloss_group_{gid}'
+                test_auc_key = f'AUC_group_{gid}'
+                test_logloss_key = f'logloss_group_{gid}'
+
+                row = [
+                    model_id,
+                    base_dataset_id,
+                    gid,
+                    get_metric(valid_result, ratio_key, ''),
+                    get_metric(valid_result, count_key, ''),
+                    get_metric(valid_result, val_auc_key, get_metric(valid_result, 'AUC', '')),
+                    get_metric(valid_result, val_logloss_key, get_metric(valid_result, 'logloss', '')),
+                    get_metric(test_result, test_auc_key, get_metric(test_result, 'AUC', '')),
+                    get_metric(test_result, test_logloss_key, get_metric(test_result, 'logloss', '')),
+                ]
+                for k in tunner_params_key:
+                    row.append(params.get(k, ''))
+                writer.writerow(row)
+        row = [
+            model_id,
+            base_dataset_id,
+            'all',
+            '',
+            '',
+            get_metric(valid_result, 'AUC', ''),
+            get_metric(valid_result, 'logloss', ''),
+            get_metric(test_result, 'AUC', ''),
+            get_metric(test_result, 'logloss', '')
+        ]
+        for k in tunner_params_key:
+            row.append(params.get(k, ''))
+        writer.writerow(row)
+
+
 class Monitor(object):
     def __init__(self, kv):
         if isinstance(kv, str):

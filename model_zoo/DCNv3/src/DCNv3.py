@@ -104,7 +104,7 @@ class DCNv3(BaseModel):
 
 
     def forward(self, inputs):
-        X = self.get_inputs(inputs)
+        X = self.get_inputs(self.drop_features(inputs))
         feature_emb = self.embedding_layer(X)
 
         if self.use_domain_aware_structure:

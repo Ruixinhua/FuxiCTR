@@ -62,6 +62,18 @@ class BaseModel(nn.Module):
         self.model_dir = os.path.join(kwargs["model_root"], feature_map.dataset_id)
         self.checkpoint = os.path.abspath(os.path.join(self.model_dir, self.model_id + ".model"))
         self.validation_metrics = kwargs["metrics"]
+        # Drop features
+        self.drop_feature_list = kwargs.get("drop_feature_list", [])
+        logging.info(f'Drop features in PNN: {self.drop_feature_list}')
+        self.drop_feature_list = [f for f in self.drop_feature_list if f in feature_map.features]
+        self.num_fields = feature_map.num_fields - len(self.drop_feature_list)
+
+    def drop_features(self, inputs):
+        if len(self.drop_feature_list) > 0:
+            for d in self.drop_feature_list:
+                if d in inputs:
+                    del inputs[d]
+        return inputs
 
     def compile(self, optimizer, loss, lr):
         self.optimizer = get_optimizer(optimizer, self.parameters(), lr)
