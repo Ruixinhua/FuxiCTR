@@ -1,4 +1,4 @@
-# CL参数优化
+# 样例参数配置文件，基于PNN模型在Avazu数据集上进行超参数搜索实验
 
 base_config: ./
 base_expid: PNN_avazu_x4_050_050_maskmerge_hyper
@@ -8,7 +8,7 @@ dataset_id: avazu_x4_050_050_maskmerge
 dataset_config:
     avazu_x4_050_050_maskmerge:
         data_format: parquet
-        data_root: /work/gm85/m85000/FuxiCTR/data/mask_merge/
+        data_root:
         feature_cols:
         - {active: false, dtype: str, name: id, type: categorical}
         # 非个性化分类特征 Ad + context: 16+3=19
@@ -27,9 +27,9 @@ dataset_config:
         label_col: {dtype: float, name: click}
         feature_group_id: is_personalization
         min_categr_count: 2
-        test_data: /scratch/dliu2/FuxiCTR/datasets/Avazu/Avazu_x4/test.csv
-        train_data: /scratch/dliu2/FuxiCTR/datasets/Avazu/Avazu_x4/train.csv
-        valid_data: /scratch/dliu2/FuxiCTR/datasets/Avazu/Avazu_x4/valid.csv
+        test_data: /path_to_raw_data/keep_this/test.csv
+        train_data: /path_to_raw_data/keep_this/train.csv
+        valid_data: /path_to_raw_data/keep_this/valid.csv
 
 # 模型基础配置
 model_config:
