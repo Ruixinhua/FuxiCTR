@@ -117,3 +117,98 @@ def get_initializer(initializer):
             raise ValueError("initializer={} is not supported."\
                              .format(initializer))
     return initializer
+
+
+class FeatureSeparator:
+    """
+    特征分离器：为非个性化模型创建mask后的特征
+
+    新逻辑：
+    - 个性化塔：使用全部特征
+    - 非个性化塔：使用全部特征，但对个性化数据的个性化特征进行mask
+    """
+
+    def __init__(self, personalization_feature_list=None, feature_map=None):
+        """
+        初始化特征分离器
+
+        Args:
+            personalization_feature_list: 个性化特征列表
+            feature_map: 特征映射，用于获取特征类型信息
+        """
+        self.personalization_feature_list = personalization_feature_list or []
+        self.feature_map = feature_map
+        self.mask_values = {feature: self._get_mask_value(feature)
+                            for feature in personalization_feature_list if feature in feature_map.features}
+
+    def _get_mask_value(self, feature_name):
+        """
+        获取特征的mask值
+
+        Args:
+            feature_name: 特征名称
+
+        Returns:
+            mask_value: 用于mask的值
+        """
+        if self.feature_map and feature_name in self.feature_map.features:
+            feature_spec = self.feature_map.features[feature_name]
+            feature_type = feature_spec.get("type", "categorical")
+
+            if feature_type == "categorical":
+                # 分类特征使用padding_idx作为mask值
+                return feature_spec.get("padding_idx", 0)
+            elif feature_type == "sequence":
+                # 序列特征使用padding_idx作为mask值
+                return feature_spec.get("padding_idx", 0)
+            elif feature_type == "numeric":
+                # 数值特征使用0作为mask值
+                return 0.0
+            else:
+                # 其他类型默认使用0
+                return 0
+        else:
+            # 如果没有特征映射信息，默认使用0
+            return 0
+
+    def separate_features(self, inputs, personalized_mask=None):
+        """
+        分离输入特征，为非个性化模型创建mask后的特征
+
+        Args:
+            inputs: 输入特征字典
+            personalized_mask: 个性化用户掩码 [batch_size]
+
+        Returns:
+            tuple: (personalized_features, non_personalized_features)
+                - personalized_features: 包含所有特征（给个性化塔）
+                - non_personalized_features: 全特征，但个性化数据的个性化特征被mask（给非个性化塔）
+        """
+        # 个性化塔使用全部特征
+        personalized_features = inputs.copy()
+
+        # 非个性化塔使用全特征，但需要mask个性化数据的个性化特征
+        non_personalized_features = {}
+
+        for field_name, field_data in inputs.items():
+            if field_name in self.personalization_feature_list:
+                # 对于个性化特征，需要mask掉个性化用户的数据
+                masked_data = field_data.clone()
+
+                if torch.sum(personalized_mask) > 0:  # 如果有个性化用户，只对个性化用户进行操作
+                    mask_value = self.mask_values[field_name]
+
+                    # 将个性化用户的个性化特征设置为mask值
+                    if field_data.dtype in [torch.long, torch.int32, torch.int64]:
+                        # 整数类型特征
+                        masked_data[personalized_mask] = int(mask_value)
+                    else:
+                        # 浮点类型特征
+                        masked_data[personalized_mask] = float(mask_value)
+
+                non_personalized_features[field_name] = masked_data
+            else:
+                # 非个性化特征保持不变
+                non_personalized_features[field_name] = field_data
+
+        return personalized_features, non_personalized_features

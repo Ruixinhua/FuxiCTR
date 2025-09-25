@@ -51,7 +51,7 @@ class DCNv3(BaseModel):
 
         self.embedding_layer = MultiHeadFeatureEmbedding(feature_map, embedding_dim * num_heads, num_heads)
         
-        cross_input_dim = feature_map.num_fields * embedding_dim
+        cross_input_dim = self.num_fields * embedding_dim
 
         self.ECN = ExponentialCrossNetwork(input_dim=cross_input_dim,
                                            num_cross_layers=num_deep_cross_layers,
@@ -104,7 +104,7 @@ class DCNv3(BaseModel):
 
 
     def forward(self, inputs):
-        X = self.get_inputs(self.drop_features(inputs))
+        X = self.get_inputs(inputs)
         feature_emb = self.embedding_layer(X)
 
         if self.use_domain_aware_structure:

@@ -64,11 +64,23 @@ class BaseModel(nn.Module):
         self.validation_metrics = kwargs["metrics"]
         # Drop features
         self.drop_feature_list = kwargs.get("drop_feature_list", [])
-        logging.info(f'Drop features in PNN: {self.drop_feature_list}')
         self.drop_feature_list = [f for f in self.drop_feature_list if f in feature_map.features]
+        if len(self.drop_feature_list) > 0:
+            logging.info(f'Drop features for training: {self.drop_feature_list}')
         self.num_fields = feature_map.num_fields - len(self.drop_feature_list)
+        # Select features for training
+        self.select_feature_list = kwargs.get("select_feature_list", [])
+        self.select_feature_list = [f for f in self.select_feature_list if f in feature_map.features]
+        if len(self.select_feature_list) > 0:
+            logging.info(f'Select features for training: {self.select_feature_list}')
+            self.num_fields = len(self.select_feature_list)
+        if len(self.drop_feature_list) > 0 and len(self.select_feature_list) > 0:
+            logging.warning("You are setting both drop_feature_list and select_feature_list, "
+                            "drop_feature_list will be ignored.")
 
-    def drop_features(self, inputs):
+    def select_features(self, inputs):
+        if len(self.select_feature_list) > 0:
+            return {f: inputs[f] for f in self.select_feature_list if f in inputs}
         if len(self.drop_feature_list) > 0:
             for d in self.drop_feature_list:
                 if d in inputs:
@@ -122,6 +134,7 @@ class BaseModel(nn.Module):
         self.apply(custom_reset_params)
 
     def get_inputs(self, inputs, feature_source=None):
+        inputs = self.select_features(inputs)
         X_dict = dict()
         for feature in inputs.keys():
             if feature in self.feature_map.labels:
@@ -219,6 +232,8 @@ class BaseModel(nn.Module):
         self.optimizer.zero_grad()
         return_dict = self.forward(batch_data)
         y_true = self.get_labels(batch_data)
+        if self.use_feature_separator:
+            y_true = torch.cat((y_true, y_true), dim=0)
         loss = self.compute_loss(return_dict, y_true)
         loss.backward()
         nn.utils.clip_grad_norm_(self.parameters(), self._max_gradient_norm)

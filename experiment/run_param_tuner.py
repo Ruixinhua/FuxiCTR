@@ -18,9 +18,11 @@
 import argparse
 import os
 import fuxictr_version
+import torch.multiprocessing as mp
 from fuxictr import autotuner 
 
 if __name__ == '__main__':
+    mp.set_sharing_strategy('file_system')
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='../config/tuner_config.yaml',
                         help='The config directory or file path for para tuning.')

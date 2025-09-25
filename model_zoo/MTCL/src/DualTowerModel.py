@@ -12,113 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # =========================================================================
-
 import torch
 import os
 import logging
-import torch.nn as nn
-import torch.nn.functional as F
 from fuxictr.pytorch.models import BaseModel
-
-
-class FeatureSeparator:
-    """
-    特征分离器：为非个性化模型创建mask后的特征
-    
-    新逻辑：
-    - 个性化塔：使用全部特征
-    - 非个性化塔：使用全部特征，但对个性化数据的个性化特征进行mask
-    """
-    
-    def __init__(self, personalization_feature_list=None, feature_map=None):
-        """
-        初始化特征分离器
-        
-        Args:
-            personalization_feature_list: 个性化特征列表
-            feature_map: 特征映射，用于获取特征类型信息
-        """
-        self.personalization_feature_list = personalization_feature_list or []
-        self.feature_map = feature_map
-        logging.info(f"FeatureSeparator initialized with personalization features: {self.personalization_feature_list}")
-    
-    def _get_mask_value(self, feature_name, feature_data):
-        """
-        获取特征的mask值
-        
-        Args:
-            feature_name: 特征名称
-            feature_data: 特征数据张量
-
-        Returns:
-            mask_value: 用于mask的值
-        """
-        if self.feature_map and feature_name in self.feature_map.features:
-            feature_spec = self.feature_map.features[feature_name]
-            feature_type = feature_spec.get("type", "categorical")
-            
-            if feature_type == "categorical":
-                # 分类特征使用padding_idx作为mask值
-                return feature_spec.get("padding_idx", 0)
-            elif feature_type == "sequence":
-                # 序列特征使用padding_idx作为mask值
-                return feature_spec.get("padding_idx", 0)
-            elif feature_type == "numeric":
-                # 数值特征使用0作为mask值
-                return 0.0
-            else:
-                # 其他类型默认使用0
-                return 0
-        else:
-            # 如果没有特征映射信息，默认使用0
-            return 0
-    
-    def separate_features(self, inputs, personalized_mask):
-        """
-        分离输入特征，为非个性化模型创建mask后的特征
-        
-        Args:
-            inputs: 输入特征字典
-            personalized_mask: 个性化用户掩码 [batch_size]
-            
-        Returns:
-            tuple: (personalized_features, non_personalized_features)
-                - personalized_features: 包含所有特征（给个性化塔）
-                - non_personalized_features: 全特征，但个性化数据的个性化特征被mask（给非个性化塔）
-        """
-        # 个性化塔使用全部特征
-        personalized_features = inputs.copy()
-        
-        # 非个性化塔使用全特征，但需要mask个性化数据的个性化特征
-        non_personalized_features = {}
-        
-        for field_name, field_data in inputs.items():
-            if field_name in self.personalization_feature_list:
-                # 对于个性化特征，需要mask掉个性化用户的数据
-                masked_data = field_data.clone()
-                
-                if torch.sum(personalized_mask) > 0:  # 如果有个性化用户
-                    mask_value = self._get_mask_value(field_name, field_data)
-                    
-                    # 将个性化用户的个性化特征设置为mask值
-                    if field_data.dtype in [torch.long, torch.int32, torch.int64]:
-                        # 整数类型特征
-                        masked_data[personalized_mask] = int(mask_value)
-                    else:
-                        # 浮点类型特征
-                        masked_data[personalized_mask] = float(mask_value)
-                
-                non_personalized_features[field_name] = masked_data
-                
-                logging.debug(f"Masked personalization feature '{field_name}' for {torch.sum(personalized_mask).item()} personalized users")
-            else:
-                # 非个性化特征保持不变
-                non_personalized_features[field_name] = field_data
-        
-        logging.debug(f"Personalized features: {list(personalized_features.keys())}")
-        logging.debug(f"Non-personalized features (with masked personalization): {list(non_personalized_features.keys())}")
-        
-        return personalized_features, non_personalized_features
+from fuxictr.pytorch.torch_utils import FeatureSeparator
 
 
 class DualTowerRouter:
@@ -219,7 +117,6 @@ class DualTowerModel(BaseModel):
                  model_id="DualTowerModel",
                  gpu=-1,
                  learning_rate=1e-3,
-                 embedding_dim=10,
                  # 个性化塔配置
                  personalized_model_type="PNN",
                  personalized_model_params=None,
@@ -303,8 +200,6 @@ class DualTowerModel(BaseModel):
         logging.info(f"  - Personalized model use all data: {personalized_model_use_all_data}")
         logging.info(f"  - Non-personalized model use all data: {non_personalized_model_use_all_data}")
 
-
-    
     def _init_personalized_model(self):
         """
         初始化个性化模型（使用全部特征）
@@ -404,6 +299,8 @@ class DualTowerModel(BaseModel):
             "y_pred": final_pred,
             "personalized_pred": personalized_pred,
             "non_personalized_pred": non_personalized_pred,
+            "personalized_features": personalized_features,
+            "non_personalized_features": non_personalized_features,
             "personalized_mask": personalized_mask,
             "non_personalized_mask": non_personalized_mask
         }

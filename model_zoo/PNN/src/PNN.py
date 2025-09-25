@@ -63,7 +63,7 @@ class PNN(BaseModel):
         """
         Inputs: [X, y]
         """
-        X = self.get_inputs(self.drop_features(inputs))
+        X = self.get_inputs(inputs)
         feature_emb = self.embedding_layer(X)
         inner_products = self.inner_product_layer(feature_emb)
         dense_input = torch.cat([feature_emb.flatten(start_dim=1), inner_products], dim=1)

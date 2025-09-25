@@ -15,8 +15,6 @@
 
 import torch
 import logging
-import torch.nn as nn
-import torch.nn.functional as F
 import os
 from model_zoo.MTCL.src.DualTowerModel import DualTowerModel
 from model_zoo.CL.src.base import ContrastiveLearningBase
@@ -213,14 +211,11 @@ class DualTowerCL(DualTowerModel, ContrastiveLearningBase):
         
         # 如果启用特征级对比学习，获取特征嵌入
         if self.use_feature_level_cl and self.training:
-            X = self.get_inputs(inputs)
-            full_features, non_personalized_features = self.feature_separator.separate_features(X)
-            
             # 获取个性化特征的嵌入（用于特征对齐和均匀性损失）
             if hasattr(self.personalized_model, 'embedding_layer'):
                 personalized_feature_embeddings = self.get_feature_embeddings(
                     self.personalized_model.embedding_layer,
-                    full_features,
+                    return_dict["personalized_features"],
                     # self.personalization_feature_list_for_cl
                 )
                 return_dict["personalized_feature_embeddings"] = personalized_feature_embeddings
@@ -228,7 +223,7 @@ class DualTowerCL(DualTowerModel, ContrastiveLearningBase):
             if hasattr(self.non_personalized_model, 'embedding_layer'):
                 non_personalized_feature_embeddings = self.get_feature_embeddings(
                     self.non_personalized_model.embedding_layer,
-                    non_personalized_features,
+                    return_dict["non_personalized_features"],
                 )
                 return_dict["non_personalized_feature_embeddings"] = non_personalized_feature_embeddings
         

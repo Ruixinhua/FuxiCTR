@@ -1,14 +1,6 @@
-### Tiny data for tests only
-tiny_npz:
-    data_root: ../data/
-    data_format: npz
-    train_data: ../data/tiny_npz/train.npz
-    valid_data: ../data/tiny_npz/valid.npz
-    test_data: ../data/tiny_npz/test.npz
-
 # TODO: Modify the path to your own dataset; data_root is the root directory of your processed dataset
 
-avazu_x4_080_010:
+avazu_x4:
     data_format: csv
     data_root:
     feature_cols:
@@ -29,288 +21,28 @@ avazu_x4_080_010:
     train_data:
     valid_data:
 
-taobaoad_x1_006_070_010:
-    data_format: csv
-    data_root:
-    feature_cols:
-    - {active: true, dtype: int, name: group_id, preprocess: copy_from(userid), remap: false,
-        type: meta}
-    -   active: true
-        dtype: str
-        name: [adgroup_id, cate_id, campaign_id, customer, brand, pid, btag]
-        type: categorical
-    -   active: true
-        dtype: int
-        fill_na: 0
-        name: [userid, cms_segid, cms_group_id, final_gender_code, age_level, pvalue_level,
-            shopping_level, occupation, new_user_class_level]
-        type: categorical
-    - {active: true, dtype: float, name: price, type: numeric}
-    - {active: true, dtype: str, max_len: 50, name: cate_his, padding: pre, share_embedding: cate_id,
-        splitter: ^, type: sequence}
-    - {active: true, dtype: str, max_len: 50, name: brand_his, padding: pre, share_embedding: brand,
-        splitter: ^, type: sequence}
-    - {active: true, dtype: str, max_len: 50, name: btag_his, padding: pre, share_embedding: btag,
-        splitter: ^, type: sequence}
-    label_col: {dtype: float, name: clk}
-    feature_group_id: is_personalization
-    min_categr_count: 10
-    test_data:
-    train_data:
-    valid_data:
 
-criteo_private_ad_cvr:
+avazu_x4_050_050_maskmerge:
     data_format: parquet
-    data_root:
-    data_block_size: 20480000
-#    streaming: true
-    buffer_size: 20480000
-    # 元数据特征 - 隐私标识符
-    feature_cols:
-    - {active: true, dtype: int, name: group_id, preprocess: copy_from(is_personalization), remap: false, type: meta}
-    # 非个性化分类特征 (数据为int但唯一值有限)
-    - active: true
-      dtype: int
-      name: [features_ctx_not_constrained_0, features_ctx_not_constrained_6]
-      type: categorical
-      description: "上下文分类特征，不包含个人信息"
-    # 非个性化数值特征
-    - active: true
-      dtype: float
-      name: [features_ctx_not_constrained_3]
-      type: categorical
-      description: "上下文数值特征，不包含个人信息"
-    # 出版商ID - 数值型但应视为分类特征
-    - active: true
-      dtype: float
-      name: [publisher_id]
-      type: categorical
-      description: "出版商标识符"
-    # 其他非个性化数值特征 (mixed types)
-    - active: true
-      dtype: int
-      name: [features_kv_not_constrained_3]
-      type: categorical
-      description: "KV数值型分类特征"
-    - active: true
-      dtype: float
-      name: [features_kv_not_constrained_4, features_kv_not_constrained_5, features_kv_not_constrained_6, features_kv_not_constrained_7]
-      type: categorical
-      description: "KV数值型特征"
-    - active: true
-      dtype: int
-      name: [display_order]
-      type: categorical
-      description: "显示顺序"
-    # 个性化约束特征 - 浏览器特征 (全部为Float64，但应视为分类特征)
-    - active: true
-      dtype: float
-      name: [features_browser_bits_constrained_0, features_browser_bits_constrained_2, features_browser_bits_constrained_3, features_browser_bits_constrained_4, features_browser_bits_constrained_5, features_browser_bits_constrained_6, features_browser_bits_constrained_7, features_browser_bits_constrained_8, features_browser_bits_constrained_9, features_browser_bits_constrained_10]
-      type: categorical
-      vocab_size: 4096  # 12位限制 = 2^12
-      description: "浏览器约束特征，12位隐私保护限制"
-    # 个性化约束特征 - KV特征 (mixed types，但都应视为分类特征)
-    - active: true
-      dtype: float
-      name: [features_kv_bits_constrained_0, features_kv_bits_constrained_2, features_kv_bits_constrained_4, features_kv_bits_constrained_6, features_kv_bits_constrained_7, features_kv_bits_constrained_8, features_kv_bits_constrained_9, features_kv_bits_constrained_10, features_kv_bits_constrained_11, features_kv_bits_constrained_12, features_kv_bits_constrained_13, features_kv_bits_constrained_15, features_kv_bits_constrained_16, features_kv_bits_constrained_18, features_kv_bits_constrained_19, features_kv_bits_constrained_20, features_kv_bits_constrained_21, features_kv_bits_constrained_22, features_kv_bits_constrained_24]
-      type: categorical
-      vocab_size: 4096  # 12位限制 = 2^12
-      description: "KV服务器约束特征（Float64类型），12位隐私保护限制"
-#    - active: false
-#      dtype: int
-#      name: [features_kv_bits_constrained_25, features_kv_bits_constrained_28, features_kv_bits_constrained_29, features_kv_bits_constrained_30, features_browser_bits_constrained_1, features_kv_bits_constrained_23]
-#      type: categorical
-#      vocab_size: 4096  # 12位限制 = 2^12
-#      description: "高 vocab 特征"
-    - active: true
-      dtype: int
-      name: [features_kv_bits_constrained_1, features_kv_bits_constrained_3, features_kv_bits_constrained_26]
-      type: categorical
-      vocab_size: 4096  # 12位限制 = 2^12
-      description: "KV服务器约束特征（Int64类型），12位隐私保护限制"
-    # 隐私标识符
-    - active: true
-      dtype: int
-      name: is_personalization
-      type: meta
-      vocab_size: 2
-      description: "隐私偏好标识符 (0=隐私保护用户, 1=允许个性化用户)"
-    feature_group_id: is_personalization
-    label_col: {dtype: float, name: is_click_landed}  # 修正：实际为Int32
-    min_categr_count: 10
-    test_data:
-    train_data:
-    valid_data:
-
-
-avazu_x4_080_010_per_all:
-    data_format: csv
-    data_root:
+    data_root: /work/gm85/m85000/FuxiCTR/data/mask_merge/
     feature_cols:
     - {active: false, dtype: str, name: id, type: categorical}
+    # 非个性化分类特征 Ad + context: 16+3=19
+    - active: true
+      dtype: str
+      name: [ C1, banner_pos, site_id, site_domain, site_category, app_id, app_domain, app_category, C14, C15, C16, C17, C18, C19, C20, C21 ]
+      type: categorical
     - {active: true, dtype: str, name: hour, preprocess: convert_hour, type: categorical}
-    -   active: true
-        dtype: str
-        name: [C1, banner_pos, site_id, site_domain, site_category, app_id, app_domain,
-            app_category, device_id, device_ip, device_model, device_type, device_conn_type,
-            C14, C15, C16, C17, C18, C19, C20, C21]
-        type: categorical
     - {active: true, dtype: str, name: weekday, preprocess: convert_weekday, type: categorical}
     - {active: true, dtype: str, name: weekend, preprocess: convert_weekend, type: categorical}
+    # Device 相关的个性化特征: 5
+    - active: true
+      dtype: str
+      name: [ device_ip, device_id, device_model, device_type, device_conn_type ]
+      type: categorical
     label_col: {dtype: float, name: click}
-    min_categr_count: 2
     feature_group_id: is_personalization
-    test_data:
-    train_data:
-    valid_data:
-avazu_x4_080_010_per_all_mixed:
-    data_format: csv
-    data_root: /Users/dairui/PycharmProjects/FuxiCTR/data/Avazu/
-    feature_cols:
-    - {active: false, dtype: str, name: id, type: categorical}
-    - {active: true, dtype: str, name: hour, preprocess: convert_hour, type: categorical}
-    -   active: true
-        dtype: str
-        name: [C1, banner_pos, site_id, site_domain, site_category, app_id, app_domain,
-            app_category, device_id, device_ip, device_model, device_type, device_conn_type,
-            C14, C15, C16, C17, C18, C19, C20, C21]
-        type: categorical
-    - {active: true, dtype: str, name: weekday, preprocess: convert_weekday, type: categorical}
-    - {active: true, dtype: str, name: weekend, preprocess: convert_weekend, type: categorical}
-    label_col: {dtype: float, name: click}
     min_categr_count: 2
-    feature_group_id: is_personalization
-    test_data:
-    train_data:
-    valid_data:
-
-avazu_x4_080_010_nonper_all:
-    data_format: csv
-    data_root:
-    feature_cols:
-    - {active: false, dtype: str, name: id, type: categorical}
-    - {active: true, dtype: str, name: hour, preprocess: convert_hour, type: categorical}
-    -   active: true
-        dtype: str
-        name: [C1, banner_pos, site_id, site_domain, site_category, app_id, app_domain,
-            app_category, device_id, device_ip, device_model, device_type, device_conn_type,
-            C14, C15, C16, C17, C18, C19, C20, C21]
-        type: categorical
-    - {active: true, dtype: str, name: weekday, preprocess: convert_weekday, type: categorical}
-    - {active: true, dtype: str, name: weekend, preprocess: convert_weekend, type: categorical}
-    label_col: {dtype: float, name: click}
-    min_categr_count: 2
-    feature_group_id: is_personalization
-    test_data:
-    train_data:
-    valid_data:
-
-
-avazu_x4_080_010_per_mask_all:
-    data_format: csv
-    data_root:
-    feature_cols:
-    - {active: false, dtype: str, name: id, type: categorical}
-    - {active: true, dtype: str, name: hour, preprocess: convert_hour, type: categorical}
-    -   active: true
-        dtype: str
-        name: [C1, banner_pos, site_id, site_domain, site_category, app_id, app_domain,
-            app_category, device_id, device_ip, device_model, device_type, device_conn_type,
-            C14, C15, C16, C17, C18, C19, C20, C21]
-        type: categorical
-    - {active: true, dtype: str, name: weekday, preprocess: convert_weekday, type: categorical}
-    - {active: true, dtype: str, name: weekend, preprocess: convert_weekend, type: categorical}
-    label_col: {dtype: float, name: click}
-    min_categr_count: 2
-    feature_group_id: is_personalization
-    test_data:
-    train_data:
-    valid_data:
-
-
-avazu_x4_080_010_per_mask_020:
-    data_format: csv
-    data_root:
-    feature_cols:
-    - {active: false, dtype: str, name: id, type: categorical}
-    - {active: true, dtype: str, name: hour, preprocess: convert_hour, type: categorical}
-    -   active: true
-        dtype: str
-        name: [C1, banner_pos, site_id, site_domain, site_category, app_id, app_domain,
-            app_category, device_id, device_ip, device_model, device_type, device_conn_type,
-            C14, C15, C16, C17, C18, C19, C20, C21]
-        type: categorical
-    - {active: true, dtype: str, name: weekday, preprocess: convert_weekday, type: categorical}
-    - {active: true, dtype: str, name: weekend, preprocess: convert_weekend, type: categorical}
-    label_col: {dtype: float, name: click}
-    min_categr_count: 2
-    feature_group_id: is_personalization
-    test_data:
-    train_data:
-    valid_data:
-
-
-avazu_x4_080_010_per_mask_020_per:
-    data_format: csv
-    data_root:
-    feature_cols:
-    - {active: false, dtype: str, name: id, type: categorical}
-    - {active: true, dtype: str, name: hour, preprocess: convert_hour, type: categorical}
-    -   active: true
-        dtype: str
-        name: [C1, banner_pos, site_id, site_domain, site_category, app_id, app_domain,
-            app_category, device_id, device_ip, device_model, device_type, device_conn_type,
-            C14, C15, C16, C17, C18, C19, C20, C21]
-        type: categorical
-    - {active: true, dtype: str, name: weekday, preprocess: convert_weekday, type: categorical}
-    - {active: true, dtype: str, name: weekend, preprocess: convert_weekend, type: categorical}
-    label_col: {dtype: float, name: click}
-    min_categr_count: 2
-    feature_group_id: is_personalization
-    test_data:
-    train_data:
-    valid_data:
-
-
-avazu_x4_080_010_per_mask_020_nonper:
-    data_format: csv
-    data_root:
-    feature_cols:
-    - {active: false, dtype: str, name: id, type: categorical}
-    - {active: true, dtype: str, name: hour, preprocess: convert_hour, type: categorical}
-    -   active: true
-        dtype: str
-        name: [C1, banner_pos, site_id, site_domain, site_category, app_id, app_domain,
-            app_category, device_id, device_ip, device_model, device_type, device_conn_type,
-            C14, C15, C16, C17, C18, C19, C20, C21]
-        type: categorical
-    - {active: true, dtype: str, name: weekday, preprocess: convert_weekday, type: categorical}
-    - {active: true, dtype: str, name: weekend, preprocess: convert_weekend, type: categorical}
-    label_col: {dtype: float, name: click}
-    min_categr_count: 2
-    feature_group_id: is_personalization
-    test_data:
-    train_data:
-    valid_data:
-
-
-avazu_x4_080_010_per_mask_020_mixed:
-    data_format: csv
-    data_root:
-    feature_cols:
-    - {active: false, dtype: str, name: id, type: categorical}
-    - {active: true, dtype: str, name: hour, preprocess: convert_hour, type: categorical}
-    -   active: true
-        dtype: str
-        name: [C1, banner_pos, site_id, site_domain, site_category, app_id, app_domain,
-            app_category, device_id, device_ip, device_model, device_type, device_conn_type,
-            C14, C15, C16, C17, C18, C19, C20, C21]
-        type: categorical
-    - {active: true, dtype: str, name: weekday, preprocess: convert_weekday, type: categorical}
-    - {active: true, dtype: str, name: weekend, preprocess: convert_weekend, type: categorical}
-    label_col: {dtype: float, name: click}
-    min_categr_count: 2
-    feature_group_id: is_personalization
-    test_data:
-    train_data:
-    valid_data:
+    test_data: /scratch/dliu2/FuxiCTR/datasets/Avazu/Avazu_x4/test.csv
+    train_data: /scratch/dliu2/FuxiCTR/datasets/Avazu/Avazu_x4/train.csv
+    valid_data: /scratch/dliu2/FuxiCTR/datasets/Avazu/Avazu_x4/valid.csv

@@ -305,10 +305,10 @@ class DCNv3Adapter(BaseModelAdapter):
                  num_deep_cross_layers=4,
                  num_shallow_cross_layers=4,
                  deep_net_dropout=0.1,
-                 shallow_net_dropout=0.3,
+                 shallow_net_dropout=0.1,
                  layer_norm=True,
-                 batch_norm=False,
-                 num_heads=1,
+                 batch_norm=True,
+                 num_heads=8,
                  output_activation=None,
                  **kwargs):
         super(DCNv3Adapter, self).__init__(feature_map, embedding_dim=embedding_dim, **kwargs)

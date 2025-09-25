@@ -1,0 +1,68 @@
+# CL参数优化
+
+base_config: ./
+base_expid: PNN_avazu_x4_050_050_maskmerge_hyper
+dataset_id: avazu_x4_050_050_maskmerge
+
+# 数据集配置
+dataset_config:
+    avazu_x4_050_050_maskmerge:
+        data_format: parquet
+        data_root: /work/gm85/m85000/FuxiCTR/data/mask_merge/
+        feature_cols:
+        - {active: false, dtype: str, name: id, type: categorical}
+        # 非个性化分类特征 Ad + context: 16+3=19
+        - active: true
+          dtype: str
+          name: [ C1, banner_pos, site_id, site_domain, site_category, app_id, app_domain, app_category, C14, C15, C16, C17, C18, C19, C20, C21 ]
+          type: categorical
+        - {active: true, dtype: str, name: hour, preprocess: convert_hour, type: categorical}
+        - {active: true, dtype: str, name: weekday, preprocess: convert_weekday, type: categorical}
+        - {active: true, dtype: str, name: weekend, preprocess: convert_weekend, type: categorical}
+        # Device 相关的个性化特征: 5
+        - active: true
+          dtype: str
+          name: [ device_ip, device_id, device_model, device_type, device_conn_type ]
+          type: categorical
+        label_col: {dtype: float, name: click}
+        feature_group_id: is_personalization
+        min_categr_count: 2
+        test_data: /scratch/dliu2/FuxiCTR/datasets/Avazu/Avazu_x4/test.csv
+        train_data: /scratch/dliu2/FuxiCTR/datasets/Avazu/Avazu_x4/train.csv
+        valid_data: /scratch/dliu2/FuxiCTR/datasets/Avazu/Avazu_x4/valid.csv
+
+# 模型基础配置
+model_config:
+    PNN_avazu_x4_050_050_maskmerge_hyper:
+        model: PNN
+        model_id: PNN_avazu_maskmerge_hyper
+        model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/PNN_avazu_maskmerge_hyper/
+        dataset_id: avazu_x4_050_050_maskmerge
+        debug_mode: false
+        metrics: [logloss, AUC]
+        monitor_mode: max
+        optimizer: adam
+        loss: binary_crossentropy
+        shuffle: true
+        task: binary_classification
+        early_stop_patience: 2
+        epochs: 100
+        learning_rate: 0.001
+        batch_size: 10000
+        seed: 2019
+        verbose: 0
+        save_best_only: true
+        batch_norm: false
+        embedding_dim: 40
+        embedding_dropout: 0
+        embedding_regularizer: 0
+        hidden_activations: relu
+        hidden_units: [400, 400, 400]
+        monitor: {AUC: 1}
+        net_dropout: 0
+        net_regularizer: 0
+
+tuner_space:
+    embedding_dim: [16, 32, 40]
+    hidden_units: [ [400, 400, 400], [128, 256, 512] ]
+    seed: [2019, 2025, 42]
