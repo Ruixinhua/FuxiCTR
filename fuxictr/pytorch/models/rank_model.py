@@ -23,7 +23,7 @@ import os, sys
 import logging
 from fuxictr.pytorch.layers import FeatureEmbeddingDict
 from fuxictr.metrics import evaluate_metrics
-from fuxictr.pytorch.torch_utils import get_device, get_optimizer, get_loss, get_regularizer
+from fuxictr.pytorch.torch_utils import get_device, get_optimizer, get_loss, get_regularizer, FeatureSeparator
 from fuxictr.utils import Monitor, not_in_whitelist
 from tqdm import tqdm
 
@@ -62,6 +62,13 @@ class BaseModel(nn.Module):
         self.model_dir = os.path.join(kwargs["model_root"], feature_map.dataset_id)
         self.checkpoint = os.path.abspath(os.path.join(self.model_dir, self.model_id + ".model"))
         self.validation_metrics = kwargs["metrics"]
+        self.use_feature_separator = kwargs.get("use_feature_separator", False)
+        if self.use_feature_separator:
+            self.personalization_feature_list = kwargs.get("personalization_feature_list", [])
+            self.personalization_feature_list = [f for f in self.personalization_feature_list if f in feature_map.features]
+            if len(self.personalization_feature_list) > 0:
+                logging.info(f'Personalization features: {self.personalization_feature_list}')
+            self.feature_separator = FeatureSeparator(self.personalization_feature_list, self.feature_map)
         # Drop features
         self.drop_feature_list = kwargs.get("drop_feature_list", [])
         self.drop_feature_list = [f for f in self.drop_feature_list if f in feature_map.features]
@@ -145,6 +152,13 @@ class BaseModel(nn.Module):
             if feature_source and not_in_whitelist(spec["source"], feature_source):
                 continue
             X_dict[feature] = inputs[feature].to(self.device)
+        if self.use_feature_separator and self.training:
+            batch_size = list(inputs.values())[0].size(0)
+            device = list(inputs.values())[0].device
+            mask = torch.ones(batch_size, dtype=torch.bool, device=device)
+            all_features, non_personalized_features = self.feature_separator.separate_features(X_dict, mask)
+            for feature in X_dict.keys():
+                X_dict[feature] = torch.cat((all_features[feature], non_personalized_features[feature]), dim=0)
         return X_dict
 
     def get_labels(self, inputs):
@@ -232,8 +246,8 @@ class BaseModel(nn.Module):
         self.optimizer.zero_grad()
         return_dict = self.forward(batch_data)
         y_true = self.get_labels(batch_data)
-        if self.use_feature_separator:
-            y_true = torch.cat((y_true, y_true), dim=0)
+        # if self.use_feature_separator:
+        #     y_true = torch.cat((y_true, y_true), dim=0)
         loss = self.compute_loss(return_dict, y_true)
         loss.backward()
         nn.utils.clip_grad_norm_(self.parameters(), self._max_gradient_norm)
