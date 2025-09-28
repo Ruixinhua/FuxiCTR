@@ -21,11 +21,10 @@ import logging.config
 import yaml
 import glob
 import json
-import h5py
-import numpy as np
-import pandas as pd
 from collections import OrderedDict
 import fuxictr
+import time
+import psutil
 
 
 def load_config(config_dir, experiment_id):
@@ -95,7 +94,6 @@ def print_to_json(data, sort_keys=True):
 
 def print_to_list(data):
     return ' - '.join('{}: {:.6f}'.format(k, v) for k, v in data.items())
-
 
 def save_results_to_csv(params, experiment_id, result_filename, valid_result, test_result):
     import csv
@@ -180,6 +178,38 @@ def save_results_to_csv(params, experiment_id, result_filename, valid_result, te
             row.append(params.get(k, ''))
         writer.writerow(row)
 
+def get_memory_usage_for_linux():
+    """
+    获取 Linux 系统的内存使用情况，并突出关键指标。
+    """
+    memory_info = psutil.virtual_memory()
+
+    # 将字节转换为 GB
+    total_gb = round(memory_info.total / (1024 ** 3), 2)
+    available_gb = round(memory_info.available / (1024 ** 3), 2)
+    used_gb = round(memory_info.used / (1024 ** 3), 2)
+
+    # 内存使用率应基于 "available" 来计算，更能反映内存压力
+    percent_pressure = round((total_gb - available_gb) / total_gb * 100, 1)
+
+    return {
+        "total": total_gb,
+        "available": available_gb,  # ★★★ 真正可用的内存
+        "percent": percent_pressure,
+        "used": used_gb,  # 仅应用使用的内存
+    }
+
+def monitor_memory_in_realtime():
+    mem = get_memory_usage_for_linux()
+    os.system('cls' if os.name == 'nt' else 'clear')
+    print("--- 系统内存实时监控 (Linux) ---")
+    print(f"Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
+    print(f"总内存    : {mem['total']} GB")
+    print("-------------------------------------")
+    print(f"✅ 可用内存 : {mem['available']} GB")
+    print(f"   内存压力 : {mem['percent']}%")
+    print("-------------------------------------")
+    print(f"应用已用  : {mem['used']} GB")
 
 class Monitor(object):
     def __init__(self, kv):

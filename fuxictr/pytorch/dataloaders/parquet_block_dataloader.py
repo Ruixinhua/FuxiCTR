@@ -26,15 +26,21 @@ import os
 
 
 class ParquetIterDataPipe(IterDataPipe):
-    def __init__(self, data_blocks, feature_map):
+    def __init__(self, data_blocks, feature_map, shuffle=False):
         self.feature_map = feature_map
         self.data_blocks = data_blocks
+        self.shuffle_data = shuffle
+        self.all_cols = list(self.feature_map.features.keys()) + self.feature_map.labels
 
     def load_data(self, data_path):
+        print("Reading data from:", data_path)
         df = pd.read_parquet(data_path)
-        all_cols = list(self.feature_map.features.keys()) + self.feature_map.labels
+        print("Finished reading data from:", data_path)
+        if self.shuffle_data:
+            df = df.sample(frac=1).reset_index(drop=True)
+
         data_arrays = []
-        for col in all_cols:
+        for col in self.all_cols:
             if df[col].dtype == "object":
                 array = np.array(df[col].to_list())
             else:
@@ -57,6 +63,7 @@ class ParquetIterDataPipe(IterDataPipe):
                 for idx, block in enumerate(self.data_blocks)
                 if idx % worker_info.num_workers == worker_info.id
             ]
+        print(f"Block list for worker {worker_info.id if worker_info else 0}: {block_list}")
         return chain.from_iterable(map(self.read_block, block_list))
 
 
@@ -72,11 +79,13 @@ class ParquetBlockDataLoader(DataLoader):
         self.feature_map = feature_map
         self.batch_size = batch_size
         self.num_batches, self.num_samples = self.count_batches_and_samples()
-        datapipe = ParquetIterDataPipe(self.data_blocks, feature_map)
-        if shuffle:
-            datapipe = datapipe.shuffle(buffer_size=buffer_size)
-        elif split == "test":
-            num_workers = 1 # multiple workers cannot keep the order of data reading
+        datapipe = ParquetIterDataPipe(self.data_blocks, feature_map, shuffle)
+        # if shuffle:
+        #     datapipe = datapipe.shuffle(buffer_size=buffer_size)
+        # elif split == "test":
+        #     num_workers = 1 # multiple workers cannot keep the order of data reading
+        if split == "test":
+            num_workers = 1
         super().__init__(dataset=datapipe,
                          batch_size=batch_size,
                          num_workers=num_workers,
@@ -97,11 +106,16 @@ class ParquetBlockDataLoader(DataLoader):
 class BatchCollator(object):
     def __init__(self, feature_map):
         self.feature_map = feature_map
+        self.all_cols = list(self.feature_map.features.keys()) + self.feature_map.labels
 
     def __call__(self, batch):
-        batch_tensor = default_collate(batch)
-        all_cols = list(self.feature_map.features.keys()) + self.feature_map.labels
+        try:
+            batch_tensor = default_collate(batch)
+        except TypeError as e:
+            for b in batch:
+                print(type(b), b.shape)
+            raise e
         batch_dict = dict()
-        for col in all_cols:
+        for col in self.all_cols :
             batch_dict[col] = batch_tensor[:, self.feature_map.get_column_index(col)]
         return batch_dict
