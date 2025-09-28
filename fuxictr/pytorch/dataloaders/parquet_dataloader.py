@@ -63,7 +63,7 @@ class ParquetDataset(Dataset):
     def _load_data_low_memory(self, data_path):
         """低内存模式：逐行组读取数据，复用标准模式的数据处理逻辑"""
         import pyarrow.parquet as pq
-        logging.info("Reading data from:", data_path, "(low memory mode)")
+        logging.info(f"Reading data from: {data_path} (low memory mode)")
 
         all_cols = list(self.feature_map.features.keys()) + self.feature_map.labels
         parquet_file = pq.ParquetFile(data_path)
