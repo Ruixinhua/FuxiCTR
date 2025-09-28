@@ -1,0 +1,79 @@
+base_config: ./
+base_expid: PNN_criteo_private_ad_cvr_v4_050_050_maskmerge_hyper
+dataset_id: criteo_private_ad_cvr_v4_050_050_maskmerge
+
+# 数据集配置
+dataset_config:
+    criteo_private_ad_cvr_v4_050_050_maskmerge:
+        data_format: parquet
+        data_root: /path_to/mask_merge/
+        feature_cols:
+            # 共计使用 18 个不受限制的非个性化 + 32 个受限制的个性化特征  = 50 特征
+            - { active: false, dtype: str, name: id, type: categorical }
+            # 非个性化分类特征 Ad + context: 13 int + 1 seq + 4 float = 18 features
+            # contextual features 8 + kv ad feature 8
+            - active: true
+              dtype: int
+              name: [ campaign_id, display_order, publisher_id, features_ctx_not_constrained_0, features_ctx_not_constrained_1, features_ctx_not_constrained_4, features_ctx_not_constrained_5, features_ctx_not_constrained_6, features_ctx_not_constrained_7, features_kv_not_constrained_1, features_kv_not_constrained_2, features_kv_not_constrained_3, features_kv_not_constrained_8 ]
+              type: categorical
+            - { active: true, dtype: str, max_len: 10, name: features_ctx_not_constrained_2, padding: pre,
+                splitter: ^, type: sequence }
+            - active: true
+              dtype: float
+              name: [ features_kv_not_constrained_5, features_kv_not_constrained_6, features_kv_not_constrained_7, features_ctx_not_constrained_3 ]
+              type: categorical
+            # Ad-browser-user 个性化分类特征 - 1 str + 1 int + 30 float = 32 features
+            - {active: true, dtype: str, name: user_id, type: categorical}
+            - active: true
+              dtype: int
+              name: [ features_kv_bits_constrained_1 ]
+              type: categorical
+            - active: true
+              dtype: float
+              name: [ features_browser_bits_constrained_0, features_browser_bits_constrained_10, features_browser_bits_constrained_2, features_browser_bits_constrained_3, features_browser_bits_constrained_4, features_browser_bits_constrained_7, features_browser_bits_constrained_9, features_kv_bits_constrained_0, features_kv_bits_constrained_11, features_kv_bits_constrained_12, features_kv_bits_constrained_13, features_kv_bits_constrained_15, features_kv_bits_constrained_17, features_kv_bits_constrained_19, features_kv_bits_constrained_2, features_kv_bits_constrained_20, features_kv_bits_constrained_21, features_kv_bits_constrained_22, features_kv_bits_constrained_23, features_kv_bits_constrained_24, features_kv_bits_constrained_25, features_kv_bits_constrained_27, features_kv_bits_constrained_28, features_kv_bits_constrained_29, features_kv_bits_constrained_30, features_kv_bits_constrained_4, features_kv_bits_constrained_5, features_kv_bits_constrained_7, features_kv_bits_constrained_8, features_kv_bits_constrained_9 ]
+              type: categorical
+        feature_group_id: is_personalization
+        label_col: { dtype: float, name: is_click_landed }  # 修正：实际为Int32
+        min_categr_count: 10
+        test_data: /path_to_raw_data/keep_this/test.csv
+        train_data: /path_to_raw_data/keep_this/train.csv
+        valid_data: /path_to_raw_data/keep_this/valid.csv
+
+# 模型基础配置
+model_config:
+    PNN_criteo_private_ad_cvr_v4_050_050_maskmerge_hyper:
+        model: PNN
+        model_id: PNN_criteo_private_ad_cvr_v4_050_050_maskmerge_hyper
+        model_root: /work/gm85/m85000/FuxiCTR/slurm_logs/PNN_criteo_private_ad_cvr_v4_050_050_maskmerge_hyper/
+        dataset_id: criteo_private_ad_cvr_v4_050_050_maskmerge
+        debug_mode: false
+        metrics: [logloss, AUC]
+        monitor_mode: max
+        optimizer: adam
+        loss: binary_crossentropy
+        shuffle: true
+        task: binary_classification
+        early_stop_patience: 2
+        epochs: 100
+        learning_rate: 0.001
+        batch_size: 10000
+        seed: 2019
+        verbose: 0
+        monitor: {AUC: 1}
+        save_best_only: true
+        embedding_regularizer: 1.0e-05
+        hidden_activations: relu
+        net_dropout: 0.2
+        net_regularizer: 0
+        batch_norm: false
+        embedding_dim: 16
+        hidden_units: [1000, 1000]
+        low_memory: false  # use low memory mode if not enough memory
+
+# personalization_feature_list: [ user_id,features_kv_bits_constrained_1,features_browser_bits_constrained_0,features_browser_bits_constrained_10,features_browser_bits_constrained_2,features_browser_bits_constrained_3,features_browser_bits_constrained_4,features_browser_bits_constrained_7,features_browser_bits_constrained_9,features_kv_bits_constrained_0,features_kv_bits_constrained_11,features_kv_bits_constrained_12,features_kv_bits_constrained_13,features_kv_bits_constrained_15,features_kv_bits_constrained_17,features_kv_bits_constrained_19,features_kv_bits_constrained_2,features_kv_bits_constrained_20,features_kv_bits_constrained_21,features_kv_bits_constrained_22,features_kv_bits_constrained_23,features_kv_bits_constrained_24,features_kv_bits_constrained_25,features_kv_bits_constrained_27,features_kv_bits_constrained_28,features_kv_bits_constrained_29,features_kv_bits_constrained_30,features_kv_bits_constrained_4,features_kv_bits_constrained_5,features_kv_bits_constrained_7,features_kv_bits_constrained_8,features_kv_bits_constrained_9 ]
+
+tuner_space:
+    embedding_dim: [16, 32]
+    embedding_regularizer: [1.0e-05, 0]
+    hidden_units: [ [1000, 1000], [400, 400, 400], [128, 256, 512] ]
+    seed: [2019, 2025, 42]

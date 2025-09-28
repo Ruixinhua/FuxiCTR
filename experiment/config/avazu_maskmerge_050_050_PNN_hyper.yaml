@@ -8,7 +8,7 @@ dataset_id: avazu_x4_050_050_maskmerge
 dataset_config:
     avazu_x4_050_050_maskmerge:
         data_format: parquet
-        data_root:
+        data_root: /path_to/mask_merge/
         feature_cols:
         - {active: false, dtype: str, name: id, type: categorical}
         # 非个性化分类特征 Ad + context: 16+3=19

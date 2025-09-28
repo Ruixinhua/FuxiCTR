@@ -1,0 +1,70 @@
+base_config: ./
+base_expid: PNN_taobaoad_x1_050_050_maskmerge_hyper
+dataset_id: taobaoad_x1_050_050_maskmerge
+
+# 数据集配置
+dataset_config:
+  taobaoad_x1_050_050_maskmerge:
+      data_format: parquet
+      data_root: /path_to/mask_merge/
+      feature_cols:
+        # 非个性化分类特征: 1 float + 7 categorical = 8 features
+        - {active: true, dtype: float, name: price, type: numeric}
+        - active: true
+          dtype: str
+          name: [adgroup_id, cate_id, campaign_id, customer, brand, pid, btag]
+          type: categorical
+        # 个性化分类特征: 9 int + 3 sequence = 12 features
+        - active: true
+          dtype: int
+          fill_na: 0
+          name: [userid, cms_segid, cms_group_id, final_gender_code, age_level, pvalue_level, shopping_level, occupation, new_user_class_level]
+          type: categorical
+        - {active: true, dtype: str, max_len: 50, name: cate_his, padding: pre, share_embedding: cate_id,
+            splitter: ^, type: sequence}
+        - {active: true, dtype: str, max_len: 50, name: brand_his, padding: pre, share_embedding: brand,
+            splitter: ^, type: sequence}
+        - {active: true, dtype: str, max_len: 50, name: btag_his, padding: pre, share_embedding: btag,
+            splitter: ^, type: sequence}
+      label_col: {dtype: float, name: clk}
+      feature_group_id: is_personalization
+      min_categr_count: 10
+
+# 模型基础配置
+model_config:
+    PNN_taobaoad_x1_050_050_maskmerge_hyper:
+        model: PNN
+        model_id: PNN_taobaoad_maskmerge_hyper
+        model_root: /scratch/dliu2/FuxiCTR/slurm_logs/PNN_taobaoad_maskmerge_hyper/
+        dataset_id: taobaoad_x1_050_050_maskmerge
+        debug_mode: false
+        metrics: [logloss, AUC]
+        monitor_mode: max
+        optimizer: adam
+        loss: binary_crossentropy
+        shuffle: true
+        task: binary_classification
+        early_stop_patience: 2
+        epochs: 100
+        learning_rate: 0.001
+        num_workers: 2
+        batch_size: 10000
+        monitor: {AUC: 1}
+        seed: 2019
+        embedding_regularizer: 5.0e-06
+        net_regularizer: 0
+        verbose: 0
+        save_best_only: true
+        batch_norm: false
+        embedding_dim: 32
+        hidden_activations: relu
+        hidden_units: [512, 256]
+        dropout_rates: 0
+        low_memory: false  # use low memory mode if not enough memory
+
+# personalization_feature_list: [ userid, cate_his, brand_his, btag_his, age_level, shopping_level, cms_group_id, final_gender_code, cms_segid, occupation, pvalue_level, new_user_class_level ]
+# feature importance list: [userid, cate_id, cate_his, adgroup_id, price, btag_his, pid, brand_his, age_level, brand, customer, btag, occupation, pvalue_level, shopping_level, new_user_class_level, final_gender_code, cms_group_id, cms_segid, campaign_id]
+tuner_space:
+    embedding_dim: [ 32, 16, 40 ]
+    hidden_units: [ [512, 256], [512, 256, 128] ]
+    seed: [ 2019, 2025, 42 ]
