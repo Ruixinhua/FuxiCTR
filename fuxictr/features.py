@@ -36,6 +36,7 @@ class FeatureMap(object):
         self.group_id = None
         self.feature_group_id = None
         self.default_emb_dim = None
+        self.use_features = None
 
     def load(self, json_file, params):
         logging.info("Load feature_map from json: " + json_file)
@@ -49,12 +50,14 @@ class FeatureMap(object):
         self.group_id = params.get("group_id", None)
         self.feature_group_id = params.get("feature_group_id", None)
         self.default_emb_dim = params.get("embedding_dim", None)
-        self.features = OrderedDict((k, v) for x in feature_map["features"] for k, v in x.items())
-        self.num_fields = self.get_num_fields()
-        if params.get("use_features", None):
-            self.features = OrderedDict((x, self.features[x]) for x in params["use_features"])
+        all_features = OrderedDict((k, v) for x in feature_map["features"] for k, v in x.items())
+        self.use_features = params.get("use_features", None) or list(all_features.keys())
+        drop_features = params.get("drop_features", [])
+        self.use_features = [f for f in self.use_features if f not in drop_features]
+        self.features = OrderedDict((k, v) for k, v in all_features.items() if k in self.use_features)
         if params.get("feature_specs", None):
             self.update_feature_specs(params["feature_specs"])
+        self.num_fields = self.get_num_fields()
         self.set_column_index()
 
     def update_feature_specs(self, feature_specs):

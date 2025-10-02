@@ -109,7 +109,7 @@ def enumerate_params(config_file, exclude_expid=[]):
     with open(model_config, "w") as fw:
         yaml.dump(merged_param_combs, fw, default_flow_style=None, indent=4)
     print(f"Enumerate all tuner configurations done. Total: {len(merged_param_combs)} experiments.")
-    return config_dir, tuner_keys
+    return config_dir, sorted(tuner_keys)
 
 def load_experiment_ids(config_dir):
     model_configs = glob.glob(os.path.join(config_dir, "model_config.yaml"))
