@@ -93,7 +93,7 @@ class ContrastiveLearningBase(ABC):
                             self.distance_loss_weight > 0 or
                             self.knowledge_distillation_loss_weight > 0 or
                             self.group_aware_loss_weight > 0)
-        
+        logging.info(f"Use CL Loss: {self.use_cl_loss}")
         # 损失缓存
         self.feature_alignment_loss = None
         self.field_uniformity_loss = None

@@ -34,7 +34,7 @@ class BaseModel(nn.Module):
                  model_id="BaseModel", 
                  task="binary_classification", 
                  gpu=-1,
-                 save_checkpoints=True,
+                 save_checkpoints=False,
                  monitor="AUC", 
                  save_best_only=True, 
                  monitor_mode="max", 

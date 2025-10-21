@@ -518,11 +518,6 @@ class PNNAdapter(BaseModelAdapter):
         """PNN没有自定义的损失计算逻辑"""
         return False
 
-    def compute_custom_loss(self, return_dict, y_true, loss_fn):
-        """PNN的自定义损失计算（使用标准损失）"""
-        y_pred = return_dict["y_pred"]
-        return loss_fn(y_pred, y_true, reduction='mean')
-
     # 对比学习相关方法实现
     def _extract_single_field_embedding(self, field_name, single_field_dict):
         """PNN特定的特征嵌入提取"""
@@ -597,6 +592,211 @@ class PNNAdapter(BaseModelAdapter):
         else:
             # 如果没有inner_product_layer，直接使用masked embedding
             h2_hidden_states = masked_feature_emb.view(masked_feature_emb.size(0), -1)
+
+        return h2_hidden_states
+
+
+class FinalNetAdapter(BaseModelAdapter):
+    """
+    FinalNet模型适配器，从FinalNet中提取hidden states，并集成对比学习功能
+    """
+
+    def __init__(self, 
+                 feature_map,
+                 embedding_dim=10,
+                 block_type="2B",
+                 batch_norm=True,
+                 use_feature_gating=False,
+                 block1_hidden_units=[800],
+                 block1_hidden_activations="ReLU",
+                 block1_dropout=0.2,
+                 block2_hidden_units=[800, 800],
+                 block2_hidden_activations=None,
+                 block2_dropout=0.3,
+                 residual_type="concat",
+                 output_activation=None,
+                 **kwargs):
+        super(FinalNetAdapter, self).__init__(feature_map, embedding_dim=embedding_dim, **kwargs)
+
+        # 导入FinalNet相关组件
+        from model_zoo.FinalNet.src.FinalNet import FinalBlock, FeatureGating
+        from fuxictr.pytorch.torch_utils import get_activation
+        
+        self.embedding_layer = FeatureEmbedding(feature_map, embedding_dim)
+        num_fields = feature_map.num_fields
+        self.use_feature_gating = use_feature_gating
+        self.block_type = block_type
+        # 如果output_activation为None，使用Identity
+        self.output_activation = get_activation(output_activation) if output_activation else nn.Identity()
+        
+        # 计算gate_out_dim（如果使用feature_gating）
+        if use_feature_gating:
+            self.feature_gating = FeatureGating(num_fields, gate_residual="concat")
+            gate_out_dim = embedding_dim * num_fields * 2
+        else:
+            gate_out_dim = embedding_dim * num_fields
+        
+        # 创建FinalBlock
+        self.block1 = FinalBlock(input_dim=gate_out_dim,
+                                 hidden_units=block1_hidden_units,
+                                 hidden_activations=block1_hidden_activations,
+                                 dropout_rates=block1_dropout,
+                                 batch_norm=batch_norm,
+                                 residual_type=residual_type)
+        
+        # 计算hidden_dim
+        self.hidden_dim = block1_hidden_units[-1]
+        
+        # 添加输出层（用于SingleTower模式）
+        self.fc1 = nn.Linear(block1_hidden_units[-1], 1)
+        
+        if block_type == "2B":
+            self.block2 = FinalBlock(input_dim=embedding_dim * num_fields,
+                                     hidden_units=block2_hidden_units,
+                                     hidden_activations=block2_hidden_activations,
+                                     dropout_rates=block2_dropout,
+                                     batch_norm=batch_norm,
+                                     residual_type=residual_type)
+            self.fc2 = nn.Linear(block2_hidden_units[-1], 1)
+
+    def get_hidden_states(self, inputs):
+        """提取hidden states（返回block1的输出）"""
+        feature_emb = self.embedding_layer(inputs)
+        
+        # 如果使用feature_gating，应用gating
+        if self.use_feature_gating:
+            feature_emb = self.feature_gating(feature_emb)
+        
+        # 通过block1获取hidden states
+        hidden_states = self.block1(feature_emb.flatten(start_dim=1))
+        return hidden_states
+
+    def get_hidden_dim(self):
+        return self.hidden_dim
+
+    def get_model_return_dict(self, inputs):
+        """FinalNet的完整返回字典"""
+        # 完全复制FinalNet的forward逻辑
+        feature_emb = self.embedding_layer(inputs)
+        y_pred, y1, y2 = None, None, None
+        
+        if self.block_type == "1B":
+            y_pred = self.forward1(feature_emb)
+        elif self.block_type == "2B":
+            y1 = self.forward1(feature_emb)
+            y2 = self.forward2(feature_emb)
+            y_pred = 0.5 * (y1 + y2)
+        
+        # 应用output_activation（与原始FinalNet保持一致）
+        y_pred = self.output_activation(y_pred)
+        
+        return_dict = {"y_pred": y_pred}
+        if y1 is not None:
+            return_dict["y1"] = y1
+        if y2 is not None:
+            return_dict["y2"] = y2
+        
+        return return_dict
+
+    def forward1(self, feature_emb):
+        """FinalNet的forward1方法"""
+        if self.use_feature_gating:
+            feature_emb = self.feature_gating(feature_emb)
+        block1_out = self.block1(feature_emb.flatten(start_dim=1))
+        y_pred = self.fc1(block1_out)
+        return y_pred
+
+    def forward2(self, feature_emb):
+        """FinalNet的forward2方法"""
+        block2_out = self.block2(feature_emb.flatten(start_dim=1))
+        y_pred = self.fc2(block2_out)
+        return y_pred
+
+    def has_custom_loss(self):
+        """FinalNet有自定义的损失计算逻辑"""
+        return True
+
+    def compute_custom_loss(self, return_dict, y_true, loss_fn):
+        """FinalNet的自定义损失计算 - 复制原始FinalNet.add_loss的逻辑"""
+        loss = loss_fn(return_dict["y_pred"], y_true, reduction='mean')
+        
+        if self.block_type == "2B":
+            # 注意：y1和y2需要应用output_activation（与原始FinalNet保持一致）
+            y1 = self.output_activation(return_dict["y1"])
+            y2 = self.output_activation(return_dict["y2"])
+            loss1 = loss_fn(y1, return_dict["y_pred"].detach(), reduction='mean')
+            loss2 = loss_fn(y2, return_dict["y_pred"].detach(), reduction='mean')
+            loss = loss + loss1 + loss2
+        
+        return loss
+
+    # 对比学习相关方法实现
+    def _extract_single_field_embedding(self, field_name, single_field_dict):
+        """FinalNet特定的特征嵌入提取"""
+        # FinalNet使用FeatureEmbedding，结构相对简单
+        single_field_emb = self.embedding_layer(single_field_dict)
+        # single_field_emb shape: [batch_size, num_fields, embedding_dim]
+        # 对于单个字段，num_fields = 1
+        if single_field_emb.dim() == 3 and single_field_emb.size(1) == 1:
+            single_field_emb = single_field_emb.squeeze(1)  # [batch_size, embedding_dim]
+        
+        return single_field_emb
+
+    def _create_embedding_mask(self, full_feature_emb, X):
+        """FinalNet特定的嵌入掩码创建"""
+        # FinalNet的embedding通常是[batch_size, num_fields, embedding_dim]
+        if full_feature_emb.dim() == 3:
+            batch_size, num_fields, embedding_dim = full_feature_emb.shape
+        elif full_feature_emb.dim() == 2:
+            # 如果是2D，说明已经被flatten了
+            batch_size, total_dim = full_feature_emb.shape
+            num_fields = len(X)
+            embedding_dim = total_dim // num_fields
+            # 重新reshape为3D方便处理
+            full_feature_emb = full_feature_emb.view(batch_size, num_fields, embedding_dim)
+        else:
+            raise ValueError(f"Unexpected embedding dimension: {full_feature_emb.dim()}")
+
+        # 获取特征顺序
+        feature_names = list(X.keys())
+
+        # 创建掩码
+        mask = torch.ones_like(full_feature_emb)
+
+        # 将个性化特征对应的位置置零
+        for idx, field_name in enumerate(feature_names):
+            if field_name in self.personalization_feature_list and idx < num_fields:
+                # 将这个特征的嵌入位置置零
+                mask[:, idx, :] = 0.0
+
+        # 应用掩码
+        masked_feature_emb = full_feature_emb * mask
+
+        # 如果原来是2D，需要flatten回去
+        if len(full_feature_emb.shape) != len(mask.shape):
+            masked_feature_emb = masked_feature_emb.view(batch_size, -1)
+
+        return masked_feature_emb
+
+    def _recompute_masked_hidden_states(self, masked_feature_emb, inputs):
+        """FinalNet特定的hidden states重计算"""
+        # 使用掩码后的嵌入重新计算hidden states
+        # 对于FinalNet，需要重新通过block1
+        if masked_feature_emb.dim() == 2:
+            # 重新reshape为3D: [batch_size, num_fields, embedding_dim]
+            num_fields = len(inputs)
+            embedding_dim = masked_feature_emb.size(-1) // num_fields
+            masked_feature_emb_3d = masked_feature_emb.view(
+                masked_feature_emb.size(0), num_fields, embedding_dim)
+        else:
+            masked_feature_emb_3d = masked_feature_emb
+
+        # 如果使用feature_gating，需要重新应用
+        if self.use_feature_gating:
+            masked_feature_emb_3d = self.feature_gating(masked_feature_emb_3d)
+
+        # 重新通过block1计算hidden states
+        h2_hidden_states = self.block1(masked_feature_emb_3d.flatten(start_dim=1))
 
         return h2_hidden_states
 

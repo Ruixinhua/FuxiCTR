@@ -62,6 +62,7 @@ class DualTowerCL(DualTowerModel, ContrastiveLearningBase):
                  temperature=4.0,  # 知识蒸馏温度参数
                  # 串行训练配置
                  personalized_model_path=None,  # 预训练个性化模型路径
+                 non_personalized_model_path=None,  # 预训练非个性化模型路径
                  freeze_personalized_in_sequential=True,  # 串行模式下是否冻结个性化模型
                  sequential_warmup_epochs=2,  # 串行模式预热轮数
                  # 特征级CL配置
@@ -123,6 +124,7 @@ class DualTowerCL(DualTowerModel, ContrastiveLearningBase):
         self.training_mode = training_mode
         self.cl_loss_weight = cl_loss_weight
         self.personalized_model_path = personalized_model_path
+        self.non_personalized_model_path = non_personalized_model_path
         self.freeze_personalized_in_sequential = freeze_personalized_in_sequential
         self.sequential_warmup_epochs = sequential_warmup_epochs
         self.use_feature_level_cl = use_feature_level_cl
@@ -133,9 +135,12 @@ class DualTowerCL(DualTowerModel, ContrastiveLearningBase):
         self.current_training_epoch = 0
         
         # 如果是串行模式且提供了预训练模型，加载它
-        if self.training_mode == "sequential" and self.personalized_model_path:
-            self._load_pretrained_personalized_model()
-        
+        if self.training_mode == "sequential":
+            self._load_pretrained_checkpoint(self.personalized_model_path, self.personalized_model)
+            self._load_pretrained_checkpoint(self.non_personalized_model_path, self.non_personalized_model)
+            # 如果需要冻结个性化模型
+            if self.freeze_personalized_in_sequential and self.personalized_model_path:
+                self._freeze_personalized_model()
         logging.info(f"DualTowerCL initialized:")
         logging.info(f"  - Training mode: {training_mode}")
         logging.info(f"  - CL loss weight: {cl_loss_weight}")
@@ -146,37 +151,46 @@ class DualTowerCL(DualTowerModel, ContrastiveLearningBase):
         if training_mode == "sequential":
             logging.info(f"  - Freeze personalized in sequential: {freeze_personalized_in_sequential}")
             logging.info(f"  - Sequential warmup epochs: {sequential_warmup_epochs}")
-    
-    def _load_pretrained_personalized_model(self):
+
+    def _load_pretrained_checkpoint(self, checkpoint_path, model, load_optimizer=True):
         """
-        加载预训练的个性化模型
-        """
-        if not self.personalized_model_path or not os.path.exists(self.personalized_model_path):
-            logging.warning(f"Pretrained personalized model not found: {self.personalized_model_path}")
-            return
+        重写基类方法，支持加载预训练的非个性化模型和optimizer状态
         
+        Args:
+            checkpoint_path: 检查点文件路径
+            model: 要加载权重的模型
+            load_optimizer: 是否加载optimizer状态（默认True）
+        """
+        if not checkpoint_path or not os.path.exists(checkpoint_path):
+            logging.warning(f"Pretrained model not found: {checkpoint_path}")
+            return
         try:
-            # 加载预训练模型
-            checkpoint = torch.load(self.personalized_model_path, map_location=self.device, weights_only=False)
-            
+            checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
             if "model_state_dict" in checkpoint:
-                # 如果是tower模型格式
-                self.personalized_model.load_state_dict(checkpoint["model_state_dict"])
-                logging.info(f"Loaded pretrained personalized tower model from: {self.personalized_model_path}")
+                model.load_state_dict(checkpoint["model_state_dict"])
+                logging.info(f"Loaded pretrained model from: {checkpoint_path}")
                 if "best_metric" in checkpoint:
                     logging.info(f"  - Pretrained model metric: {checkpoint['best_metric']:.6f}")
-            else:
-                # 如果是完整模型格式，尝试提取个性化部分
-                self.personalized_model.load_state_dict(checkpoint, strict=False)
-                logging.info(f"Loaded pretrained personalized model (partial) from: {self.personalized_model_path}")
-            
-            # 如果需要冻结个性化模型
-            if self.freeze_personalized_in_sequential:
-                self._freeze_personalized_model()
                 
+                # 如果checkpoint中包含optimizer状态且要求加载
+                if load_optimizer and "optimizer_state_dict" in checkpoint:
+                    if hasattr(self, 'optimizer') and self.optimizer is not None:
+                        try:
+                            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+                            logging.info(f"  - Optimizer state loaded successfully")
+                        except Exception as e:
+                            logging.warning(f"  - Failed to load optimizer state: {e}")
+                            logging.warning(f"  - Continuing with fresh optimizer state")
+                    else:
+                        logging.warning(f"  - Optimizer not initialized yet, skipping optimizer state loading")
+                elif load_optimizer:
+                    logging.warning(f"  - No optimizer state found in checkpoint")
+            else:
+                model.load_state_dict(checkpoint, strict=False)
+                logging.info(f"Loaded pretrained model (partial) from: {checkpoint_path}")
         except Exception as e:
-            logging.error(f"Failed to load pretrained personalized model: {e}")
-    
+            logging.error(f"Failed to load pretrained model from {checkpoint_path}: {e}")
+
     def _freeze_personalized_model(self):
         """
         冻结个性化模型参数
@@ -210,7 +224,7 @@ class DualTowerCL(DualTowerModel, ContrastiveLearningBase):
         return_dict = super().forward(inputs)
         
         # 如果启用特征级对比学习，获取特征嵌入
-        if self.use_feature_level_cl and self.training:
+        if self._should_apply_cl_loss() and self.training:
             # 获取个性化特征的嵌入（用于特征对齐和均匀性损失）
             if hasattr(self.personalized_model, 'embedding_layer'):
                 personalized_feature_embeddings = self.get_feature_embeddings(
@@ -442,6 +456,12 @@ class DualTowerCL(DualTowerModel, ContrastiveLearningBase):
         if self.training_mode == "sequential":
             logging.info(f"Sequential warmup epochs: {cl_summary['sequential_info']['warmup_epochs']}")
             logging.info(f"Freeze personalized in phase 2: {self.freeze_personalized_in_sequential}")
+            # if self.personalized_model_path and self.non_personalized_model_path:
+            #     import numpy as np
+            #     self.valid_gen = validation_data
+            #     self._best_metric = np.Inf if self._monitor_mode == "min" else -np.Inf
+            #     self._epoch_index, self._batch_index = 0, 0
+            #     self.eval_step()
         
         logging.info("=" * 50)
         

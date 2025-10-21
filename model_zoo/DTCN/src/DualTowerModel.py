@@ -175,6 +175,9 @@ class DualTowerModel(BaseModel):
         self.save_tower_models = save_tower_models
         
         # 初始化特征分离器
+        self.personalization_feature_list = [f for f in self.personalization_feature_list if f in self.feature_map.features]
+        if len(self.personalization_feature_list) > 0:
+            logging.info(f'Personalization features: {self.personalization_feature_list}')
         self.feature_separator = FeatureSeparator(self.personalization_feature_list, self.feature_map)
         
         # 初始化路由器
@@ -200,6 +203,32 @@ class DualTowerModel(BaseModel):
         logging.info(f"  - Personalized model use all data: {personalized_model_use_all_data}")
         logging.info(f"  - Non-personalized model use all data: {non_personalized_model_use_all_data}")
 
+    def _init_model(self, model_type, model_params):
+        if model_type == "PNN":
+            from model_zoo.MTCL.src.model_adapter import PNNAdapter
+            model = PNNAdapter(
+                feature_map=self.feature_map,
+                output_mode="SingleTower",
+                **model_params
+            )
+        elif model_type == "DCNv3":
+            from model_zoo.MTCL.src.model_adapter import DCNv3Adapter
+            model = DCNv3Adapter(
+                feature_map=self.feature_map,
+                output_mode="SingleTower",
+                **model_params
+            )
+        elif model_type == "FinalNet":
+            from model_zoo.MTCL.src.model_adapter import FinalNetAdapter
+            model = FinalNetAdapter(
+                feature_map=self.feature_map,
+                output_mode="SingleTower",
+                **model_params
+            )
+        else:
+            raise NotImplementedError(f"Model type '{model_type}' not implemented.")
+        return model
+
     def _init_personalized_model(self):
         """
         初始化个性化模型（使用全部特征）
@@ -210,24 +239,7 @@ class DualTowerModel(BaseModel):
             "output_activation": self.output_activation,
             **self.personalized_model_params
         }
-        
-        if self.personalized_model_type == "PNN":
-            from model_zoo.MTCL.src.model_adapter import PNNAdapter
-            self.personalized_model = PNNAdapter(
-                feature_map=self.feature_map,
-                output_mode="SingleTower",
-                **personalized_params
-            )
-        elif self.personalized_model_type == "DCNv3":
-            from model_zoo.MTCL.src.model_adapter import DCNv3Adapter
-            self.personalized_model = DCNv3Adapter(
-                feature_map=self.feature_map,
-                output_mode="SingleTower",
-                **personalized_params
-            )
-        else:
-            raise NotImplementedError(f"Personalized model type '{self.personalized_model_type}' not implemented.")
-        
+        self.personalized_model = self._init_model(self.personalized_model_type, personalized_params)
         logging.info(f"Personalized model initialized: {self.personalized_model_type}")
     
     def _init_non_personalized_model(self):
@@ -240,23 +252,7 @@ class DualTowerModel(BaseModel):
             "output_activation": self.output_activation,
             **self.non_personalized_model_params
         }
-        
-        if self.non_personalized_model_type == "PNN":
-            from model_zoo.MTCL.src.model_adapter import PNNAdapter
-            self.non_personalized_model = PNNAdapter(
-                feature_map=self.feature_map,  # 使用完整的feature_map
-                output_mode="SingleTower",
-                **non_personalized_params
-            )
-        elif self.non_personalized_model_type == "DCNv3":
-            from model_zoo.MTCL.src.model_adapter import DCNv3Adapter
-            self.non_personalized_model = DCNv3Adapter(
-                feature_map=self.feature_map,  # 使用完整的feature_map
-                output_mode="SingleTower",
-                **non_personalized_params
-            )
-        else:
-            raise NotImplementedError(f"Non-personalized model type '{self.non_personalized_model_type}' not implemented.")
+        self.non_personalized_model = self._init_model(self.non_personalized_model_type, non_personalized_params)
         
         logging.info(f"Non-personalized model initialized: {self.non_personalized_model_type} (using full feature set with masking)")
     
@@ -305,14 +301,20 @@ class DualTowerModel(BaseModel):
             "non_personalized_mask": non_personalized_mask
         }
         
-        # 如果个性化模型有额外输出（如DCNv3的y_d, y_s），也包含进来
+        # 如果个性化模型有额外输出（如DCNv3的y_d, y_s，FinalNet的y1, y2），也包含进来
         if "y_d" in personalized_return_dict:
             return_dict["personalized_y_d"] = personalized_return_dict["y_d"]
             return_dict["personalized_y_s"] = personalized_return_dict["y_s"]
+        if "y1" in personalized_return_dict:
+            return_dict["personalized_y1"] = personalized_return_dict["y1"]
+            return_dict["personalized_y2"] = personalized_return_dict["y2"]
         
         if "y_d" in non_personalized_return_dict:
             return_dict["non_personalized_y_d"] = non_personalized_return_dict["y_d"]
             return_dict["non_personalized_y_s"] = non_personalized_return_dict["y_s"]
+        if "y1" in non_personalized_return_dict:
+            return_dict["non_personalized_y1"] = non_personalized_return_dict["y1"]
+            return_dict["non_personalized_y2"] = non_personalized_return_dict["y2"]
         
         return return_dict
     
@@ -352,13 +354,18 @@ class DualTowerModel(BaseModel):
             personalized_y_true = y_true[personalized_training_mask]
             personalized_y_pred = personalized_pred[personalized_training_mask]
             
-            # 如果个性化模型有自定义损失（如DCNv3）
+            # 如果个性化模型有自定义损失（如DCNv3、FinalNet）
             if hasattr(self.personalized_model, 'has_custom_loss') and self.personalized_model.has_custom_loss():
                 # 构建个性化模型的return_dict
                 personalized_return_dict = {"y_pred": personalized_y_pred}
+                # DCNv3的输出
                 if "personalized_y_d" in return_dict:
                     personalized_return_dict["y_d"] = return_dict["personalized_y_d"][personalized_training_mask]
                     personalized_return_dict["y_s"] = return_dict["personalized_y_s"][personalized_training_mask]
+                # FinalNet的输出
+                if "personalized_y1" in return_dict:
+                    personalized_return_dict["y1"] = return_dict["personalized_y1"][personalized_training_mask]
+                    personalized_return_dict["y2"] = return_dict["personalized_y2"][personalized_training_mask]
                 
                 personalized_loss = self.personalized_model.compute_custom_loss(
                     personalized_return_dict, personalized_y_true, self.loss_fn
@@ -385,13 +392,18 @@ class DualTowerModel(BaseModel):
             non_personalized_y_true = y_true[non_personalized_training_mask]
             non_personalized_y_pred = non_personalized_pred[non_personalized_training_mask]
             
-            # 如果非个性化模型有自定义损失（如DCNv3）
+            # 如果非个性化模型有自定义损失（如DCNv3、FinalNet）
             if hasattr(self.non_personalized_model, 'has_custom_loss') and self.non_personalized_model.has_custom_loss():
                 # 构建非个性化模型的return_dict
                 non_personalized_return_dict = {"y_pred": non_personalized_y_pred}
+                # DCNv3的输出
                 if "non_personalized_y_d" in return_dict:
                     non_personalized_return_dict["y_d"] = return_dict["non_personalized_y_d"][non_personalized_training_mask]
                     non_personalized_return_dict["y_s"] = return_dict["non_personalized_y_s"][non_personalized_training_mask]
+                # FinalNet的输出
+                if "non_personalized_y1" in return_dict:
+                    non_personalized_return_dict["y1"] = return_dict["non_personalized_y1"][non_personalized_training_mask]
+                    non_personalized_return_dict["y2"] = return_dict["non_personalized_y2"][non_personalized_training_mask]
                 
                 non_personalized_loss = self.non_personalized_model.compute_custom_loss(
                     non_personalized_return_dict, non_personalized_y_true, self.loss_fn
@@ -403,7 +415,7 @@ class DualTowerModel(BaseModel):
             
             data_usage = "all data" if self.non_personalized_model_use_all_data else "non-personalized data only"
             logging.debug(f"Non-personalized loss: {non_personalized_loss.item():.6f} (samples: {non_personalized_training_count}, using: {data_usage})")
-
+        total_loss +=  self.regularization_loss()
         return total_loss
 
     def _init_tower_monitoring(self):
@@ -563,9 +575,10 @@ class DualTowerModel(BaseModel):
             model_path: 模型保存路径
         """
         try:
-            # 只保存模型权重，避免复杂对象导致的加载问题
+            # 保存模型权重和优化器状态，确保可以正确恢复训练
             personalized_state = {
                 "model_state_dict": self.personalized_model.state_dict(),
+                "optimizer_state_dict": self.optimizer.state_dict(),  # 保存optimizer状态
                 "model_type": self.personalized_model_type,
                 "model_params": self.personalized_model_params,
                 "best_metric": self.tower_monitoring["personalized"]["best_metric"],
@@ -586,9 +599,10 @@ class DualTowerModel(BaseModel):
             model_path: 模型保存路径
         """
         try:
-            # 只保存模型权重，避免复杂对象导致的加载问题
+            # 保存模型权重和优化器状态，确保可以正确恢复训练
             non_personalized_state = {
                 "model_state_dict": self.non_personalized_model.state_dict(),
+                "optimizer_state_dict": self.optimizer.state_dict(),  # 保存optimizer状态
                 "model_type": self.non_personalized_model_type,
                 "model_params": self.non_personalized_model_params,
                 "best_metric": self.tower_monitoring["non_personalized"]["best_metric"],
@@ -628,9 +642,12 @@ class DualTowerModel(BaseModel):
         
         return summary
     
-    def _load_tower_optimal_models(self):
+    def _load_tower_optimal_models(self, load_optimizer=False):
         """
         加载分塔最佳模型权重，组合成最优的双塔模型
+        
+        Args:
+            load_optimizer: 是否加载optimizer状态（默认False，因为训练已完成）
         """
 
         personalized_loaded = False
@@ -643,6 +660,15 @@ class DualTowerModel(BaseModel):
                 # 使用weights_only=False来兼容包含自定义对象的模型文件
                 personalized_state = torch.load(personalized_path, map_location=self.device, weights_only=False)
                 self.personalized_model.load_state_dict(personalized_state["model_state_dict"])
+                
+                # 可选：加载optimizer状态（用于继续训练）
+                if load_optimizer and "optimizer_state_dict" in personalized_state:
+                    try:
+                        self.optimizer.load_state_dict(personalized_state["optimizer_state_dict"])
+                        logging.info(f"  - Optimizer state loaded from personalized tower checkpoint")
+                    except Exception as e:
+                        logging.warning(f"  - Failed to load optimizer state: {e}")
+                
                 personalized_loaded = True
                 logging.info(f"Loaded personalized tower best model from: {personalized_path}")
                 logging.info(f"  - Best {self.personalized_monitor_metric}: {self.tower_monitoring['personalized']['best_metric']:.6f} at epoch {self.tower_monitoring['personalized']['best_epoch']}")
@@ -656,6 +682,16 @@ class DualTowerModel(BaseModel):
                 # 使用weights_only=False来兼容包含自定义对象的模型文件
                 non_personalized_state = torch.load(non_personalized_path, map_location=self.device, weights_only=False)
                 self.non_personalized_model.load_state_dict(non_personalized_state["model_state_dict"])
+                
+                # 可选：加载optimizer状态（用于继续训练）
+                # 注意：如果两个塔都加载optimizer，以非个性化塔的为准（后加载的会覆盖）
+                if load_optimizer and "optimizer_state_dict" in non_personalized_state:
+                    try:
+                        self.optimizer.load_state_dict(non_personalized_state["optimizer_state_dict"])
+                        logging.info(f"  - Optimizer state loaded from non-personalized tower checkpoint")
+                    except Exception as e:
+                        logging.warning(f"  - Failed to load optimizer state: {e}")
+                
                 non_personalized_loaded = True
                 logging.info(f"Loaded non-personalized tower best model from: {non_personalized_path}")
                 logging.info(f"  - Best {self.non_personalized_monitor_metric}: {self.tower_monitoring['non_personalized']['best_metric']:.6f} at epoch {self.tower_monitoring['non_personalized']['best_epoch']}")
@@ -748,17 +784,15 @@ class DualTowerModel(BaseModel):
         """
         logging.info('Evaluation @epoch {} - batch {}: '.format(self._epoch_index + 1, self._batch_index + 1))
         val_logs = self.evaluate(self.valid_gen, metrics=self._monitor.get_metrics())
-        
+        self.checkpoint_and_earlystop(val_logs)
         # 更新分塔监控
         if self.use_tower_specific_monitoring:
-            tower_update_info = self.update_tower_monitoring(val_logs, self._epoch_index + 1)
-            
+            self.update_tower_monitoring(val_logs, self._epoch_index + 1)
+            self._stop_training = self.should_early_stop_towers()
             # 检查分塔早停
-            if self.should_early_stop_towers():
+            if self._stop_training:
                 logging.info("Early stopping triggered by tower-specific monitoring")
-                self._stop_training = True
                 return
-        
-        # 原来的早停逻辑（作为备用）
-        self.checkpoint_and_earlystop(val_logs)
+
+        # 原来的早停逻辑
         self.train()
