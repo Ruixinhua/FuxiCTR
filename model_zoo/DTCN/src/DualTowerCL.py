@@ -16,7 +16,7 @@
 import torch
 import logging
 import os
-from model_zoo.MTCL.src.DualTowerModel import DualTowerModel
+from model_zoo.DTCN.src import DualTowerModel
 from model_zoo.CL.src.base import ContrastiveLearningBase
 
 
