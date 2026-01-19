@@ -58,31 +58,55 @@ class Tokenizer(object):
     def build_vocab(self, word_counts):
         # sort to guarantee the determinism of index order
         word_counts = word_counts.most_common()
-        if self._max_features: # keep the most frequent features
+        if self._max_features:  # keep the most frequent features
             word_counts = word_counts[0:self._max_features]
         words = []
         for token, count in word_counts:
             if count >= self._min_freq:
                 if token != self._na_value:
-                    words.append(token.lower() if self._lower else token)
+                    # Convert token to string for consistency (int/str type mismatch fix)
+                    token_str = str(token).lower() if self._lower else str(token)
+                    words.append(token_str)
             else:
-                break # already sorted in decending order
+                break  # already sorted in descending order
         if self.remap:
             self.vocab = dict((token, idx) for idx, token in enumerate(words, 1))
         else:
             self.vocab = dict((token, int(token)) for token in words)
-        self.vocab["__PAD__"] = 0 # use 0 for reserved __PAD__
-        self.vocab["__OOV__"] = self.vocab_size() # use the last index for __OOV__
+        self.vocab["__PAD__"] = 0  # use 0 for reserved __PAD__
+        self.vocab["__OOV__"] = self.vocab_size()  # use the last index for __OOV__
 
     def merge_vocab(self, shared_tokenizer):
+        # Convert all vocab keys to strings to avoid type mismatch (int vs str)
+        # This ensures keys like 0 (int) and '0' (str) don't create duplicates
+        def normalize_key(k):
+            if k in ("__PAD__", "__OOV__"):
+                return k
+            return str(k)
+        
+        # Normalize the shared tokenizer's vocab keys first
+        normalized_shared_vocab = {}
+        for k, v in shared_tokenizer.vocab.items():
+            norm_k = normalize_key(k)
+            # Keep the smaller index if there's a conflict (shouldn't happen normally)
+            if norm_k not in normalized_shared_vocab:
+                normalized_shared_vocab[norm_k] = v
+        shared_tokenizer.vocab = normalized_shared_vocab
+        
+        # Normalize current vocab and merge
         if self.remap:
             new_words = 0
             for word in self.vocab.keys():
-                if word not in shared_tokenizer.vocab:
-                    shared_tokenizer.vocab[word] = shared_tokenizer.vocab["__OOV__"] + new_words
+                norm_word = normalize_key(word)
+                if norm_word not in shared_tokenizer.vocab:
+                    shared_tokenizer.vocab[norm_word] = shared_tokenizer.vocab["__OOV__"] + new_words
                     new_words += 1
         else:
-            shared_tokenizer.vocab.update(self.vocab)
+            for k, v in self.vocab.items():
+                norm_k = normalize_key(k)
+                if norm_k not in shared_tokenizer.vocab:
+                    shared_tokenizer.vocab[norm_k] = v
+        
         vocab_size = shared_tokenizer.vocab_size()
         if (shared_tokenizer.vocab["__OOV__"] != vocab_size - 1 or
             shared_tokenizer.vocab["__OOV__"] != len(shared_tokenizer.vocab) - 1):

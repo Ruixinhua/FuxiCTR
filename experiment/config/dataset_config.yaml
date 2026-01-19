@@ -46,3 +46,164 @@ avazu_x4_050_050_maskmerge:
     test_data: /scratch/dliu2/FuxiCTR/datasets/Avazu/Avazu_x4/test.csv
     train_data: /scratch/dliu2/FuxiCTR/datasets/Avazu/Avazu_x4/train.csv
     valid_data: /scratch/dliu2/FuxiCTR/datasets/Avazu/Avazu_x4/valid.csv
+
+avazu_x4_080_010_per_all_mixed:
+    data_format: parquet
+    data_root: /Users/dairui/PycharmProjects/FuxiCTR/data/Avazu
+    feature_cols:
+    - {active: false, dtype: str, name: id, type: categorical}
+    # 非个性化分类特征 Ad + context: 16+3=19
+    - active: true
+      dtype: str
+      name: [ C1, banner_pos, site_id, site_domain, site_category, app_id, app_domain, app_category, C14, C15, C16, C17, C18, C19, C20, C21 ]
+      type: categorical
+    - {active: true, dtype: str, name: hour, preprocess: convert_hour, type: categorical}
+    - {active: true, dtype: str, name: weekday, preprocess: convert_weekday, type: categorical}
+    - {active: true, dtype: str, name: weekend, preprocess: convert_weekend, type: categorical}
+    # Device 相关的个性化特征: 5
+    - active: true
+      dtype: str
+      name: [ device_ip, device_id, device_model, device_type, device_conn_type ]
+      type: categorical
+    label_col: {dtype: float, name: click}
+    feature_group_id: is_personalization
+    min_categr_count: 2
+    test_data: /scratch/dliu2/FuxiCTR/datasets/Avazu/Avazu_x4/test.csv
+    train_data: /scratch/dliu2/FuxiCTR/datasets/Avazu/Avazu_x4/train.csv
+    valid_data: /scratch/dliu2/FuxiCTR/datasets/Avazu/Avazu_x4/valid.csv
+
+taobaoad_x1:
+    data_format: parquet
+    data_root: /Users/dairui/PycharmProjects/FuxiCTR/data/Taobao
+    feature_cols:
+    - {active: true, dtype: int, name: group_id, preprocess: copy_from(userid), remap: false,
+        type: meta}
+    -   active: true
+        dtype: str
+        name: [adgroup_id, cate_id, campaign_id, customer, brand, pid, btag]
+        type: categorical
+    -   active: true
+        dtype: int
+        fill_na: 0
+        name: [userid, cms_segid, cms_group_id, final_gender_code, age_level, pvalue_level,
+            shopping_level, occupation, new_user_class_level]
+        type: categorical
+    - {active: true, dtype: float, name: price, type: numeric}
+    - {active: true, dtype: str, max_len: 50, name: cate_his, padding: pre, share_embedding: cate_id,
+        splitter: ^, type: sequence}
+    - {active: true, dtype: str, max_len: 50, name: brand_his, padding: pre, share_embedding: brand,
+        splitter: ^, type: sequence}
+    - {active: true, dtype: str, max_len: 50, name: btag_his, padding: pre, share_embedding: btag,
+        splitter: ^, type: sequence}
+    label_col: {dtype: float, name: clk}
+#      feature_group_id: is_personalization
+    min_categr_count: 10
+    test_data: /scratch/dliu2/FuxiCTR/datasets/TaobaoAd/processed/test.csv
+    train_data: /scratch/dliu2/FuxiCTR/datasets/TaobaoAd/processed/train.csv
+    valid_data: /scratch/dliu2/FuxiCTR/datasets/TaobaoAd/processed/valid.csv
+
+taobao_mcc_x1:
+
+#  训练集基本统计：
+#  | 指标       | 数值        |
+#  |----------|-----------|
+#  | 总样本数     | 9,526,571 |
+#  | 唯一用户数    | 5,752,528 |
+#  | 平均每用户样本数 | 1.66      |
+#
+#  频率分布特点：
+#  - 66.48% 的用户只出现 1 次
+#  - 96.09% 的用户出现少于 5 次
+#  - 最高频用户出现 71 次
+#  - 中位数为 1，说明大多数用户是低频用户
+# ---
+#  测试集 user_id 分布
+#
+#  | 指标       | 数值        |
+#  |----------|-----------|
+#  | 总样本数     | 3,555,419 |
+#  | 唯一用户数    | 2,242,720 |
+#  | 平均每用户样本数 | 1.59      |
+#  | 只出现1次的用户 | 68.74%    |
+#
+#  ---
+#  训练集 vs 测试集用户重叠分析
+#
+#  | 指标          | 数值        |
+#  |-------------|-----------|
+#  | 训练集用户数      | 5,752,528 |
+#  | 测试集用户数      | 2,242,720 |
+#  | 重叠用户数       | 414,254   |
+#  | 重叠用户占测试集比例  | 18.47%    |
+#  | Jaccard 相似度 | 0.0546    |
+#
+#  ---
+#  冷启动问题
+#
+#  | 指标     | 数值                       |
+#  |--------|--------------------------|
+#  | 冷启动用户数 | 1,828,466 (81.53% 测试集用户) |
+#  | 冷启动样本数 | 2,814,930 (79.17% 测试集样本) |
+#
+#  ---
+#  结论
+#
+#  冷启动问题严重：
+#  - 测试集中 81.5% 的用户在训练集中从未出现过
+#  - 测试集中 79.2% 的样本来自冷启动用户
+#  - 模型对这些用户的 user_id embedding 没有学习过，可能导致预测效果受限
+#
+#  建议：
+#  1. 考虑使用非个性化特征（商品特征、上下文特征）来处理冷启动用户
+#  2. 或者使用 user 侧特征（user_os, user_gender, user_age_level 等）代替 user_id
+
+    data_format: csv
+    data_root: /scratch/dliu2/FuxiCTR/data/TaobaoMCC/
+    feature_cols:
+    # User ID - 可作为 group_id 用于 gAUC 评估
+    - {active: true, dtype: int, name: user_id, type: categorical}
+    # 用户特征
+    - active: true
+      dtype: int
+      name: [user_os, user_gender, user_age_level, user_purchase_level, user_hour]
+      type: categorical
+    # 候选商品特征
+    - {active: true, dtype: int, name: cand_item_pos, type: categorical}
+    - {active: true, dtype: int, name: cand_item_pagenum, type: categorical}
+    - {active: true, dtype: int, name: cand_item_sex, type: categorical}
+    - {active: true, dtype: int, name: cand_item_price_level, type: categorical}
+    - {active: true, dtype: int, name: cand_item_age_level, type: categorical}
+    - {active: true, dtype: int, name: cand_item_bc_type, type: categorical}
+    # 曝光序列特征 (max_len=50)
+    - {active: true, dtype: str, max_len: 50, name: exp_item_pos_seq,
+       share_embedding: cand_item_pos, splitter: ",", type: sequence}
+    - {active: true, dtype: str, max_len: 50, name: exp_item_pagenum_seq,
+       share_embedding: cand_item_pagenum, splitter: ",", type: sequence}
+    - {active: true, dtype: str, max_len: 50, name: exp_item_sex_seq,
+       share_embedding: cand_item_sex, splitter: ",", type: sequence}
+    - {active: true, dtype: str, max_len: 50, name: exp_item_price_level_seq,
+       share_embedding: cand_item_price_level, splitter: ",", type: sequence}
+    - {active: true, dtype: str, max_len: 50, name: exp_item_age_level_seq,
+       share_embedding: cand_item_age_level, splitter: ",", type: sequence}
+    - {active: true, dtype: str, max_len: 50, name: exp_item_bc_type_seq,
+       share_embedding: cand_item_bc_type, splitter: ",", type: sequence}
+    # IPV点击序列特征 (max_len=30)
+    - {active: true, dtype: str, max_len: 30, name: ipv_item_pos_seq,
+       share_embedding: cand_item_pos, splitter: ",", type: sequence}
+    - {active: true, dtype: str, max_len: 30, name: ipv_item_pagenum_seq,
+       share_embedding: cand_item_pagenum, splitter: ",", type: sequence}
+    - {active: true, dtype: str, max_len: 30, name: ipv_item_sex_seq,
+       share_embedding: cand_item_sex, splitter: ",", type: sequence}
+    - {active: true, dtype: str, max_len: 30, name: ipv_item_price_level_seq,
+       share_embedding: cand_item_price_level, splitter: ",", type: sequence}
+    - {active: true, dtype: str, max_len: 30, name: ipv_item_age_level_seq,
+       share_embedding: cand_item_age_level, splitter: ",", type: sequence}
+    - {active: true, dtype: str, max_len: 30, name: ipv_item_bc_type_seq,
+       share_embedding: cand_item_bc_type, splitter: ",", type: sequence}
+    # Score 作为数值特征
+    - {active: true, dtype: float, name: score, type: numeric}
+    label_col: {dtype: float, name: label}
+    min_categr_count: 1
+    train_data: /scratch/dliu2/FuxiCTR/datasets/TaobaoOpenMCC/train.csv
+    valid_data: /scratch/dliu2/FuxiCTR/datasets/TaobaoOpenMCC/valid.csv
+    test_data: /scratch/dliu2/FuxiCTR/datasets/TaobaoOpenMCC/test.csv

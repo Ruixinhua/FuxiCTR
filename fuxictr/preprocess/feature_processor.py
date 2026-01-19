@@ -422,6 +422,9 @@ class FeatureProcessor(object):
         vocab = dict()
         for feature, spec in self.feature_map.features.items():
             if spec["type"] in ["categorical", "sequence"]:
+                # Skip features that use share_embedding, as they share vocab with another feature
+                if "share_embedding" in spec:
+                    continue
                 vocab[feature] = OrderedDict(
                     sorted(self.processor_dict[feature + "::tokenizer"].vocab.items(), key=lambda x:x[1]))
         with open(vocab_file, "w") as fd:
