@@ -77,19 +77,17 @@ class DualTowerRouter:
         Returns:
             final_pred: 路由后的最终预测结果
         """
-        batch_size = personalized_pred.size(0)
-        device = personalized_pred.device
-        
+
         # 初始化最终预测结果
         final_pred = torch.zeros_like(personalized_pred)
         
         # 个性化用户使用个性化塔的预测
         if torch.sum(personalized_mask) > 0:
-            final_pred[personalized_mask] = personalized_pred[personalized_mask]
+            final_pred[personalized_mask] += personalized_pred[personalized_mask]
         
         # 非个性化用户使用非个性化塔的预测
         if torch.sum(non_personalized_mask) > 0:
-            final_pred[non_personalized_mask] = non_personalized_pred[non_personalized_mask]
+            final_pred[non_personalized_mask] += non_personalized_pred[non_personalized_mask]
         
         return final_pred
 
@@ -126,6 +124,7 @@ class DualTowerModel(BaseModel):
                  # 特征分离配置
                  personalization_feature_list=None,
                  personalization_field="is_personalization",
+                 use_mask_for_all: bool = False,
                  # 损失权重配置
                  personalized_loss_weight=1.0,
                  non_personalized_loss_weight=1.0,
@@ -182,6 +181,7 @@ class DualTowerModel(BaseModel):
         
         # 初始化路由器
         self.router = DualTowerRouter(self.personalization_field)
+        self.use_mask_for_all = use_mask_for_all
         
         # 初始化两个独立的模型
         self._init_personalized_model()
@@ -205,21 +205,21 @@ class DualTowerModel(BaseModel):
 
     def _init_model(self, model_type, model_params):
         if model_type == "PNN":
-            from model_zoo.MTCL.src.model_adapter import PNNAdapter
+            from model_zoo.DTCN.src import PNNAdapter
             model = PNNAdapter(
                 feature_map=self.feature_map,
                 output_mode="SingleTower",
                 **model_params
             )
         elif model_type == "DCNv3":
-            from model_zoo.MTCL.src.model_adapter import DCNv3Adapter
+            from model_zoo.DTCN.src import DCNv3Adapter
             model = DCNv3Adapter(
                 feature_map=self.feature_map,
                 output_mode="SingleTower",
                 **model_params
             )
         elif model_type == "FinalNet":
-            from model_zoo.MTCL.src.model_adapter import FinalNetAdapter
+            from model_zoo.DTCN.src import FinalNetAdapter
             model = FinalNetAdapter(
                 feature_map=self.feature_map,
                 output_mode="SingleTower",
@@ -271,6 +271,10 @@ class DualTowerModel(BaseModel):
         
         # 1. 获取用户类型掩码
         personalized_mask, non_personalized_mask = self.router.get_user_masks(X)
+        if not self.use_mask_for_all:
+            # set 1 for both personalized and non-personalized users
+            personalized_mask = torch.ones_like(personalized_mask, device=personalized_mask.device)
+            non_personalized_mask = torch.ones_like(non_personalized_mask, device=non_personalized_mask.device)
         
         # 2. 特征分离（新逻辑：非个性化模型使用mask后的全特征）
         personalized_features, non_personalized_features = self.feature_separator.separate_features(X, personalized_mask)
