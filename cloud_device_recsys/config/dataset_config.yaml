@@ -1,0 +1,206 @@
+# =============================================================================
+# Dataset Configuration for Cloud-Device Recommendation System (Server Version)
+# =============================================================================
+# This file defines dataset paths, feature definitions, and preprocessing options.
+# Referenced by pipeline_config.yaml via dataset_id.
+
+TaobaoOpenMCC:
+  # -----------------------------------------
+  # Raw Data Settings (Server paths)
+  # -----------------------------------------
+#  raw_data_root: "/scratch/dliu2/FuxiCTR/datasets/TaobaoOpenMCC/with_item_id"
+  raw_data_root: "/Users/dairui/PycharmProjects/FuxiCTR/datasets/raw_data/TaobaoOpenMCC/with_item_id"
+  raw_data_format: "csv"
+  raw_files: [train, valid, test, cand_item_list, item_profile]  # Auto-appends format extension
+  
+  # -----------------------------------------
+  # Processed Data Settings (Server paths)
+  # -----------------------------------------
+#  processed_data_root: "/scratch/dliu2/FuxiCTR/data/TaobaoOpenMCC"
+  processed_data_root: "/Users/dairui/PycharmProjects/FuxiCTR/data/TaobaoOpenMCC"
+  processed_data_format: "parquet"
+  # Default outputs: train.parquet, valid.parquet, test.parquet, feature_map.json, feature_vocab.json
+  
+  # -----------------------------------------
+  # Label Column
+  # -----------------------------------------
+  label_col:
+    name: "label"
+    dtype: float
+
+  # -----------------------------------------
+  # Impression ID (for linking samples across stages)
+  # -----------------------------------------
+  impression_id_col: "impression_id"  # Will be generated if not present
+  item_id_col: "cand_item_id"
+  
+  # -----------------------------------------
+  # Feature Columns (Compact Format)
+  # -----------------------------------------
+  feature_cols:
+    # FG1: Non-personalized Item + Context Features
+    - name: [cand_item_id, cand_item_pos, cand_item_pagenum, cand_item_sex, 
+             cand_item_price_level, cand_item_age_level, cand_item_bc_type]
+      type: categorical
+      dtype: int
+      feature_group: FG1
+      
+    - name: score
+      type: numeric
+      dtype: float
+      feature_group: FG1
+    
+    # FG2: User Behavioral Sequences (Cloud-personalized)
+    - name: [exp_item_id_seq, exp_item_pos_seq, exp_item_pagenum_seq, 
+             exp_item_sex_seq, exp_item_price_level_seq, exp_item_age_level_seq, 
+             exp_item_bc_type_seq]
+      type: sequence
+      dtype: int
+      max_len: 50
+      splitter: ","
+      feature_group: FG2
+      share_embedding_map:
+        exp_item_id_seq: cand_item_id
+        exp_item_pos_seq: cand_item_pos
+        exp_item_pagenum_seq: cand_item_pagenum
+        exp_item_sex_seq: cand_item_sex
+        exp_item_price_level_seq: cand_item_price_level
+        exp_item_age_level_seq: cand_item_age_level
+        exp_item_bc_type_seq: cand_item_bc_type
+        
+    - name: [ipv_item_id_seq, ipv_item_pos_seq, ipv_item_pagenum_seq,
+             ipv_item_sex_seq, ipv_item_price_level_seq, ipv_item_age_level_seq,
+             ipv_item_bc_type_seq]
+      type: sequence
+      dtype: int
+      max_len: 30
+      splitter: ","
+      feature_group: FG2
+      share_embedding_map:
+        ipv_item_id_seq: cand_item_id
+        ipv_item_pos_seq: cand_item_pos
+        ipv_item_pagenum_seq: cand_item_pagenum
+        ipv_item_sex_seq: cand_item_sex
+        ipv_item_price_level_seq: cand_item_price_level
+        ipv_item_age_level_seq: cand_item_age_level
+        ipv_item_bc_type_seq: cand_item_bc_type
+
+    # FG3: Device-only Privacy Features
+    - name: [user_id, user_os, user_gender, user_age_level, user_purchase_level, user_hour]
+      type: categorical
+      dtype: int
+      feature_group: FG3
+
+  # -----------------------------------------
+  # Preprocessing Options
+  # -----------------------------------------
+  preprocessing:
+    min_categr_count: 1
+    positive_only_eval: true  # Filter valid/test to positive samples only
+    generate_impression_id: true  # Auto-generate impression_id if missing
+    
+  # -----------------------------------------
+  # Item Pool Configuration
+  # -----------------------------------------
+  item_pool:
+    file: "cand_item_list"  # References raw_files
+    id_col: "item_id"
+    feature_cols: [item_id, item_pos, item_pagenum, item_sex, 
+                   item_price_level, item_age_level, item_bc_type]
+
+# =============================================================================
+# TaobaoAd Dataset
+# =============================================================================
+TaobaoAd:
+  # -----------------------------------------
+  # Raw Data Settings
+  # -----------------------------------------
+  raw_data_root: "/scratch/dliu2/FuxiCTR/datasets/TaobaoAd/with_item_id"
+  raw_data_format: "csv"
+  raw_files: [train, valid, test, cand_item_list]
+  
+  # -----------------------------------------
+  # Processed Data Settings
+  # -----------------------------------------
+  processed_data_root: "/scratch/dliu2/FuxiCTR/data/TaobaoAd"
+  processed_data_format: "parquet"
+  
+  # -----------------------------------------
+  # Label Column
+  # -----------------------------------------
+  label_col:
+    name: "clk"
+    dtype: float
+
+  # -----------------------------------------
+  # Impression ID
+  # -----------------------------------------
+  impression_id_col: "impression_id"
+  item_id_col: "adgroup_id"
+  
+  # -----------------------------------------
+  # Feature Columns (Compact Format)
+  # -----------------------------------------
+  feature_cols:
+    # FG1: Non-personalized Item Features
+    - name: price
+      type: numeric
+      dtype: float
+      feature_group: FG1
+      
+    - name: [adgroup_id, cate_id, campaign_id, customer, brand, pid, btag]
+      type: categorical
+      dtype: str
+      feature_group: FG1
+    
+    # FG2: User Behavioral Sequences (Cloud-personalized)
+    - name: cate_his
+      type: sequence
+      dtype: str
+      max_len: 50
+      padding: pre
+      splitter: "^"
+      share_embedding: cate_id
+      feature_group: FG2
+      
+    - name: brand_his
+      type: sequence
+      dtype: str
+      max_len: 50
+      padding: pre
+      splitter: "^"
+      share_embedding: brand
+      feature_group: FG2
+      
+    - name: btag_his
+      type: sequence
+      dtype: str
+      max_len: 50
+      padding: pre
+      splitter: "^"
+      share_embedding: btag
+      feature_group: FG2
+
+    # FG3: Device-only Privacy Features (User profile)
+    - name: [userid, cms_segid, cms_group_id, final_gender_code, age_level, 
+             pvalue_level, shopping_level, occupation, new_user_class_level]
+      type: categorical
+      dtype: int
+      fill_na: 0
+      feature_group: FG3
+
+  # -----------------------------------------
+  # Preprocessing Options
+  # -----------------------------------------
+  preprocessing:
+    min_categr_count: 1
+    positive_only_eval: true
+    generate_impression_id: true
+    
+  # -----------------------------------------
+  # Item Pool Configuration
+  # -----------------------------------------
+  item_pool:
+    file: "cand_item_list"
+    id_col: "adgroup_id"
+    feature_cols: [adgroup_id, cate_id, campaign_id, customer, brand, pid]
