@@ -26,8 +26,6 @@ import polars as pl
 import pandas as pd
 
 from cloud_device_recsys.config.config_parser import ConfigParser
-from cloud_device_recsys.config.feature_groups import FeatureGroupManager, FeatureGroup
-from cloud_device_recsys.data.item_pool import ItemPool
 
 
 def setup_logging(output_dir: str) -> logging.Logger:
@@ -68,7 +66,8 @@ def preprocess_split(
     output_path: str,
     dataset_config: dict,
     is_eval: bool = False,
-    logger: logging.Logger = None
+    logger: logging.Logger = None,
+    n_rows: int = None
 ) -> str:
     """
     Preprocess a single data split.
@@ -92,7 +91,13 @@ def preprocess_split(
         logger.info(f"Processing: {raw_path}")
     
     # Load data
-    df = pl.scan_csv(raw_path)
+    if n_rows:
+        # Use pandas for subset reading as polars scan/read caused hangs
+        import pandas as pd
+        pdf = pd.read_csv(raw_path, nrows=n_rows)
+        df = pl.from_pandas(pdf).lazy()
+    else:
+        df = pl.scan_csv(raw_path)
     
     # Generate impression_id if needed
     if dataset_config.get('preprocessing', {}).get('generate_impression_id', True):
@@ -104,7 +109,7 @@ def preprocess_split(
         df = filter_positive_samples(df, label_col)
         if logger:
             logger.info("Filtered to positive samples only")
-    
+            
     # Collect and save
     result = df.collect()
     
@@ -155,6 +160,144 @@ def build_feature_vocab(
     return vocab
 
 
+def apply_vocab_mapping(path: str, vocab: dict, feature_cols: list, logger: logging.Logger = None) -> None:
+    """
+    Apply vocabulary mapping to convert raw values to indices.
+    Handles categorical (int) and sequence (list of ints) features.
+    Overwrite the file at path.
+    """
+    import pandas as pd
+    import numpy as np
+    
+    if not os.path.exists(path):
+        return
+        
+    if logger:
+        logger.info(f"Mapping values to indices for {path}")
+        
+    df = pd.read_parquet(path)
+    
+    # Create quick lookup for feature config
+    feat_config = {f['name']: f for f in feature_cols}
+    
+    for col in df.columns:
+        if col not in vocab:
+            continue
+            
+        mapping = vocab[col]
+        conf = feat_config.get(col, {})
+        ctype = conf.get('type', 'categorical')
+        
+        if ctype == 'sequence':
+            if logger:
+                logger.info(f"  Processing sequence column: {col}")
+            splitter = conf.get('splitter', '^') # Default from config usually '^' or ','
+            max_len = conf.get('max_len', 50)
+            padding_idx = 0
+            
+            # Function to process sequence strings
+            def process_seq(x):
+                if pd.isna(x) or x == "":
+                    return [padding_idx] * max_len
+                # Ensure string
+                x = str(x)
+                tokens = x.split(splitter)
+                # Map and Pad
+                ids = [mapping.get(t, 0) for t in tokens]
+                if len(ids) > max_len:
+                    ids = ids[:max_len]
+                else:
+                    ids += [padding_idx] * (max_len - len(ids))
+                return ids
+            
+            # Apply to column
+            df[col] = df[col].apply(process_seq)
+            
+        else:
+            # Categorical
+            if logger:
+                logger.info(f"  Processing categorical column: {col}")
+            # Use map which is faster than apply
+            # Must handle string conversion for lookup
+            # Fillna(0) for OOV
+            df[col] = df[col].astype(str).map(mapping).fillna(0).astype('int64')
+            
+    df.to_parquet(path)
+    if logger:
+        logger.info(f"Saved mapped data to {path}")
+
+
+def update_vocab_from_df(vocab: dict, df: pd.DataFrame, feature_cols: list, logger=None):
+    """Update vocabulary with new values from a dataframe"""
+    if logger:
+        logger.info("Updating vocabulary from additional data...")
+        
+    feat_config = {f['name']: f for f in feature_cols}
+    
+    for col in df.columns:
+        if col not in feat_config:
+            continue
+            
+        conf = feat_config[col]
+        ctype = conf.get('type', 'categorical')
+        
+        # Initialize if missing
+        if col not in vocab:
+            vocab[col] = {}
+        
+        current_map = vocab[col]
+        next_idx = len(current_map) + 1 # 1-based index
+        
+        new_vals = set()
+        if ctype == 'sequence':
+            splitter = conf.get('splitter', '^')
+            # Extract unique tokens
+            # This can be slow for large DF, but ItemPool is usually manageable
+            def get_tokens(x):
+                if pd.isna(x) or x == "": return []
+                return str(x).split(splitter)
+            
+            # Using set/union for speed
+            all_tokens = set()
+            for row in df[col]:
+                all_tokens.update(get_tokens(row))
+            new_vals = all_tokens
+        else:
+            new_vals = set(df[col].astype(str).unique())
+            
+        # Add new vals
+        for v in new_vals:
+            if v not in current_map and v != "":
+                current_map[v] = next_idx
+                next_idx += 1
+                
+    if logger:
+        logger.info("Vocabulary update complete.")
+        
+        
+def enforce_shared_vocab(vocab: dict, dataset_config: dict, logger=None):
+    """Enforce vocabulary sharing based on config"""
+    feature_cols = dataset_config.get('feature_cols_expanded', [])
+    
+    # 1. Share embedding map handling (explicit map in config)
+    # Check FG configuration for share_embedding_map
+    for feat_group in dataset_config.get('feature_cols', []):
+        share_map = feat_group.get('share_embedding_map', {})
+        for target_feat, source_feat in share_map.items():
+            if source_feat in vocab:
+                if logger:
+                    logger.info(f"Sharing vocab: {target_feat} <- {source_feat}")
+                vocab[target_feat] = vocab[source_feat]
+
+    # 2. Check individual feature 'share_embedding' attribute
+    for feat in feature_cols:
+        target = feat['name']
+        source = feat.get('share_embedding')
+        if source and source in vocab:
+             if logger:
+                logger.info(f"Sharing vocab (attr): {target} <- {source}")
+             vocab[target] = vocab[source]
+
 def main():
     parser = argparse.ArgumentParser(description='Preprocess data v2')
     parser.add_argument('--config', type=str, default='./cloud_device_recsys/config',
@@ -173,8 +316,8 @@ def main():
     config = config_parser.get_full_config(dataset_id=args.dataset_id)
     
     dataset_config = config['dataset']
-    pipeline_config = config['pipeline']
-    
+    # pipeline_config = config['pipeline']
+
     # Setup
     output_dir = dataset_config['processed_paths']['train'].rsplit('/', 1)[0]
     logger = setup_logging(output_dir)
@@ -198,7 +341,8 @@ def main():
         output_path=processed_paths['train'],
         dataset_config=dataset_config,
         is_eval=False,
-        logger=logger
+        logger=logger,
+        n_rows=args.n_rows
     )
     
     # Process valid (positive only)
@@ -231,6 +375,44 @@ def main():
         logger=logger
     )
     
+    # Update vocab from Item Pool (critical for item features coverage)
+    item_pool_raw = raw_paths.get('cand_item_list')
+    if item_pool_raw and os.path.exists(item_pool_raw):
+        logger.info(f"Updating vocab from Item Pool: {item_pool_raw}")
+        # Use pandas for vocab update
+        import pandas as pd
+        ip_df = pd.read_csv(item_pool_raw)
+        
+        # Rename columns to match feature_map (item_X -> cand_item_X)
+        rename_map = {}
+        for col in ip_df.columns:
+            if col.startswith("item_"):
+                new_col = "cand_" + col
+                rename_map[col] = new_col
+        if rename_map:
+             ip_df = ip_df.rename(columns=rename_map)
+             
+        update_vocab_from_df(vocab, ip_df, feature_cols, logger)
+        
+    # Enforce shared vocabularies (sequences use ID vocab)
+    enforce_shared_vocab(vocab, dataset_config, logger)
+    
+    # Save updated vocab
+    import json
+    with open(processed_paths['feature_vocab'], 'w') as f:
+        json.dump(vocab, f, indent=4)
+    
+    # Apply mapping to train, valid, test
+    logger.info("Applying vocabulary mapping to datasets...")
+    apply_vocab_mapping(processed_paths['train'], vocab, feature_cols, logger)
+    apply_vocab_mapping(processed_paths['valid'], vocab, feature_cols, logger)
+    apply_vocab_mapping(processed_paths['test'], vocab, feature_cols, logger)
+    
+    # Also map Item Pool!
+    item_pool_path = os.path.join(output_dir, "cand_item_list.parquet")
+    if os.path.exists(item_pool_path):
+         apply_vocab_mapping(item_pool_path, vocab, feature_cols, logger)
+    
     # Create FuxiCTR-compatible feature_map with vocab_size
     logger.info("Creating FuxiCTR-compatible feature_map...")
     import json
@@ -258,6 +440,7 @@ def main():
         feat_spec = {
             'source': source,
             'type': feat_type,
+            'feature_group': feat_group
         }
         
         if feat_type in ['categorical', 'sequence']:
@@ -308,7 +491,85 @@ def main():
     
     if item_pool_raw and os.path.exists(item_pool_raw):
         item_pool_df = pl.read_csv(item_pool_raw)
-        item_pool_path = os.path.join(output_dir, "item_pool.parquet")
+        
+        # Rename columns to match feature_map (item_X -> cand_item_X)
+        rename_map = {}
+        for col in item_pool_df.columns:
+            if col.startswith("item_"):
+                new_col = "cand_" + col
+                rename_map[col] = new_col
+        
+        if rename_map:
+            logger.info(f"Renaming item pool columns: {rename_map}")
+            item_pool_df = item_pool_df.rename(rename_map)
+            
+        # Map item_pool columns to indices using vocab
+        # This is critical because item_pool contains Raw IDs (from CSV)
+        # But pipeline expects Mapped Indices (consistent with train.parquet)
+        if vocab:
+            for col_name in item_pool_df.columns:
+                # Check if this column has a vocabulary
+                # Note: raw item_id in vocab is 'item_id'? 
+                # We renamed 'item_id' to 'cand_item_id'.
+                # vocab was built from 'train_df'.
+                # train_df columns: 'cand_item_id' etc.
+                # So vocab keys should match updated item_pool names.
+                if col_name in vocab:
+                    logger.info(f"Mapping column {col_name} using vocab")
+                    mapping = vocab[col_name]
+                    # Map values: Cast to Str, lookup, default to 0 (OOV)
+                    # Note: vocab keys are strings. 
+                    item_pool_df = item_pool_df.with_columns(
+                        pl.col(col_name).cast(pl.Utf8).replace(mapping, default=0).cast(pl.Int64)
+                    )
+        
+        # Add 'score' column if missing (required by feature_map)
+        if "score" not in item_pool_df.columns:
+            logger.info("Adding default 'score' column to item pool")
+            item_pool_df = item_pool_df.with_columns(pl.lit(0.0).alias("score"))
+            
+        # Add 'label' column if missing (required by RankDataLoader)
+        if "label" not in item_pool_df.columns:
+            logger.info("Adding default 'label' column to item pool")
+            item_pool_df = item_pool_df.with_columns(pl.lit(0).alias("label"))
+
+        # Load feature map to check for other missing columns (e.g. user features)
+        # item_pool needs to conform to feature_map schema even if user features are irrelevant
+        feature_map_json = os.path.join(output_dir, "feature_map.json")
+        if os.path.exists(feature_map_json):
+            import json
+            with open(feature_map_json, 'r') as f:
+                fm = json.load(f)
+            
+            features = fm.get('features', [])
+            # Convert dict format to list if needed
+            if isinstance(features, dict):
+                features = [{k: v} for k, v in features.items()]
+                
+            for feat_entry in features:
+                # feat_entry is likely {name: spec}
+                fname = list(feat_entry.keys())[0]
+                fspec = feat_entry[fname]
+                
+                if fname not in item_pool_df.columns:
+                    ftype = fspec.get('type', 'categorical')
+                    logger.info(f"Adding dummy column '{fname}' (type: {ftype}) to item pool")
+                    
+                    if ftype == 'sequence':
+                        max_len = fspec.get('max_len', 50)
+                        # Initialize as list of 0s (padding)
+                        # Polars requires specific syntax for list literals or use pl.repeat?
+                        # Simplest is likely using pl.lit with series logic or a python list
+                        # pl.lit([0]*max_len) creates a List type column repeated
+                        item_pool_df = item_pool_df.with_columns(
+                            pl.lit([0] * max_len).alias(fname)
+                        )
+                    elif ftype == 'numeric':
+                        item_pool_df = item_pool_df.with_columns(pl.lit(0.0).alias(fname))
+                    else: # categorical
+                        item_pool_df = item_pool_df.with_columns(pl.lit(0).alias(fname))
+            
+        item_pool_path = os.path.join(output_dir, "cand_item_list.parquet")
         item_pool_df.write_parquet(item_pool_path)
         logger.info(f"Saved {len(item_pool_df)} items to {item_pool_path}")
     

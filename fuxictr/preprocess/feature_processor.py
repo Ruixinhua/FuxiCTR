@@ -365,6 +365,16 @@ class FeatureProcessor(object):
                                                 "oov_idx": tokenizer.vocab["__OOV__"],
                                                 "max_len": tokenizer.max_len,
                                                 "vocab_size": tokenizer.vocab_size()})
+        
+        # Handle compute_sequence_length option for 0-padded sequences
+        if col.get("compute_sequence_length", False):
+            len_feature_name = name + "_len"
+            self.feature_map.features[name]["compute_sequence_length"] = True
+            self.feature_map.features[len_feature_name] = {
+                "source": feature_source,
+                "type": "numeric",
+                "derived_from": name
+            }
 
     def transform(self, ddf):
         logging.info("Transform feature columns to IDs...")
@@ -394,8 +404,12 @@ class FeatureProcessor(object):
                     elif category_processor == "hash_bucket":
                         raise NotImplementedError
                 elif feature_type == "sequence":
-                    ddf[feature] = (self.processor_dict.get(feature + "::tokenizer")
-                                    .encode_sequence(col_series))
+                    tokenizer = self.processor_dict.get(feature + "::tokenizer")
+                    ddf[feature] = tokenizer.encode_sequence(col_series)
+                    # Compute sequence length if enabled
+                    if feature_spec.get("compute_sequence_length", False):
+                        len_feature_name = feature + "_len"
+                        ddf[len_feature_name] = tokenizer.compute_sequence_lengths(col_series)
                 elif feature_type == "embedding":
                     continue
                 else:

@@ -252,11 +252,9 @@ class EvalDataGenerator:
         
         for k in k_values:
             recall = self.compute_recall_at_k(retrieved, ground_truth, k)
-            hit_rate = self.compute_hit_rate_at_k(retrieved, ground_truth, k)
-            
+
             metrics[f'Recall@{k}'] = recall
-            metrics[f'HitRate@{k}'] = hit_rate
-        
+
         self.logger.info(f"Retrieval metrics: {metrics}")
         
         # Save metrics

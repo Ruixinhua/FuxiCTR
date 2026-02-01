@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # =========================================================================
-# Copyright (C) 2024. Cloud-Device Recommendation System.
+# Copyright (C) 2026. Cloud-Device Recommendation System.
 # =========================================================================
 
 """
@@ -17,75 +17,43 @@ Usage:
     python run_pipeline.py --config ./config --mode retrieval --gpu 0
     python run_pipeline.py --config ./config --mode preranking --gpu 0
     python run_pipeline.py --config ./config --mode reranking --gpu 0
-    
-    # Training
-    python run_pipeline.py --config ./config --mode train --stage retrieval --gpu 0
+
 """
 
 import os
+import copy
 import sys
 import argparse
 import logging
 import json
 import yaml
 from pathlib import Path
-from datetime import datetime
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from fuxictr.utils import load_config, set_logger, print_to_json, save_results_to_csv
 from fuxictr.features import FeatureMap
 from fuxictr.pytorch.dataloaders import RankDataLoader
 from fuxictr.pytorch.torch_utils import seed_everything
-from fuxictr.preprocess import build_dataset
 
 from cloud_device_recsys.config.feature_groups import FeatureGroupManager, FeatureGroup
-from cloud_device_recsys.pipeline.pipeline_coordinator import PipelineCoordinator
-from cloud_device_recsys.pipeline.base_stage import StageType
 from cloud_device_recsys.retrieval.retrieval_stage import RetrievalStage
 from cloud_device_recsys.preranking.preranking_stage import PrerankingStage
 from cloud_device_recsys.reranking.reranking_stage import RerankingStage
-
-
-def setup_logging(output_dir: str) -> None:
-    """Setup logging configuration"""
-    os.makedirs(output_dir, exist_ok=True)
-    log_file = os.path.join(output_dir, f"pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
-    
-    logging.basicConfig(
-        level=logging.INFO,
-        format='[%(asctime)s] %(levelname)s - %(name)s: %(message)s',
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler()
-        ]
-    )
-
-
-def load_pipeline_config(config_dir: str, pipeline_id: str) -> dict:
-    """Load pipeline configuration"""
-    config_path = os.path.join(config_dir, f"{pipeline_id}.yaml")
-    if not os.path.exists(config_path):
-        config_path = os.path.join(config_dir, "pipeline_config.yaml")
-    
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    
-    return config
+from cloud_device_recsys.utils import setup_logging, load_pipeline_config, get_data_dir
 
 
 def build_feature_group_manager(config: dict) -> FeatureGroupManager:
     """Build and configure feature group manager"""
     manager = FeatureGroupManager()
-    
+
     # Load custom assignments if provided
     if 'feature_groups' in config:
         for fg_name, features in config['feature_groups'].items():
             fg = FeatureGroup.from_string(fg_name)
             for feature in features:
                 manager.assign_feature(feature, fg)
-    
+
     return manager
 
 
@@ -93,21 +61,30 @@ def create_stages(
     feature_map: FeatureMap,
     feature_group_manager: FeatureGroupManager,
     config: dict,
-    output_dir: str
+    output_dir: str,
+    gpu: int = -1
 ) -> dict:
     """Create pipeline stages based on configuration"""
     stages = {}
     
-    # Get stages config (may be at root or under 'stages' key)
+    # Get stages config (maybe at root or under 'stages' key)
     stages_config = config.get('stages', config)
     
     # Retrieval stage
     if 'retrieval' in stages_config:
         retrieval_config = stages_config['retrieval']
+        # Merge GPU into model params
+        model_params = retrieval_config.get('model_params', {})
+        model_params['gpu'] = gpu
+        # Pass metrics if defined
+        if 'metrics' in retrieval_config:
+            model_params['metrics'] = retrieval_config['metrics']
+        
         stages['retrieval'] = RetrievalStage(
             feature_map=feature_map,
             feature_group_manager=feature_group_manager,
-            model_params=retrieval_config.get('model_params', {}),
+            allowed_feature_groups=[getattr(FeatureGroup, f) for f in retrieval_config['features']],
+            model_params=model_params,
             output_dir=os.path.join(output_dir, 'retrieval'),
             top_k=retrieval_config.get('top_k', 1000)
         )
@@ -115,10 +92,14 @@ def create_stages(
     # Pre-ranking stage
     if 'preranking' in stages_config:
         preranking_config = stages_config['preranking']
+        # Merge GPU into model params
+        model_params = preranking_config.get('model_params', {})
+        model_params['gpu'] = gpu
+        
         stages['preranking'] = PrerankingStage(
             feature_map=feature_map,
             feature_group_manager=feature_group_manager,
-            model_params=preranking_config.get('model_params', {}),
+            model_params=model_params,
             output_dir=os.path.join(output_dir, 'preranking'),
             top_k=preranking_config.get('top_k', 100),
             use_diversity=preranking_config.get('use_diversity', False)
@@ -127,16 +108,102 @@ def create_stages(
     # Re-ranking stage
     if 'reranking' in stages_config:
         reranking_config = stages_config['reranking']
+        # Merge GPU into model params
+        model_params = reranking_config.get('model_params', {})
+        model_params['gpu'] = gpu
+        
         stages['reranking'] = RerankingStage(
             feature_map=feature_map,
             feature_group_manager=feature_group_manager,
-            model_params=reranking_config.get('model_params', {}),
+            model_params=model_params,
             output_dir=os.path.join(output_dir, 'reranking'),
             top_k=reranking_config.get('top_k', 10),
             support_distillation=reranking_config.get('distillation', False)
         )
     
     return stages
+
+
+def run_retrival_stage(retrieval_stage, pipeline_config, dataset_config, fg_manager, logger=setup_logging('./outputs')):
+    data_dir = get_data_dir(dataset_config, pipeline_config['dataset_id'])
+    retrieval_config = pipeline_config['stages']['retrieval']
+    # Use retrieval_stage.feature_map (filtered) to ensure loader only loads allowed features
+    # This prevents loading FG3 features which are not in the model's feature_map
+    train_fm = retrieval_stage.feature_map
+    if retrieval_stage.item_embeddings is None:  # If item embeddings not built yet, then train and build
+        logger.info("[Training] Building item index for retrieval stage...")
+
+        # Get data paths - use processed item pool if available
+        item_pool_config = dataset_config.get('item_pool', {})
+        item_pool_file = item_pool_config.get('file', 'cand_item_list')
+        processed_data_root = dataset_config.get('processed_data_root', data_dir)
+
+        # Try processed item pool first (parquet format)
+        processed_item_pool = os.path.join(processed_data_root, f'{item_pool_file}.parquet')
+
+        # TRAIN RETRIEVAL MODEL
+        logger.info("Training retrieval model...")
+        data_format = dataset_config.get('processed_data_format', 'parquet')
+        train_path = os.path.join(processed_data_root, f'train.{data_format}')
+        valid_path = os.path.join(processed_data_root, f'valid.{data_format}')
+        # Create train/valid loaders
+        train_loader = RankDataLoader(
+            feature_map=train_fm,
+            stage='train',
+            train_data=train_path,
+            valid_data=valid_path,
+            batch_size=retrieval_config['training'].get('batch_size', 4096),
+            shuffle=True,
+            data_format=data_format
+        )
+        train_gen, valid_gen = train_loader.make_iterator()  # Unpack generators
+
+        # Create Item Pool Loader for Retrieval Evaluation
+        logger.info(f"Loading item pool from {processed_item_pool}")
+
+        item_feature_names = [name for name, spec in train_fm.features.items()
+                              if fg_manager.feature_assignments.get(name) == FeatureGroup.FG1]
+        # Create a lean feature map
+        item_fm = copy.deepcopy(train_fm)
+        item_fm.features = {k: v for k, v in item_fm.features.items() if k in item_feature_names}
+        # IMPORTANT: Re-index the feature map so column indices start from 0 and match the number of features
+        item_fm.set_column_index()
+
+        item_loader = RankDataLoader(
+            feature_map=item_fm,
+            stage='train',  # Acts as feed generator
+            train_data=processed_item_pool,
+            batch_size=retrieval_config['training'].get('batch_size', 4096),
+            shuffle=False,
+            data_format=data_format
+        )
+        item_gen, _ = item_loader.make_iterator()
+        retrieval_stage.build_model()
+        # Train retrieval stage with custom loop
+        retrieval_stage.train(
+            train_data=train_gen,
+            valid_data=valid_gen,
+            item_data=item_gen,
+            epochs=retrieval_config['training'].get('epochs', 10),
+            patience=retrieval_config['training'].get('patience', 2),
+            monitor=retrieval_config['training'].get('monitor', 'Recall@1000'),  # Monitor Recall
+            mode=retrieval_config['training'].get('mode', 'max')
+        )
+        # After training, load the best model and build item index for valid and test evaluation
+        retrieval_stage.build_item_index(item_gen)
+        logger.info("Item index built successfully")
+        retrieval_stage.evaluate(valid_gen)
+    test_path = os.path.join(dataset_config.get('processed_data_root', data_dir), 'test.parquet')
+    test_loader = RankDataLoader(
+        feature_map=train_fm,
+        stage='test',
+        test_data=test_path,
+        batch_size=retrieval_config['training'].get('batch_size', 4096),
+        shuffle=False,
+        data_format='parquet'
+    )
+    test_gen = test_loader.make_iterator()
+    retrieval_stage.evaluate(test_gen)
 
 
 def main():
@@ -146,7 +213,7 @@ def main():
                        help='Configuration directory')
     parser.add_argument('--pipeline_id', type=str, default='default',
                        help='Pipeline configuration ID')
-    parser.add_argument('--dataset_id', type=str, default='taobao_mcc_x1',
+    parser.add_argument('--dataset_id', type=str, default=None,
                        help='Dataset ID from dataset_config.yaml')
     parser.add_argument('--mode', type=str, default='full',
                        choices=['full', 'retrieval', 'preranking', 'reranking', 'train', 'evaluate'],
@@ -181,18 +248,17 @@ def main():
     dataset_config_path = os.path.join(args.config, 'dataset_config.yaml')
     with open(dataset_config_path, 'r') as f:
         all_dataset_config = yaml.safe_load(f)
-    
-    dataset_config = all_dataset_config.get(args.dataset_id, {})
+
+    dataset_id = pipeline_config['dataset_id'] if args.dataset_id is None else args.dataset_id
+    pipeline_config['dataset_id'] = dataset_id
+    dataset_config = all_dataset_config.get(dataset_id, {})
+    logger.info(f"Dataset: {dataset_id}")
     dataset_config['gpu'] = args.gpu
-    
-    logger.info(f"Dataset: {args.dataset_id}")
-    
+    logger.info(f"Used GPU: {args.gpu if args.gpu >=0 else 'CPU'}")
+
     # Build feature map
     # Use processed_data_root if available, otherwise data_root + dataset_id
-    if 'processed_data_root' in dataset_config:
-        data_dir = dataset_config['processed_data_root']
-    else:
-        data_dir = os.path.join(dataset_config.get('data_root', './data'), args.dataset_id)
+    data_dir = get_data_dir(dataset_config, pipeline_config['dataset_id'])
         
     feature_map_json = os.path.join(data_dir, "feature_map.json")
     
@@ -214,8 +280,9 @@ def main():
             feature_map_json = converted_json
             logger.info(f"Saved converted feature_map to {converted_json}")
         
-        feature_map = FeatureMap(args.dataset_id, data_dir)
+        feature_map = FeatureMap(dataset_id, data_dir)
         feature_map.load(feature_map_json, dataset_config)
+        feature_map.dataset_config = dataset_config # Attach config for access in stages
         logger.info(f"Loaded feature map with {len(feature_map.features)} features")
     else:
         logger.warning(f"Feature map not found at {feature_map_json}")
@@ -224,7 +291,8 @@ def main():
     
     # Build feature group manager
     fg_manager = build_feature_group_manager(pipeline_config)
-    fg_manager.auto_assign_groups(feature_map)
+    # Pass dataset_config to use explicit feature group definitions
+    fg_manager.auto_assign_groups(feature_map, dataset_config)
     
     # Save feature group assignments
     fg_csv_path = os.path.join(args.output_dir, 'feature_group_assignments.csv')
@@ -236,223 +304,26 @@ def main():
         feature_map=feature_map,
         feature_group_manager=fg_manager,
         config=pipeline_config,
-        output_dir=args.output_dir
-    )
-    
-    # Create pipeline coordinator
-    coordinator = PipelineCoordinator(
         output_dir=args.output_dir,
-        save_intermediate=True,
-        save_csv=True
+        gpu=args.gpu
     )
-    
-    # Register stages
-    stage_type_map = {
-        'retrieval': StageType.RETRIEVAL,
-        'preranking': StageType.PRERANKING,
-        'reranking': StageType.RERANKING
-    }
-    
-    for name, stage in stages.items():
-        coordinator.register_stage(stage)
     
     # Execute based on mode
     if args.mode == 'full':
         logger.info("Running full pipeline")
-        
         # Build item index for retrieval stage (required for real predictions)
         if 'retrieval' in stages:
             retrieval_stage = stages['retrieval']
-            if retrieval_stage.item_embeddings is None:
-                logger.info("Building item index for retrieval stage...")
-                
-                # Get data paths - use processed item pool if available
-                item_pool_config = dataset_config.get('item_pool', {})
-                item_pool_file = item_pool_config.get('file', 'cand_item_list')
-                processed_data_root = dataset_config.get('processed_data_root', data_dir)
-                raw_data_root = dataset_config.get('raw_data_root', data_dir)
-                
-                # Try processed item pool first (parquet format)
-                processed_item_pool = os.path.join(processed_data_root, 'item_pool.parquet')
-                raw_item_pool = os.path.join(raw_data_root, f'{item_pool_file}.csv')
-                
-                if os.path.exists(processed_item_pool):
-                    item_pool_path = processed_item_pool
-                    data_format = 'parquet'
-                elif os.path.exists(raw_item_pool):
-                    item_pool_path = raw_item_pool
-                    data_format = 'csv'
-                else:
-                    item_pool_path = None
-                    
-                if item_pool_path:
-                    logger.info(f"Loading item pool from: {item_pool_path}")
-                    
-                    # Build model first if not built
-                    if retrieval_stage.model is None:
-                        retrieval_stage.build_model()
-                    
-                    # For CSV files, we need to preprocess them first
-                    # For now, use the processed train data to build item embeddings
-                    # from unique items (simpler approach)
-                    if data_format == 'csv':
-                        logger.info("Using train data items for building index (CSV item pool not supported by RankDataLoader)")
-                        # Use processed train data instead
-                        train_path = os.path.join(processed_data_root, 'train.parquet')
-                        if os.path.exists(train_path):
-                            item_loader = RankDataLoader(
-                                feature_map=feature_map,
-                                stage='test',
-                                test_data=train_path,
-                                batch_size=4096,
-                                shuffle=False,
-                                data_format='parquet'
-                            )
-                            item_gen = item_loader.make_iterator()
-                            retrieval_stage.build_item_index(item_gen)
-                            logger.info("Item index built from train data")
-                    else:
-                        # Use processed item pool (parquet)
-                        item_loader = RankDataLoader(
-                            feature_map=feature_map,
-                            stage='test',
-                            test_data=item_pool_path,
-                            batch_size=4096,
-                            shuffle=False,
-                            data_format='parquet'
-                        )
-                        item_gen = item_loader.make_iterator()
-                        retrieval_stage.build_item_index(item_gen)
-                        logger.info("Item index built successfully")
-                else:
-                    logger.warning(f"Item pool not found at {processed_item_pool} or {raw_item_pool}")
-        
-        results = coordinator.run_full_pipeline()
-        logger.info("Pipeline complete!")
-        for stage_name, output in results.items():
-            logger.info(f"  {stage_name}: {output.get_total_candidates()} candidates")
-    
-    elif args.mode in ['retrieval', 'preranking', 'reranking']:
-        stage_type = stage_type_map[args.mode]
-        logger.info(f"Running single stage: {args.mode}")
-        output = coordinator.run_stage(
-            stage_type=stage_type,
-            prev_output_path=args.prev_output
-        )
-        logger.info(f"Stage complete: {output.get_total_candidates()} candidates")
-    
-    elif args.mode == 'train':
-        if args.stage is None:
-            logger.error("--stage required for train mode")
+            run_retrival_stage(retrieval_stage, pipeline_config, dataset_config, fg_manager, logger=logger)
+    elif args.mode == 'retrival':
+        logger.info("Running retrieval stage only")
+        if 'retrieval' not in stages:
+            logger.error("Retrieval stage not configured in pipeline")
             return
-        
-        stage_type = stage_type_map[args.stage]
-        logger.info(f"Training stage: {args.stage}")
-        
-        # Build data paths from dataset config
-        data_dir = dataset_config.get('processed_data_root', data_dir)
-        data_format = dataset_config.get('processed_data_format', 'parquet')
-        
-        train_path = os.path.join(data_dir, f'train.{data_format}')
-        valid_path = os.path.join(data_dir, f'valid.{data_format}')
-        
-        logger.info(f"Loading training data from: {train_path}")
-        logger.info(f"Loading validation data from: {valid_path}")
-        
-        # Get stage training config
-        stages_config = pipeline_config.get('stages', pipeline_config)
-        stage_config = stages_config.get(args.stage, {})
-        training_config = stage_config.get('training', {})
-        
-        batch_size = training_config.get('batch_size', 4096)
-        epochs = training_config.get('epochs', 10)
-        
-        # Build data loaders with correct parameters
-        data_loader = RankDataLoader(
-            feature_map=feature_map,
-            stage='train',
-            train_data=train_path,
-            valid_data=valid_path,
-            batch_size=batch_size,
-            shuffle=True,
-            data_format=data_format
-        )
-        train_gen, valid_gen = data_loader.make_iterator()
-        
-        logger.info(f"Starting training with batch_size={batch_size}, epochs={epochs}")
-        
-        metrics = coordinator.train_stage(
-            stage_type=stage_type,
-            train_data=train_gen,
-            valid_data=valid_gen,
-            epochs=epochs
-        )
-        logger.info(f"Training complete: {metrics}")
-        
-        # For retrieval stage, build item index after training
-        if args.stage == 'retrieval':
-            logger.info("Building item index for retrieval...")
-            
-            # Load item pool data
-            item_pool_config = dataset_config.get('item_pool', {})
-            item_pool_file = item_pool_config.get('file', 'cand_item_list')
-            raw_data_root = dataset_config.get('raw_data_root', data_dir)
-            raw_format = dataset_config.get('raw_data_format', 'csv')
-            item_pool_path = os.path.join(raw_data_root, f'{item_pool_file}.{raw_format}')
-            
-            logger.info(f"Loading item pool from: {item_pool_path}")
-            
-            # Create item data loader
-            item_loader = RankDataLoader(
-                feature_map=feature_map,
-                stage='test',
-                test_data=item_pool_path,
-                batch_size=batch_size,
-                shuffle=False,
-                data_format=raw_format
-            )
-            item_gen = item_loader.make_iterator()
-            
-            # Build item index
-            retrieval_stage = coordinator.get_stage(stage_type)
-            if retrieval_stage is not None:
-                retrieval_stage.build_item_index(item_gen)
-                logger.info("Item index built successfully")
-    
-    elif args.mode == 'evaluate':
-        if args.stage is None:
-            logger.error("--stage required for evaluate mode")
-            return
-        
-        stage_type = stage_type_map[args.stage]
-        logger.info(f"Evaluating stage: {args.stage}")
-        
-        # Build test data path
-        data_dir = dataset_config.get('processed_data_root', data_dir)
-        data_format = dataset_config.get('processed_data_format', 'parquet')
-        test_path = os.path.join(data_dir, f'test.{data_format}')
-        
-        logger.info(f"Loading test data from: {test_path}")
-        
-        test_loader = RankDataLoader(
-            feature_map=feature_map,
-            stage='test',
-            test_data=test_path,
-            batch_size=4096,
-            shuffle=False,
-            data_format=data_format
-        )
-        test_gen = test_loader.make_iterator()
-        
-        metrics = coordinator.evaluate_stage(
-            stage_type=stage_type,
-            test_data=test_gen
-        )
-        logger.info(f"Evaluation complete: {metrics}")
-    
-    # Print pipeline status
-    status = coordinator.get_pipeline_status()
-    logger.info(f"Pipeline status: {status}")
+        retrieval_stage = stages['retrieval']
+        run_retrival_stage(retrieval_stage, pipeline_config, dataset_config, fg_manager, logger=logger)
+    else:
+        raise ValueError(f"Unknown mode: {args.mode}")
 
 
 if __name__ == '__main__':

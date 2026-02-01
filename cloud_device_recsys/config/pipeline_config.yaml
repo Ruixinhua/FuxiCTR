@@ -51,24 +51,28 @@ stages:
     top_k: 1000
     
     model_params:
-      embedding_dim: 32
-      user_tower_layers: [256, 128]
-      item_tower_layers: [256, 128]
-      
+      embedding_dim: 64
+      use_user_transformer: 1
+      user_transformer_layers: 1
+      use_item_transformer: 0
+      item_transformer_layers: 1
+      user_tower_layers: [512, 256, 128, 64]
+#      user_tower_layers: [256, 128, 64, 32]
+      item_tower_layers: [512, 256, 128, 64]
+#      item_tower_layers: [256, 128, 64, 32]
+      embedding_regularizer: 1.0e-5  # L2
+      net_regularizer: 1.0e-5        # L2
+      max_gradient_norm: 5.0         # Gradient
+      dropout: 0.1                   # Dropout for
+
     training:
-      epochs: 5
+      epochs: 20
       batch_size: 4096
       learning_rate: 0.001
       optimizer: "adam"
       
     metrics:
-      - "Recall@10"
-      - "Recall@50"
-      - "Recall@100"
-      - "Recall@500"
       - "Recall@1000"
-      - "HitRate@10"
-      - "HitRate@100"
 
   preranking:
     enabled: true

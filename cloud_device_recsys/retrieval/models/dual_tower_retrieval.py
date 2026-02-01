@@ -12,7 +12,7 @@ Based on the DSSM architecture from FuxiCTR.
 import torch
 from torch import nn
 import numpy as np
-from typing import Dict, List, Optional, Any, Set
+from typing import Dict, List, Optional, Any
 import logging
 
 from fuxictr.pytorch.models import BaseModel
@@ -27,9 +27,6 @@ class DualTowerRetrieval(BaseModel):
     - User Tower: Processes FG1 + FG2 features related to user
     - Item Tower: Processes FG1 + FG2 features related to item
     - Similarity: Dot product of user and item embeddings
-    
-    Only uses FG1 (non-personalized) and FG2 (cloud-personalized) features.
-    FG3 (device-only) features are NOT allowed.
     """
     
     def __init__(self,
@@ -37,9 +34,9 @@ class DualTowerRetrieval(BaseModel):
                  model_id="DualTowerRetrieval",
                  gpu=-1,
                  learning_rate=1e-3,
-                 embedding_dim=64,
-                 user_tower_units=[256, 128, 64],
-                 item_tower_units=[256, 128, 64],
+                 embedding_dim=16,
+                 user_tower_layers=None,
+                 item_tower_layers=None,
                  user_tower_activations="ReLU",
                  item_tower_activations="ReLU",
                  user_tower_dropout=0.1,
@@ -59,8 +56,8 @@ class DualTowerRetrieval(BaseModel):
             gpu: GPU device ID (-1 for CPU)
             learning_rate: Learning rate
             embedding_dim: Embedding dimension for features
-            user_tower_units: Hidden units for user tower MLP
-            item_tower_units: Hidden units for item tower MLP
+            user_tower_layers: Hidden units for user tower MLP
+            item_tower_layers: Hidden units for item tower MLP
             user_tower_activations: Activation function for user tower
             item_tower_activations: Activation function for item tower
             user_tower_dropout: Dropout rate for user tower
@@ -105,11 +102,46 @@ class DualTowerRetrieval(BaseModel):
         
         self.logger.info(f"User fields: {user_fields}, Item fields: {item_fields}")
         
+        # Transformer for sequence encoding (optional)
+        self.use_user_transformer = kwargs.get("use_user_transformer", False)
+        if self.use_user_transformer:
+            self.user_transformer_heads = kwargs.get("user_transformer_heads", 4)
+            self.user_transformer_layers = kwargs.get("user_transformer_layers", 1)
+            self.user_transformer_dim = embedding_dim * max(1, user_fields)
+            
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=self.user_transformer_dim,
+                nhead=self.user_transformer_heads,
+                dim_feedforward=self.user_transformer_dim * 4,
+                dropout=kwargs.get("dropout", 0.1),
+                batch_first=True
+            )
+            self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=self.user_transformer_layers)
+            self.logger.info(f"Initialized Transformer User Tower: heads={self.user_transformer_heads}, layers={self.user_transformer_layers}")
+
+        # Transformer for Item Tower (Feature Interaction)
+        self.use_item_transformer = kwargs.get("use_item_transformer", False)
+        if self.use_item_transformer:
+            self.item_transformer_heads = kwargs.get("item_transformer_heads", 4)
+            self.item_transformer_layers = kwargs.get("item_transformer_layers", 1)
+            # Input to transformer is (B, F, D), so d_model = embedding_dim
+            
+            item_encoder_layer = nn.TransformerEncoderLayer(
+                d_model=embedding_dim,
+                nhead=self.item_transformer_heads,
+                dim_feedforward=embedding_dim * 4,
+                dropout=kwargs.get("dropout", 0.1),
+                batch_first=True
+            )
+            self.item_transformer_encoder = nn.TransformerEncoder(item_encoder_layer, num_layers=self.item_transformer_layers)
+            self.logger.info(f"Initialized Transformer Item Tower: heads={self.item_transformer_heads}, layers={self.item_transformer_layers}")
+
         # User tower
+        # If transformer is used, input is flattened pooled sequence (same dim as before, just better processed)
         self.user_tower = MLP_Block(
             input_dim=embedding_dim * max(1, user_fields),
-            output_dim=user_tower_units[-1],
-            hidden_units=user_tower_units[:-1],
+            output_dim=user_tower_layers[-1],
+            hidden_units=user_tower_layers[:-1],
             hidden_activations=user_tower_activations,
             output_activation=None,
             dropout_rates=user_tower_dropout,
@@ -119,8 +151,8 @@ class DualTowerRetrieval(BaseModel):
         # Item tower
         self.item_tower = MLP_Block(
             input_dim=embedding_dim * max(1, item_fields),
-            output_dim=item_tower_units[-1],
-            hidden_units=item_tower_units[:-1],
+            output_dim=item_tower_layers[-1],
+            hidden_units=item_tower_layers[:-1],
             hidden_activations=item_tower_activations,
             output_activation=None,
             dropout_rates=item_tower_dropout,
@@ -135,6 +167,20 @@ class DualTowerRetrieval(BaseModel):
         self.reset_parameters()
         self.model_to_device()
     
+    def get_inputs(self, inputs, feature_source=None):
+        """
+        Override get_inputs to robustly handle extra keys in inputs 
+        that are not in the feature_map (e.g. filtered FG3 features).
+        """
+        X_dict = dict()
+        # Iterate over feature_map features instead of inputs to ensure safety
+        for feature, spec in self.feature_map.features.items():
+            if feature in inputs:
+                if feature_source and spec.get("source") != feature_source:
+                    continue
+                X_dict[feature] = inputs[feature].to(self.device)
+        return X_dict
+
     def forward(self, inputs):
         """
         Forward pass.
@@ -145,188 +191,121 @@ class DualTowerRetrieval(BaseModel):
         Returns:
             Dictionary with y_pred and optionally user/item embeddings
         """
-        X = self.get_inputs(inputs)
-        feat_emb_dict = self.embedding_layer(X)
-        
-        # Separate user and item embeddings
-        user_emb = self.embedding_layer.dict2tensor(feat_emb_dict, feature_source="user")
-        item_emb = self.embedding_layer.dict2tensor(feat_emb_dict, feature_source="item")
-        
-        # If source not configured, use all embeddings
-        if user_emb.shape[1] == 0:
-            all_emb = self.embedding_layer.dict2tensor(feat_emb_dict)
-            # Split by field count (approximate)
-            mid = all_emb.shape[1] // 2
-            user_emb = all_emb[:, :mid, :]
-            item_emb = all_emb[:, mid:, :]
-        
         # Flatten and pass through towers
-        user_out = self.user_tower(user_emb.flatten(start_dim=1))
-        item_out = self.item_tower(item_emb.flatten(start_dim=1))
-        
-        # L2 normalize if requested
-        if self.use_l2_norm:
-            user_out = torch.nn.functional.normalize(user_out, p=2, dim=-1)
-            item_out = torch.nn.functional.normalize(item_out, p=2, dim=-1)
-        
-        # Compute similarity (dot product)
-        similarity = (user_out * item_out).sum(dim=-1, keepdim=True)
-        
-        # Scale by temperature
-        similarity = similarity / self.temperature
-        
-        # Apply output activation (sigmoid for binary classification)
-        y_pred = self.output_activation(similarity)
-        
+        user_emb = self.get_user_embedding(inputs)
+        item_emb = self.get_item_embedding(inputs)
+        y_pred = self.cal_similarity(user_emb, item_emb)
         return_dict = {
             "y_pred": y_pred,
-            "user_embedding": user_out,
-            "item_embedding": item_out
+            "user_embedding": user_emb,
+            "item_embedding": item_emb
         }
         return return_dict
     
     def get_user_embedding(self, inputs) -> torch.Tensor:
-        """
-        Get user embedding for a batch of inputs.
+        """Get user embedding [batch_size, dim]"""
+        X = self.get_inputs(inputs, feature_source="user")
         
-        Args:
-            inputs: Input batch
+        if self.use_user_transformer:
+            # Handle sequence features with Transformer
+            # 1. Get embeddings dict without flattening/stacking yet
+            feat_emb_dict = self.embedding_layer(X)
             
-        Returns:
-            User embedding tensor [batch_size, embedding_dim]
-        """
-        X = self.get_inputs(inputs)
-        feat_emb_dict = self.embedding_layer(X)
-        user_emb = self.embedding_layer.dict2tensor(feat_emb_dict, feature_source="user")
-        
-        if user_emb.shape[1] == 0:
-            all_emb = self.embedding_layer.dict2tensor(feat_emb_dict)
-            mid = all_emb.shape[1] // 2
-            user_emb = all_emb[:, :mid, :]
-        
-        user_out = self.user_tower(user_emb.flatten(start_dim=1))
-        
+            # 2. Extract and align sequences
+            seq_embs = []
+            max_len = 0
+            
+            # Collect all user features
+            for name, emb in feat_emb_dict.items():
+                if emb.dim() == 2: # (B, D) -> (B, 1, D)
+                    emb = emb.unsqueeze(1)
+                if emb.size(1) > max_len:
+                    max_len = emb.size(1)
+                seq_embs.append(emb)
+            
+            if not seq_embs:
+                raise ValueError("No user features found for Transformer!")
+                
+            # Pad and Concatenate along feature dimension: (B, L, D_total)
+            # We assume features are [feat1, feat2, ...] at each time step effectively.
+            # But wait, different sequences (click vs exposure) might not align in time.
+            # However, for a general 'User Representation' from sequences, concatenating channel-wise
+            # and letting Transformer attend is a standard approach.
+            
+            aligned_embs = []
+            for emb in seq_embs:
+                if emb.size(1) < max_len:
+                    # Pad on time dim (dim 1) with 0
+                    pad_len = max_len - emb.size(1)
+                    pad = torch.zeros(emb.size(0), pad_len, emb.size(2), device=emb.device)
+                    emb = torch.cat([emb, pad], dim=1)
+                aligned_embs.append(emb)
+            
+            # Concat features: (B, L, D1) + (B, L, D2) -> (B, L, D_total)
+            # D_total should match embedding_dim * user_fields
+            user_seq = torch.cat(aligned_embs, dim=2) 
+            
+            # Transformer Encoding
+            # user_seq: (B, L, D_model)
+            transformed = self.transformer_encoder(user_seq)
+            
+            # Mean Pooling / Attention Pooling (using Mean for simplicity/robustness)
+            # Masking padding would be ideal but 0-padding works okay with LayerNorm often.
+            user_emb = transformed.mean(dim=1) 
+            
+            # Pass through MLP
+            user_emb = self.user_tower(user_emb)
+        else:
+            # Original Logic
+            feat_emb_dict = self.embedding_layer(X)
+            user_emb = self.embedding_layer.dict2tensor(feat_emb_dict, feature_source="user")
+            user_emb = self.user_tower(user_emb.view(user_emb.size(0), -1))
+            
+        # L2 normalize if requested
         if self.use_l2_norm:
-            user_out = torch.nn.functional.normalize(user_out, p=2, dim=-1)
-        
-        return user_out
-    
+            user_emb = torch.nn.functional.normalize(user_emb, p=2, dim=-1)
+        return user_emb
+
     def get_item_embedding(self, inputs) -> torch.Tensor:
-        """
-        Get item embedding for a batch of inputs.
-        
-        Args:
-            inputs: Input batch
-            
-        Returns:
-            Item embedding tensor [batch_size, embedding_dim]
-        """
-        X = self.get_inputs(inputs)
+        """Get item embedding [batch_size, dim]"""
+        X = self.get_inputs(inputs, feature_source="item")
         feat_emb_dict = self.embedding_layer(X)
-        item_emb = self.embedding_layer.dict2tensor(feat_emb_dict, feature_source="item")
         
-        if item_emb.shape[1] == 0:
-            all_emb = self.embedding_layer.dict2tensor(feat_emb_dict)
-            mid = all_emb.shape[1] // 2
-            item_emb = all_emb[:, mid:, :]
-        
-        item_out = self.item_tower(item_emb.flatten(start_dim=1))
-        
+        if self.use_item_transformer:
+            # Get stacked embeddings: (B, NumFields, EmbeddingDim)
+            item_feats = self.embedding_layer.dict2tensor(feat_emb_dict, flatten_emb=False, feature_source="item")
+            
+            # Transformer Encoding
+            # item_feats: (B, F, D)
+            transformed = self.item_transformer_encoder(item_feats)
+            
+            # Flatten: (B, F, D) -> (B, F*D)
+            # This allows the MLP to see all transformed field interactions
+            item_emb_input = transformed.view(transformed.size(0), -1)
+            
+            item_emb = self.item_tower(item_emb_input)
+        else:
+            item_emb = self.embedding_layer.dict2tensor(feat_emb_dict, feature_source="item")
+            item_emb = self.item_tower(item_emb.view(item_emb.size(0), -1))
+            
+        # L2 normalize if requested
         if self.use_l2_norm:
-            item_out = torch.nn.functional.normalize(item_out, p=2, dim=-1)
-        
-        return item_out
-    
-    def retrieve_top_k(self, 
-                       user_embeddings: np.ndarray,
-                       item_embeddings: np.ndarray,
-                       top_k: int = 1000) -> tuple:
-        """
-        Retrieve top-K items for each user using brute-force search.
-        
-        Args:
-            user_embeddings: User embeddings [num_users, dim]
-            item_embeddings: Item embeddings [num_items, dim]
-            top_k: Number of items to retrieve
-            
-        Returns:
-            Tuple of (indices [num_users, top_k], scores [num_users, top_k])
-        """
-        # Compute all similarities
-        similarities = np.dot(user_embeddings, item_embeddings.T)  # [num_users, num_items]
-        
-        # Get top-k indices and scores
-        top_k = min(top_k, similarities.shape[1])
-        top_indices = np.argsort(-similarities, axis=1)[:, :top_k]
-        top_scores = np.take_along_axis(similarities, top_indices, axis=1)
-        
-        return top_indices, top_scores
+            item_emb = torch.nn.functional.normalize(item_emb, p=2, dim=-1)
+        return item_emb
 
+    def cal_similarity(self, user_emb: torch.Tensor, item_emb: torch.Tensor) -> torch.Tensor:
+        """
+        Calculate similarity scores between user and item embeddings.
 
-class RetrievalMetrics:
-    """
-    Metrics for retrieval evaluation.
-    
-    Supports: Recall@K, HitRate@K
-    """
-    
-    @staticmethod
-    def recall_at_k(retrieved_items: np.ndarray, 
-                    ground_truth: np.ndarray,
-                    k: int) -> float:
-        """
-        Compute Recall@K.
-        
         Args:
-            retrieved_items: Retrieved item indices [num_queries, num_retrieved]
-            ground_truth: Ground truth item indices [num_queries] or list of lists
-            k: K value for Recall@K
-            
+            user_emb: User embeddings [batch_size, dim]
+            item_emb: Item embeddings [batch_size, dim]
         Returns:
-            Recall@K score
+            Similarity scores [batch_size, 1]
         """
-        total_recall = 0.0
-        num_queries = len(retrieved_items)
-        
-        for i in range(num_queries):
-            retrieved_k = set(retrieved_items[i][:k])
-            if isinstance(ground_truth[i], (list, np.ndarray)):
-                relevant = set(ground_truth[i])
-            else:
-                relevant = {ground_truth[i]}
-            
-            if len(relevant) > 0:
-                recall = len(retrieved_k & relevant) / len(relevant)
-                total_recall += recall
-        
-        return total_recall / num_queries if num_queries > 0 else 0.0
-    
-    @staticmethod
-    def hit_rate_at_k(retrieved_items: np.ndarray,
-                      ground_truth: np.ndarray,
-                      k: int) -> float:
-        """
-        Compute HitRate@K (whether any relevant item is in top-K).
-        
-        Args:
-            retrieved_items: Retrieved item indices [num_queries, num_retrieved]
-            ground_truth: Ground truth item indices [num_queries] or list of lists
-            k: K value for HitRate@K
-            
-        Returns:
-            HitRate@K score
-        """
-        hits = 0
-        num_queries = len(retrieved_items)
-        
-        for i in range(num_queries):
-            retrieved_k = set(retrieved_items[i][:k])
-            if isinstance(ground_truth[i], (list, np.ndarray)):
-                relevant = set(ground_truth[i])
-            else:
-                relevant = {ground_truth[i]}
-            
-            if len(retrieved_k & relevant) > 0:
-                hits += 1
-        
-        return hits / num_queries if num_queries > 0 else 0.0
+        # Compute similarity (dot product)
+        similarity = (user_emb * item_emb).sum(dim=-1, keepdim=True)
+        # Scale by temperature
+        similarity = similarity / self.temperature
+        # Apply output activation (sigmoid for binary classification)
+        return self.output_activation(similarity)

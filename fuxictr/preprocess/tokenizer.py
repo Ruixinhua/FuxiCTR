@@ -148,6 +148,26 @@ class Tokenizer(object):
                              value=self.vocab["__PAD__"],
                              padding=self.padding, truncating=self.padding)
         return seqs.tolist()
+
+    def compute_sequence_lengths(self, series):
+        """Compute actual sequence lengths for 0-padded sequences.
+        
+        For sequences like "1,2,3,4,0,0,0,0,...", this returns 4 (the count of
+        non-zero values before the trailing zeros begin).
+        
+        The algorithm finds the last non-zero token position to handle cases where
+        0 appears as a legitimate value in the middle of the sequence.
+        """
+        def get_length(text):
+            tokens = text.split(self._splitter)
+            # Find the last non-zero token position
+            length = 0
+            for i, token in enumerate(tokens):
+                if token.strip() != "0":
+                    length = i + 1  # Update length to include this position
+            return length
+        
+        return series.map(get_length).values
     
     def load_pretrained_vocab(self, feature_dtype, pretrain_path, expand_vocab=True):
         keys = load_pretrain_emb(pretrain_path, keys=["key"])

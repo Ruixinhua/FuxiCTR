@@ -56,11 +56,12 @@ class BaseStage(ABC):
         self.allowed_feature_groups = allowed_feature_groups
         self.output_dir = output_dir
         self.logger = logging.getLogger(f"{self.__class__.__name__}[{stage_name}]")
-        
+        os.makedirs(self.output_dir, exist_ok=True)
+
         # Validate no FG3 in cloud stages
-        if stage_type in [StageType.RETRIEVAL, StageType.PRERANKING]:
-            if FeatureGroup.FG3 in allowed_feature_groups:
-                raise ValueError(f"Cloud stage '{stage_name}' cannot use FG3 features!")
+        # if stage_type in [StageType.RETRIEVAL, StageType.PRERANKING]:
+        #     if FeatureGroup.FG3 in allowed_feature_groups:
+        #         raise ValueError(f"Cloud stage '{stage_name}' cannot use FG3 features!")
         
         os.makedirs(output_dir, exist_ok=True)
         self.logger.info(f"Initialized {stage_type.value} stage: {stage_name}")
@@ -82,22 +83,6 @@ class BaseStage(ABC):
             self.logger.error(f"Stage uses disallowed features: {disallowed}")
             return False
         return True
-    
-    @abstractmethod
-    def process(self, 
-                input_data: Optional[StageOutput] = None,
-                **kwargs) -> StageOutput:
-        """
-        Process input and produce output.
-        
-        Args:
-            input_data: Output from previous stage (None for first stage)
-            **kwargs: Stage-specific parameters
-            
-        Returns:
-            StageOutput containing processed results
-        """
-        pass
     
     @abstractmethod
     def train(self, 

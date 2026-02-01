@@ -46,7 +46,7 @@ class StageDataBuilder:
             stage_name='retrieval',
             allowed_groups=[FeatureGroup.FG1, FeatureGroup.FG2],
             top_k=1000,
-            metrics=['Recall@10', 'Recall@50', 'Recall@100', 'HitRate@10', 'HitRate@100']
+            metrics=['Recall@10', 'Recall@50', 'Recall@100']
         ),
         'preranking': StageDataConfig(
             stage_name='preranking',
