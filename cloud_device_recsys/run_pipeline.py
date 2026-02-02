@@ -37,15 +37,13 @@ from fuxictr.pytorch.dataloaders import RankDataLoader
 from fuxictr.pytorch.torch_utils import seed_everything
 
 from cloud_device_recsys.config.feature_groups import FeatureGroupManager, FeatureGroup
-from cloud_device_recsys.retrieval.retrieval_stage import RetrievalStage
-from cloud_device_recsys.preranking.preranking_stage import PrerankingStage
-from cloud_device_recsys.reranking.reranking_stage import RerankingStage
+from cloud_device_recsys.pipeline import RetrievalStage, PrerankingStage, RerankingStage
 from cloud_device_recsys.utils import (
     setup_logging, get_data_dir, get_data_paths,
-    prepare_debug_paths, parse_pipeline_args
+    prepare_debug_paths, parse_pipeline_args,
+    save_stage_output, load_stage_outputs_from_dir
 )
 from cloud_device_recsys.config.config_parser import ConfigParser
-
 
 def build_feature_group_manager(config: dict) -> FeatureGroupManager:
     """Build and configure feature group manager"""
@@ -59,7 +57,6 @@ def build_feature_group_manager(config: dict) -> FeatureGroupManager:
                 manager.assign_feature(feature, fg)
 
     return manager
-
 
 def create_stages(
     feature_map: FeatureMap,
@@ -104,6 +101,7 @@ def create_stages(
             # Prepare model_params
             model_params = stage_config.get('model_params', {}).copy() # Use .copy() to avoid modifying original config
             model_params['gpu'] = gpu
+            model_params['model'] = stage_config.get('model')  # Pass model name from config
             if 'metrics' in stage_config:
                 model_params['metrics'] = stage_config['metrics']
             
@@ -129,8 +127,6 @@ def create_stages(
             stages[stage_name] = stage_info['class'](**stage_kwargs)
 
     return stages
-
-
 
 def _prepare_stage_data_loaders(feature_map, stage_config: dict, paths: dict, 
                                   create_train=True, create_test=True, shuffle_train=True,
@@ -189,7 +185,6 @@ def _prepare_stage_data_loaders(feature_map, stage_config: dict, paths: dict,
     
     return result
 
-
 def prepare_shared_data_loaders(feature_map, dataset_config, pipeline_config, fg_manager, logger):
     """
     Prepare all shared data loaders for the entire pipeline (created once, reused by all stages).
@@ -235,7 +230,6 @@ def prepare_shared_data_loaders(feature_map, dataset_config, pipeline_config, fg
         'item_loader': loaders['item_loader'],
     }
 
-
 def _create_item_feature_map(feature_map, fg_manager, dataset_config):
     """
     Create a lean feature map for item pool (FG1 features only).
@@ -262,8 +256,7 @@ def _create_item_feature_map(feature_map, fg_manager, dataset_config):
     
     return item_fm
 
-
-def run_retrival_stage(retrieval_stage, pipeline_config, dataset_config, fg_manager, logger=None, shared_loaders=None):
+def run_retrieval_stage(retrieval_stage, pipeline_config, dataset_config, fg_manager, logger=None, shared_loaders=None):
     if logger is None:
         logger = logging.getLogger('PipelineRunner')
     retrieval_config = pipeline_config['stages']['retrieval']
@@ -310,8 +303,7 @@ def run_retrival_stage(retrieval_stage, pipeline_config, dataset_config, fg_mana
 
         logger.info("Evaluating on validation set after training...")
         valid_metrics = retrieval_stage.evaluate(valid_gen)
-        if valid_metrics:
-            metrics.update({f"valid_{k}": v for k, v in valid_metrics.items()})
+        metrics.update({f"retrieval_valid_{k}": v for k, v in valid_metrics.items()})
     else:
         logger.info("Retrieval model already trained and item index built. Skipping training.")
 
@@ -322,17 +314,13 @@ def run_retrival_stage(retrieval_stage, pipeline_config, dataset_config, fg_mana
         item_gen, _ = item_loader.make_iterator()
         retrieval_stage.build_item_index(item_gen)
         logger.info("Item index built for test evaluation.")
-    test_metrics = retrieval_stage.evaluate(test_loader.make_iterator())
-    if test_metrics:
-        metrics.update({f"test_{k}": v for k, v in test_metrics.items()})
 
     # 4. Generate Candidates for Pipeline
     logger.info("Generating candidates for pipeline flow...")
-    test_output = retrieval_stage.process(test_loader.make_iterator())
-    valid_output = retrieval_stage.process(train_loader.make_iterator()[1])
-
+    test_output, test_metrics = retrieval_stage.process(test_loader.make_iterator())
+    valid_output, _ = retrieval_stage.process(train_loader.make_iterator()[1], compute_metrics=False)
+    metrics.update({f"retrieval_test_{k}": v for k, v in test_metrics.items()})
     return metrics, valid_output, test_output
-
 
 def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, logger=None, shared_loaders=None,
                          prev_output_test=None, prev_output_valid=None):
@@ -382,8 +370,8 @@ def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, logg
         
     # 4. Pipeline Processing
     logger.info("[Preranking] Processing pipeline candidates...")
-    test_output = preranking_stage.process(prev_output_test)
-    valid_output = preranking_stage.process(prev_output_valid)
+    test_output, _ = preranking_stage.process(prev_output_test, compute_metrics=False)
+    valid_output, _ = preranking_stage.process(prev_output_valid, compute_metrics=False)
     return metrics, valid_output, test_output
 
 def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, logger=None, shared_loaders=None,
@@ -429,7 +417,6 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, logger
         metrics.update({f"reranking_test_{k}": v for k, v in test_metrics.items()})
     return metrics
 
-
 def main():
     print("DEBUG: main() started", flush=True)
     """Main entry point"""
@@ -437,11 +424,12 @@ def main():
     # Construct unique output directory for this run
     run_output_base = args.output_dir # e.g. ./outputs
     if args.experiment_id:
-        run_output_dir = os.path.join(run_output_base, args.experiment_id)
+        run_output_dir = f"{run_output_base}/{args.experiment_id}"
     else:
         run_output_dir = os.path.join(run_output_base, f"exp_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     os.makedirs(run_output_dir, exist_ok=True)
-    
+    stage_output_dir = f"{run_output_dir}/stage_outputs"
+
     # Setup logging to the unique output directory
     setup_logging(run_output_dir)
     logger = logging.getLogger('PipelineRunner')
@@ -515,11 +503,11 @@ def main():
                 json.dump(fm_data, f, indent=2)
             feature_map_json = converted_json
             logger.info(f"Saved converted feature_map to {converted_json}")
-        
+
         feature_map = FeatureMap(pipeline_config['dataset_id'], data_dir)
         feature_map.load(feature_map_json, dataset_config)
         feature_map.dataset_config = dataset_config # Attach config for access in stages
-        
+
         # --- Critical Fix: Ensure impression_id is loaded by DataLoaders ---
         # Add impression_id_col to labels so it gets loaded but not treated as a feature
         impression_id_col = dataset_config.get('impression_id_col', 'impression_id')
@@ -548,7 +536,7 @@ def main():
     )
     
     all_metrics = {}
-
+    metrics_path = os.path.join(run_output_dir, 'metrics.json')
     # Execute based on mode
     if args.mode == 'full':
         logger.info("Running full pipeline")
@@ -564,11 +552,18 @@ def main():
         )
 
         retrieval_stage = stages['retrieval']
-        r_metrics, r_valid, r_test = run_retrival_stage(
+        r_metrics, r_valid, r_test = run_retrieval_stage(
             retrieval_stage, pipeline_config, dataset_config, fg_manager, 
             logger=logger, shared_loaders=shared_loaders
         )
         all_metrics.update(r_metrics)
+        with open(metrics_path, 'w') as f:
+            json.dump(all_metrics, f, indent=4)
+        logger.info(f"Saved metrics to {metrics_path}")
+        # Save retrieval stage outputs if requested
+        if args.save_stage_outputs:
+            save_stage_output(r_valid, stage_output_dir, 'retrieval_valid', logger)
+            save_stage_output(r_test, stage_output_dir, 'retrieval_test', logger)
             
         preranking_stage = stages['preranking']
         p_metrics, p_valid, p_test = run_preranking_stage(
@@ -577,6 +572,13 @@ def main():
             shared_loaders=shared_loaders
         )
         all_metrics.update(p_metrics)
+        with open(metrics_path, 'w') as f:
+            json.dump(all_metrics, f, indent=4)
+        logger.info(f"Saved metrics to {metrics_path}")
+        # Save preranking stage outputs if requested
+        if args.save_stage_outputs:
+            save_stage_output(p_valid, stage_output_dir, 'preranking_valid', logger)
+            save_stage_output(p_test, stage_output_dir, 'preranking_test', logger)
 
         reranking_stage = stages['reranking']
         d_metrics = run_reranking_stage(
@@ -588,32 +590,68 @@ def main():
     elif args.mode == 'retrieval':
         logger.info("Running retrieval stage only")
         if 'retrieval' not in stages:
-            logger.error("Retrieval stage not configured in pipeline")
-            return
+            raise RuntimeError("No retrieval stage found. Please run data preprocessing first")
         retrieval_stage = stages['retrieval']
-        r_metrics = run_retrival_stage(retrieval_stage, pipeline_config, dataset_config, fg_manager, logger=logger)
+        r_metrics, r_valid, r_test = run_retrieval_stage(
+            retrieval_stage, pipeline_config, dataset_config, fg_manager, logger=logger
+        )
         all_metrics.update(r_metrics)
+        
+        # Save stage outputs if requested
+        if args.save_stage_outputs:
+            stage_output_dir = os.path.join(run_output_dir, 'stage_outputs')
+            save_stage_output(r_valid, stage_output_dir, 'retrieval_valid', logger)
+            save_stage_output(r_test, stage_output_dir, 'retrieval_test', logger)
+            
     elif args.mode == 'preranking':
         logger.info("Running preranking stage only")
         if 'preranking' not in stages:
-            logger.error("Preranking stage not configured in pipeline")
-            return
+            raise RuntimeError("No preranking stage found. Please run retrieval first")
+
+        # Load previous stage outputs if provided (from retrieval stage)
+        if args.prev_output_path:
+            prev_output_valid, prev_output_test = load_stage_outputs_from_dir(
+                args.prev_output_path, 'retrieval', logger
+            )
+        else:
+            raise RuntimeError("Previous stage outputs not provided or failed to load. Preranking will run without candidate filtering from retrieval.")
+        
         preranking_stage = stages['preranking']
-        p_metrics = run_preranking_stage(preranking_stage, pipeline_config, dataset_config, logger=logger)
+        p_metrics, p_valid, p_test = run_preranking_stage(
+            preranking_stage, pipeline_config, dataset_config, logger=logger,
+            prev_output_valid=prev_output_valid, prev_output_test=prev_output_test
+        )
         all_metrics.update(p_metrics)
+        
+        # Save stage outputs if requested
+        if args.save_stage_outputs:
+            save_stage_output(p_valid, stage_output_dir, 'preranking_valid', logger)
+            save_stage_output(p_test, stage_output_dir, 'preranking_test', logger)
+            
     elif args.mode == 'reranking':
         logger.info("Running reranking stage only")
         if 'reranking' not in stages:
-            logger.error("Reranking stage not configured in pipeline")
-            return
+            raise RuntimeError("No reranking stage found. Please run preranking first")
+
+        # Load previous stage outputs if provided (from preranking stage)
+        if args.prev_output_path:
+            prev_output_valid, prev_output_test = load_stage_outputs_from_dir(
+                args.prev_output_path, 'preranking', logger
+            )
+        else:
+            raise RuntimeError("Previous stage outputs not provided or failed to load. "
+                          "Reranking will run without candidate filtering from preranking.")
+
         reranking_stage = stages['reranking']
-        d_metrics = run_reranking_stage(reranking_stage, pipeline_config, dataset_config, logger=logger)
+        d_metrics = run_reranking_stage(
+            reranking_stage, pipeline_config, dataset_config, logger=logger,
+            prev_output_valid=prev_output_valid, prev_output_test=prev_output_test
+        )
         all_metrics.update(d_metrics)
     else:
         raise ValueError(f"Unknown mode: {args.mode}")
 
     # Save final metrics
-    metrics_path = os.path.join(run_output_dir, 'metrics.json')
     with open(metrics_path, 'w') as f:
         json.dump(all_metrics, f, indent=4)
     logger.info(f"Saved metrics to {metrics_path}")

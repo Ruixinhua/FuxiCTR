@@ -11,16 +11,13 @@ This module wraps the DeviceReranker model as a pipeline stage.
 import os
 import csv
 import numpy as np
-from typing import Dict, List, Optional, Any, Union
-import logging
-import torch
-import sys
-from tqdm import tqdm
+from typing import Dict, List, Optional, Any, Tuple
 
 from ..pipeline.base_stage import BaseStage, StageType
-from ..pipeline.stage_output import StageOutput, CandidateSet
+from ..pipeline.stage_output import StageOutput
 from ..config.feature_groups import FeatureGroupManager, FeatureGroup
-from .models.device_reranker import DeviceReranker
+from ..models import build_model as registry_build_model
+from ..models import DeviceReranker  # For type hints
 
 from fuxictr.features import FeatureMap
 
@@ -68,6 +65,7 @@ class RerankingStage(BaseStage):
         self.model_params = model_params
         self.metrics_k = model_params['metrics_k']
         self.model: Optional[DeviceReranker] = None
+        self.monitor = model_params.get('monitor', 'nDCG@10')
         self.best_weights_path = None
 
         # Item features storage for lookups
@@ -89,30 +87,22 @@ class RerankingStage(BaseStage):
             raise
     
     def build_model(self) -> DeviceReranker:
-        """Build and initialize the re-ranking model"""
+        """Build and initialize the re-ranking model using unified registry"""
         # Ensure output directories exist
         model_dir = os.path.join(self.output_dir, self.feature_map.dataset_id)
         os.makedirs(model_dir, exist_ok=True)
 
-        # Add default FuxiCTR required parameters
-        default_params = {
-            'verbose': 1,
-            'model_root': self.output_dir,
-            'metrics': ['AUC', 'logloss'],
-            'embedding_dim': 16,
-            'gpu': -1,
-            'optimizer': 'adam',
-            'loss': 'binary_crossentropy',
-        }
-        params = {**default_params, **self.model_params}
+        # Get model name from config, default to DeviceReranker
+        model_name = self.model_params.get('model', 'DeviceReranker')
         
-        self.model = DeviceReranker(
-            self.feature_map,
+        self.model = registry_build_model(
+            model_name=model_name,
+            feature_map=self.feature_map,
+            model_params=self.model_params,
+            output_dir=self.output_dir,
             support_distillation=self.support_distillation,
-            **params
         )
-        self.logger.info(f"Built DeviceReranker model, saving to {model_dir}")
-        self.model.count_parameters()
+        self.logger.info(f"Built {model_name} model, saving to {model_dir}")
         return self.model
     
     def train(self,
@@ -121,13 +111,18 @@ class RerankingStage(BaseStage):
               teacher_model: Optional[Any] = None,
               **kwargs) -> Dict[str, float]:
         """
-        Train the re-ranking model.
+        Train the re-ranking model with best model monitoring.
         
         Args:
             train_data: Training data generator
             valid_data: Validation data generator
             teacher_model: Optional teacher model for distillation
-            **kwargs: Training parameters
+            **kwargs: Training parameters including:
+                - epochs: Number of training epochs
+                - patience: Early stopping patience
+                - mode: 'max' or 'min' for monitor metric
+                - reduce_lr_on_plateau: Whether to decay LR on no improvement
+                - lr_decay_factor: LR decay factor (default 0.1)
             
         Returns:
             Training metrics
@@ -147,6 +142,8 @@ class RerankingStage(BaseStage):
         self.logger.info("Starting re-ranking model training (Custom Loop)")
         
         epochs = kwargs.get('epochs', 1)
+        patience = kwargs.get('patience', 2)
+        mode = kwargs.get('mode', 'max')
         metrics = {}
         
         # Setup model for manual training
@@ -156,17 +153,25 @@ class RerankingStage(BaseStage):
         self.model._verbose = kwargs.get("verbose", 1)
         self.model._epoch_index = 0
         
+        self.logger.info(f"Start Training: epochs={epochs}, monitor={self.monitor}, patience={patience}")
+        
+        best_metric = -np.inf if mode == "max" else np.inf
+        stopping_steps = 0
+        
         # Distillation training if teacher provided
         if teacher_model is not None and self.support_distillation:
             self.logger.info("Using knowledge distillation training")
             metrics = self.model.distill_from_teacher(
                 train_data, teacher_model, **kwargs
             )
+            # Save after distillation
+            self.model.save_weights(self.best_weights_path)
+            self.logger.info(f"Saved distillation model checkpoint to {self.best_weights_path}")
         else:
-            # Standard training (Manual Loop)
+            # Standard training (Manual Loop) with monitor
             for epoch in range(epochs):
                 self.model._epoch_index = epoch
-                self.logger.info(f"Epoch {epoch + 1}/{epochs}")
+                self.logger.info(f"*** Epoch {epoch + 1}/{epochs} ***")
                 
                 self.model.train()
                 total_loss = 0.0
@@ -181,15 +186,40 @@ class RerankingStage(BaseStage):
                 self.logger.info(f"Train Loss: {avg_loss:.6f}")
                 
                 if valid_data is not None:
-                     self.logger.info(f"Evaluating epoch {epoch + 1}...")
-                     
-                     # List-wise metrics (nDCG/Recall)
-                     valid_metrics = self.evaluate(valid_data)
-                     metrics.update(valid_metrics)
-                     self.logger.info(f"Validation (Ranking): {valid_metrics}")
-        
-        self.model.save_weights(self.best_weights_path)
-        self.logger.info(f"Saved model checkpoint to {self.best_weights_path}")
+                    self.logger.info(f"Evaluating epoch {epoch + 1}...")
+                    
+                    # List-wise metrics (nDCG/Recall)
+                    valid_metrics = self.evaluate(valid_data)
+                    metrics.update(valid_metrics)
+                    self.logger.info(f"Validation (Ranking): {valid_metrics}")
+                    
+                    # Monitor-based best model saving
+                    curr_val = valid_metrics.get(self.monitor, 0.0)
+                    is_best = (curr_val > best_metric) if mode == "max" else (curr_val < best_metric)
+                    
+                    if is_best:
+                        best_metric = curr_val
+                        stopping_steps = 0
+                        self.model.save_weights(self.best_weights_path)
+                        self.logger.info(f"New Best {self.monitor}={curr_val:.6f}! Model Saved.")
+                    else:
+                        stopping_steps += 1
+                        self.logger.info(f"No improvement. Patience {stopping_steps}/{patience}")
+                        
+                        # Decay LR on plateau
+                        if kwargs.get("reduce_lr_on_plateau", True):
+                            old_lr = self.model.optimizer.param_groups[0]['lr']
+                            new_lr = self.model.lr_decay(factor=kwargs.get("lr_decay_factor", 0.1))
+                            self.logger.info(f"Decay LR: {old_lr:.6f} -> {new_lr:.6f}")
+                        
+                        if stopping_steps >= patience:
+                            self.logger.info("Early Stopping.")
+                            break
+            
+            # Restore best weights
+            if os.path.exists(self.best_weights_path):
+                self.model.load_weights(self.best_weights_path)
+                self.logger.info(f"Restored best weights from {self.best_weights_path}")
         
         # Save metrics to CSV
         metrics_path = os.path.join(self.output_dir, "training_metrics.csv")
@@ -203,16 +233,16 @@ class RerankingStage(BaseStage):
 
     def process(self,
                 input_data: StageOutput,
-                **kwargs) -> StageOutput:
+                **kwargs) -> Tuple[StageOutput, Dict[str, float]]:
         """
         Re-rank candidates to produce final recommendations - scores and selects top-K.
         
         Args:
             input_data: StageOutput from previous stage containing candidate sets
-            **kwargs: Additional parameters (e.g., top_k override)
+            **kwargs: Additional parameters (e.g., top_k override, compute_metrics)
             
         Returns:
-            StageOutput with re-ranked Top-K candidates
+            Tuple of (StageOutput with re-ranked Top-K candidates, metrics dict)
         """
         from ..utils import process_and_rank_candidates
         
@@ -225,7 +255,9 @@ class RerankingStage(BaseStage):
         # Ensure item features are loaded
         if self.item_features_df is None:
             self.logger.error("Item features not loaded. Call load_item_features() first.")
-            return StageOutput(stage_name=self.stage_name)
+            return StageOutput(stage_name=self.stage_name), {}
+
+        compute_metrics = kwargs.pop('compute_metrics', True)
 
         return process_and_rank_candidates(
             model=self.model,
@@ -233,9 +265,11 @@ class RerankingStage(BaseStage):
             input_data=input_data,
             item_features_df=self.item_features_df,
             stage_name=self.stage_name,
-            mode='process',
+            return_output=True,
+            compute_metrics=compute_metrics,
             top_k=kwargs.get('top_k', self.top_k),
             logger=self.logger,
+            metrics_k=self.metrics_k,
             **kwargs
         )
 
@@ -256,12 +290,6 @@ class RerankingStage(BaseStage):
         """
         from ..utils import process_and_rank_candidates
 
-        if self.model is None:
-             self.build_model()
-             model_path = os.path.join(self.output_dir, self.feature_map.dataset_id, "DeviceReranker.model")
-             if os.path.exists(model_path):
-                 self.model.load_checkpoint(model_path)
-                 
         if self.item_features_df is None:
             self.logger.error("Item features not loaded. Call load_item_features() first.")
             return {}
@@ -269,14 +297,16 @@ class RerankingStage(BaseStage):
         if metrics_k is None:
             metrics_k = self.metrics_k
 
-        return process_and_rank_candidates(
+        _, metrics = process_and_rank_candidates(
             model=self.model,
             feature_map=self.feature_map,
             input_data=input_data,
             item_features_df=self.item_features_df,
             stage_name=self.stage_name,
-            mode='evaluate',
+            return_output=False,
+            compute_metrics=True,
             metrics_k=metrics_k,
             logger=self.logger,
             **kwargs
         )
+        return metrics

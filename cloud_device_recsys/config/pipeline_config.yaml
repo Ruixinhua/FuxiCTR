@@ -51,7 +51,8 @@ stages:
     top_k: 1000
     
     model_params:
-      recall_k_values: [1000, 5000, 10000]
+      metrics_k: [1000, 5000, 10000]
+      monitor: "Recall@1000"
       embedding_dim: 64
       use_user_transformer: 1
       user_transformer_layers: 1
@@ -67,7 +68,7 @@ stages:
       dropout: 0.1                   # Dropout for
 
     training:
-      epochs: 1
+      epochs: 10
       batch_size: 4096
       learning_rate: 0.001
       optimizer: "adam"
@@ -83,11 +84,12 @@ stages:
     
     model_params:
       metrics_k: [10, 50, 100]
+      monitor: "Recall@100"
       embedding_dim: 32
       hidden_layers: [128, 64]
       
     training:
-      epochs: 1
+      epochs: 10
       batch_size: 2048
       learning_rate: 0.001
       optimizer: "adam"
@@ -97,18 +99,19 @@ stages:
 
   reranking:
     enabled: true
-    model: "DeviceReranker"
+    model: "DINRanker"
     features: ["FG1", "FG2", "FG3"]  # Includes FG3 (device-only features)
     top_k: 10
     
     model_params:
       metrics_k: [5, 10, 50]
+      monitor: "Recall@100"
       embedding_dim: 16
       hidden_layers: [64, 32]
       max_model_size_kb: 500  # Device model size constraint
       
     training:
-      epochs: 1
+      epochs: 10
       batch_size: 1024
       learning_rate: 0.001
       optimizer: "adam"

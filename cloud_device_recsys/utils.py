@@ -7,7 +7,7 @@ import pandas as pd
 import torch
 from datetime import datetime
 import argparse
-from typing import Tuple, List, Dict, Any, Union, Optional, Callable
+from typing import Tuple, List, Dict, Any, Optional, Callable
 
 from .pipeline.stage_output import CandidateSet, CandidateItem, StageOutput
 
@@ -181,7 +181,7 @@ def prepare_debug_paths(paths: dict, dataset_config: dict, logger) -> dict:
     return paths
 
 
-def evaluate_stage_output(stage_output, logger=None, metrics_k=[10, 50, 100]):
+def evaluate_stage_output(stage_output, logger=None, metrics_k=None):
     """
     Helper to evaluate StageOutput (CandidateSets).
     
@@ -360,7 +360,7 @@ def batch_to_tensors(
 def compute_ranking_metrics(
     scores: np.ndarray,
     labels: np.ndarray,
-    metrics_k: List[int] = [10, 50, 100]
+    metrics_k: List[int] = None
 ) -> Dict[str, float]:
     """
     Compute Recall@K and nDCG@K for a single query.
@@ -406,6 +406,88 @@ def compute_ranking_metrics(
             metrics[f'nDCG@{k}'] = 0.0
     
     return metrics
+
+
+def save_stage_output(stage_output: StageOutput, output_dir: str, prefix: str, 
+                       logger: logging.Logger = None) -> str:
+    """
+    Save a StageOutput object to disk using pickle format.
+    
+    Args:
+        stage_output: StageOutput object to save
+        output_dir: Directory to save the output file
+        prefix: Prefix for the output filename (e.g., 'retrieval_valid', 'preranking_test')
+        logger: Optional logger instance
+        
+    Returns:
+        Path to the saved file
+    """
+    if stage_output is None:
+        raise ValueError('StageOutput object must not be None')
+
+    os.makedirs(output_dir, exist_ok=True)
+    filename = f"{prefix}_stage_output.pkl"
+    filepath = os.path.join(output_dir, filename)
+    
+    stage_output.save(filepath)
+    
+    if logger:
+        logger.info(f"Saved {stage_output.stage_name} output ({len(stage_output.candidate_sets)} requests, "
+                   f"{stage_output.get_total_candidates()} total candidates) to {filepath}")
+    
+    return filepath
+
+
+def load_stage_output(filepath: str, logger: logging.Logger = None) -> Optional[StageOutput]:
+    """
+    Load a StageOutput object from disk.
+    
+    Args:
+        filepath: Path to the pickle file
+        logger: Optional logger instance
+        
+    Returns:
+        StageOutput object, or None if loading fails
+    """
+    if filepath is None or not os.path.exists(filepath):
+        raise FileNotFoundError(f"File {filepath} not found")
+
+    try:
+        stage_output = StageOutput.load(filepath)
+        if logger:
+            logger.info(f"Loaded {stage_output.stage_name} output from {filepath}: "
+                       f"{len(stage_output.candidate_sets)} requests, "
+                       f"{stage_output.get_total_candidates()} total candidates")
+        return stage_output
+    except Exception as e:
+        if logger:
+            logger.error(f"Failed to load stage output from {filepath}: {e}")
+        return None
+
+
+def load_stage_outputs_from_dir(
+    output_dir: str, 
+    prev_stage_name: str, 
+    logger: logging.Logger = None
+) -> Tuple[Optional[StageOutput], Optional[StageOutput]]:
+    """
+    Load valid and test stage outputs from a directory.
+    
+    Args:
+        output_dir: Directory containing stage output files (e.g., './outputs/exp_xxx/stage_outputs')
+        prev_stage_name: Name of the previous stage (e.g., 'retrieval' or 'preranking')
+        logger: Optional logger instance
+        
+    Returns:
+        Tuple of (valid_output, test_output), both can be None if loading fails
+    """
+    valid_path = os.path.join(output_dir, f"{prev_stage_name}_valid_stage_output.pkl")
+    test_path = os.path.join(output_dir, f"{prev_stage_name}_test_stage_output.pkl")
+    
+    valid_output = load_stage_output(valid_path, logger)
+    test_output = load_stage_output(test_path, logger)
+    
+    return valid_output, test_output
 
 
 def select_top_k_candidates(
@@ -473,12 +555,9 @@ def parse_pipeline_args():
                        help='GPU device ID (-1 for CPU)')
     parser.add_argument('--output_dir', type=str, default='./outputs',
                        help='Output directory')
-    parser.add_argument('--prev_output', type=str, default=None,
-                       help='Path to previous stage output (for individual stage runs)')
-    parser.add_argument('--prev_output_valid', type=str, default=None,
-                       help='Path to previous stage output for validation (pickle/json)')
-    parser.add_argument('--prev_output_test', type=str, default=None,
-                       help='Path to previous stage output for testing (pickle/json)')
+    parser.add_argument('--prev_output_path', type=str, default=None,
+                       help='Path to directory containing previous stage outputs (stage_outputs/). '
+                            'Will auto-load {stage}_valid_stage_output.pkl and {stage}_test_stage_output.pkl')
     parser.add_argument('--experiment_id', type=str, default=None,
                        help='Unique identifier for the current experiment run')
     parser.add_argument('--seed', type=int, default=2024,
@@ -486,6 +565,8 @@ def parse_pipeline_args():
     
     parser.add_argument('--n_rows', type=int, default=None,
                        help='Override debug n_rows (set to small number for quick testing)')
+    parser.add_argument('--save_stage_outputs', type=bool, default=True,
+                       help='Save intermediate stage outputs (StageOutput) to disk for later reuse')
     return parser.parse_args()
 
 
@@ -495,14 +576,22 @@ def process_and_rank_candidates(
     input_data: StageOutput,
     item_features_df: pd.DataFrame,
     stage_name: str,
-    mode: str = 'process',
-    metrics_k: List[int] = [10, 50, 100],
+    return_output: bool = True,
+    compute_metrics: bool = False,
+    metrics_k: List[int] = None,
     top_k: int = 100,
     logger: logging.Logger = None,
+    inference_batch_size: int = 50000,
     **kwargs
-) -> Union[StageOutput, Dict[str, float]]:
+) -> Tuple[Optional[StageOutput], Dict[str, float]]:
     """
-    Shared core logic for ranking candidates in Preranking and Reranking stages.
+    Batch-optimized core logic for ranking candidates in Preranking and Reranking stages.
+    
+    Optimizations:
+    1. Batches candidates across all requests for efficient model inference
+    2. Vectorized item feature lookup using DataFrame indexing
+    3. Chunked processing to manage memory
+    4. Uses np.argpartition for efficient top-K selection
     
     Args:
         model: The trained model (must implement forward/predict logic)
@@ -510,123 +599,283 @@ def process_and_rank_candidates(
         input_data: StageOutput from previous stage
         item_features_df: DataFrame containing item features
         stage_name: Name of the current stage (e.g., 'preranking', 'reranking')
-        mode: 'process' (return top-K) or 'evaluate' (return metrics)
-        metrics_k: K values for evaluation metrics
-        top_k: Top-K candidates to select in 'process' mode
+        return_output: If True, generate and return StageOutput with top-K candidates
+        compute_metrics: If True, compute and return ranking metrics
+        metrics_k: K values for evaluation metrics (required if compute_metrics=True)
+        top_k: Top-K candidates to select (used when return_output=True)
         logger: Logger instance
+        inference_batch_size: Number of candidates to process per batch (default 50K)
         **kwargs: Additional arguments
         
     Returns:
-        StageOutput (mode='process') or Dict[str, float] (mode='evaluate')
+        Tuple of (StageOutput or None, metrics_dict)
     """
     if logger is None:
         logger = logging.getLogger(stage_name)
+    
+    # Validate arguments
+    if compute_metrics and not metrics_k:
+        metrics_k = [10, 50, 100]
         
-    # Initialize
-    output = StageOutput(stage_name=stage_name)
-    total_metrics = {f'{m}@{k}': 0.0 for k in metrics_k for m in ['Recall', 'nDCG']}
-    num_queries = 0
+    # Initialize outputs
+    output = StageOutput(stage_name=stage_name) if return_output else None
+    metrics = {}
     
-    item_id_col = getattr(feature_map, 'dataset_config', {}).get('item_id_col', 'cand_item_id')
-    
-    logger.info(f"{'Ranking' if mode == 'process' else 'Evaluating'} {len(input_data.candidate_sets)} requests...")
-    
-    def get_empty_result():
-        if mode == 'process':
-            return output
-        return {}
+    action = []
+    if return_output:
+        action.append("Ranking")
+    if compute_metrics:
+        action.append("Evaluating")
+    logger.info(f"{'/'.join(action)} {len(input_data.candidate_sets)} requests...")
 
     if item_features_df is None:
         logger.error("Item features DataFrame is None. Cannot rank candidates.")
-        return get_empty_result()
+        return output, metrics
 
     model.eval()
+    device = next(model.parameters()).device if hasattr(model, 'parameters') else torch.device('cpu')
     
-    # Pre-fetch needed data to avoid repeated lookups
-    # Note: 'tqdm' is not used here to keep it simple and avoid dependency if not needed, 
-    # but could be added if passed as argument or imported.
-    # Assuming caller handles progress bars or logging as needed.
+    item_id_col = getattr(feature_map, 'dataset_config', {}).get('item_id_col', 'cand_item_id')
+    item_feature_cols = list(item_features_df.columns)
+    
+    # ========== Phase 1: Collect all candidates and build metadata ==========
+    # Flatten all candidates from all requests
+    all_item_ids = []
+    all_labels = []
+    request_offsets = [0]  # Start index for each request
+    request_metadata = []  # Store (request_id, user_id, user_features, candidates) per request
     
     for cs in input_data.candidate_sets:
         if not cs.candidates:
-            if mode == 'process':
-                output.candidate_sets.append(CandidateSet(
-                    request_id=cs.request_id,
-                    user_id=cs.user_id,
-                    user_features=cs.user_features,
-                    candidates=[],
-                    source_stage=stage_name
-                ))
+            request_offsets.append(request_offsets[-1])
+            request_metadata.append((cs.request_id, cs.user_id, cs.user_features, []))
             continue
+            
+        item_ids = [c.item_id for c in cs.candidates]
+        labels = [c.label if c.label is not None else 0 for c in cs.candidates]
         
-        # 1. Extract data from CandidateSet
-        user_features = cs.user_features
-        candidate_item_ids = [c.item_id for c in cs.candidates]
-        labels = np.array([c.label if c.label is not None else 0 for c in cs.candidates])
-        
-        # 2. Build inference batch
-        batch_dict, valid_indices = build_inference_batch_for_candidates(
-            user_features=user_features,
-            candidate_item_ids=candidate_item_ids,
-            item_features_df=item_features_df,
-            feature_map=feature_map,
-            item_id_col=item_id_col
-        )
-        
-        if not valid_indices:
-            if mode == 'process':
+        all_item_ids.extend(item_ids)
+        all_labels.extend(labels)
+        request_offsets.append(request_offsets[-1] + len(item_ids))
+        request_metadata.append((cs.request_id, cs.user_id, cs.user_features, cs.candidates))
+    
+    total_candidates = len(all_item_ids)
+    num_requests = len(request_metadata)
+    
+    if total_candidates == 0:
+        if return_output:
+            for req_id, user_id, user_feats, _ in request_metadata:
                 output.candidate_sets.append(CandidateSet(
-                    request_id=cs.request_id,
-                    user_id=cs.user_id,
-                    user_features=cs.user_features,
-                    candidates=[],
-                    source_stage=stage_name
+                    request_id=req_id, user_id=user_id,
+                    user_features=user_feats, candidates=[], source_stage=stage_name
                 ))
-            continue
+        return output, metrics
+    
+    # ========== Phase 2: Vectorized item feature lookup ==========
+    all_item_ids_arr = np.array(all_item_ids)
+    all_labels_arr = np.array(all_labels)
+    
+    # Find which items exist in the item pool
+    valid_mask = np.isin(all_item_ids_arr, item_features_df.index)
+    valid_item_ids = all_item_ids_arr[valid_mask]
+    
+    # Batch lookup item features
+    if len(valid_item_ids) > 0:
+        item_features_lookup = item_features_df.loc[valid_item_ids]
+    else:
+        logger.warning("No valid items found in item pool.")
+        if return_output:
+            for req_id, user_id, user_feats, _ in request_metadata:
+                output.candidate_sets.append(CandidateSet(
+                    request_id=req_id, user_id=user_id,
+                    user_features=user_feats, candidates=[], source_stage=stage_name
+                ))
+        return output, metrics
+    
+    # ========== Phase 3: Build user features for all valid items ==========
+    # Map global valid indices to request indices for user feature replication
+    valid_global_indices = np.where(valid_mask)[0]
+    num_valid = len(valid_global_indices)
+    
+    # Find which request each valid item belongs to
+    request_idx_for_valid = np.searchsorted(request_offsets[1:], valid_global_indices, side='right')
+    
+    # Build user feature batch by replicating user features
+    user_feature_names = [k for k in request_metadata[0][2].keys()] if request_metadata and request_metadata[0][2] else []
+    user_feature_batch = {}
+    
+    for feat_name in user_feature_names:
+        # Collect all user feature values
+        user_vals = []
+        for req_idx in request_idx_for_valid:
+            val = request_metadata[req_idx][2].get(feat_name, 0)
+            user_vals.append(val)
         
-        # 3. Convert to tensors and predict
-        # model.device is inferred from the model object usually
-        device = next(model.parameters()).device if hasattr(model, 'parameters') else torch.device('cpu')
+        if not user_vals:
+            continue
+            
+        # Check if sequence feature (2D array expected)
+        sample_val = user_vals[0]
+        if isinstance(sample_val, np.ndarray) and sample_val.ndim > 0:
+            # Stack sequence features
+            user_feature_batch[feat_name] = np.stack(user_vals)
+        else:
+            # Scalar features - ensure proper numeric dtype
+            arr = np.array(user_vals)
+            if arr.dtype == np.object_:
+                # Try to convert to float, fallback to int
+                try:
+                    arr = arr.astype(np.float32)
+                except (ValueError, TypeError):
+                    arr = arr.astype(np.int64)
+            user_feature_batch[feat_name] = arr
+    
+    # ========== Phase 4: Chunked model inference ==========
+    all_scores = np.zeros(num_valid, dtype=np.float32)
+    
+    for chunk_start in range(0, num_valid, inference_batch_size):
+        chunk_end = min(chunk_start + inference_batch_size, num_valid)
+        
+        # Build batch dict for this chunk
+        batch_dict = {}
+        
+        # User features for this chunk
+        for feat_name in user_feature_names:
+            batch_dict[feat_name] = user_feature_batch[feat_name][chunk_start:chunk_end]
+        
+        # Item features for this chunk
+        chunk_item_features = item_features_lookup.iloc[chunk_start:chunk_end]
+        for col in item_feature_cols:
+            col_values = chunk_item_features[col].values
+            
+            # Check if this is a sequence feature (contains arrays)
+            if col_values.dtype == np.object_:
+                sample = col_values[0] if len(col_values) > 0 else None
+                if isinstance(sample, (np.ndarray, list)) and hasattr(sample, '__len__') and len(sample) > 1:
+                    # This is a sequence feature - stack the arrays
+                    try:
+                        batch_dict[col] = np.stack(col_values)
+                    except ValueError:
+                        # Fallback: convert to list first to handle varying lengths
+                        batch_dict[col] = np.array([np.array(x) for x in col_values])
+                else:
+                    # Scalar values stored as objects - convert to proper dtype
+                    try:
+                        batch_dict[col] = col_values.astype(np.float32)
+                    except (ValueError, TypeError):
+                        try:
+                            batch_dict[col] = col_values.astype(np.int64)
+                        except (ValueError, TypeError):
+                            batch_dict[col] = np.array([int(x) if x is not None else 0 for x in col_values], dtype=np.int64)
+            else:
+                batch_dict[col] = col_values
+        
+        # Add item_id column if needed
+        if item_id_col not in batch_dict and item_id_col in feature_map.features:
+            batch_dict[item_id_col] = valid_item_ids[chunk_start:chunk_end]
+        
+        # Convert to tensors
         tensor_batch = batch_to_tensors(batch_dict, feature_map, device)
         
+        # Model inference
         with torch.no_grad():
             pred_dict = model(tensor_batch)
-            scores = pred_dict['y_pred'].cpu().numpy().flatten()
+            chunk_scores = pred_dict['y_pred'].cpu().numpy().flatten()
         
-        # 4. Mode-specific output
-        if mode == 'process':
-            # Select top-K candidates
-            new_cs = select_top_k_candidates(
-                request_id=cs.request_id,
-                user_id=cs.user_id,
-                user_features=user_features,
-                candidates=cs.candidates,
-                scores=scores,
-                valid_indices=valid_indices,
-                top_k=kwargs.get('top_k', top_k),
-                source_stage=stage_name
-            )
-            output.candidate_sets.append(new_cs)
-        else:
-            # Compute metrics
-            valid_labels = labels[valid_indices]
-            if np.sum(valid_labels) > 0:
-                query_metrics = compute_ranking_metrics(scores, valid_labels, metrics_k)
-                if query_metrics:
-                    num_queries += 1
-                    for metric_name, value in query_metrics.items():
-                        total_metrics[metric_name] += value
+        all_scores[chunk_start:chunk_end] = chunk_scores
     
-    # Return results
-    if mode == 'process':
+    # ========== Phase 5: Scatter results back to requests ==========
+    # Create mapping from valid indices back to original global indices
+    global_to_valid_idx = np.full(total_candidates, -1, dtype=np.int64)
+    global_to_valid_idx[valid_global_indices] = np.arange(num_valid)
+    
+    if compute_metrics:
+        total_metrics = {f'{m}@{k}': 0.0 for k in metrics_k for m in ['Recall', 'nDCG']}
+        num_queries = 0
+    
+    effective_top_k = kwargs.get('top_k', top_k)
+    
+    for req_idx, (req_id, user_id, user_feats, candidates) in enumerate(request_metadata):
+        start_idx = request_offsets[req_idx]
+        end_idx = request_offsets[req_idx + 1]
+        
+        if start_idx == end_idx:
+            if return_output:
+                output.candidate_sets.append(CandidateSet(
+                    request_id=req_id, user_id=user_id,
+                    user_features=user_feats, candidates=[], source_stage=stage_name
+                ))
+            continue
+        
+        # Get valid indices for this request
+        req_global_indices = np.arange(start_idx, end_idx)
+        req_valid_mask = valid_mask[start_idx:end_idx]
+        req_valid_positions = np.where(req_valid_mask)[0]  # Positions within request
+        
+        if len(req_valid_positions) == 0:
+            if return_output:
+                output.candidate_sets.append(CandidateSet(
+                    request_id=req_id, user_id=user_id,
+                    user_features=user_feats, candidates=[], source_stage=stage_name
+                ))
+            continue
+        
+        # Get scores for this request's valid items
+        req_valid_global = req_global_indices[req_valid_mask]
+        req_valid_idx = global_to_valid_idx[req_valid_global]
+        req_scores = all_scores[req_valid_idx]
+        req_labels = all_labels_arr[start_idx:end_idx][req_valid_mask]
+        
+        # Generate output if requested
+        if return_output:
+            num_to_select = min(effective_top_k, len(req_valid_positions))
+            
+            # Use argpartition for efficient top-K
+            if num_to_select < len(req_scores):
+                topk_local_idx = np.argpartition(-req_scores, num_to_select - 1)[:num_to_select]
+                topk_scores = req_scores[topk_local_idx]
+                sorted_order = np.argsort(-topk_scores)
+                topk_local_idx = topk_local_idx[sorted_order]
+            else:
+                topk_local_idx = np.argsort(-req_scores)
+            
+            # Map back to original candidate positions
+            topk_positions = req_valid_positions[topk_local_idx]
+            
+            new_candidates = []
+            for i, pos in enumerate(topk_positions):
+                orig_cand = candidates[pos]
+                score = req_scores[topk_local_idx[i]]
+                new_candidates.append(CandidateItem(
+                    item_id=orig_cand.item_id,
+                    score=float(score),
+                    label=orig_cand.label
+                ))
+            
+            output.candidate_sets.append(CandidateSet(
+                request_id=req_id, user_id=user_id,
+                user_features=user_feats, candidates=new_candidates, source_stage=stage_name
+            ))
+        
+        # Compute metrics if requested
+        if compute_metrics and np.sum(req_labels) > 0:
+            query_metrics = compute_ranking_metrics(req_scores, req_labels, metrics_k)
+            if query_metrics:
+                num_queries += 1
+                for metric_name, value in query_metrics.items():
+                    total_metrics[metric_name] += value
+    
+    # Finalize outputs
+    if return_output:
         logger.info(f"{stage_name.capitalize()}: {input_data.get_total_candidates()} -> "
-                        f"{output.get_total_candidates()} candidates")
-        return output
-    else:
-        metrics = {}
+                    f"{output.get_total_candidates()} candidates")
+    
+    if compute_metrics:
         if num_queries > 0:
             for metric_name in total_metrics:
                 metrics[metric_name] = total_metrics[metric_name] / num_queries
         else:
             logger.warning("No valid queries with positive labels for ranking evaluation.")
-        return metrics
+    
+    return output, metrics
+
