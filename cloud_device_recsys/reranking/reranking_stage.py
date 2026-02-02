@@ -11,9 +11,11 @@ This module wraps the DeviceReranker model as a pipeline stage.
 import os
 import csv
 import numpy as np
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
 import logging
 import torch
+import sys
+from tqdm import tqdm
 
 from ..pipeline.base_stage import BaseStage, StageType
 from ..pipeline.stage_output import StageOutput, CandidateSet
@@ -65,9 +67,31 @@ class RerankingStage(BaseStage):
         self.support_distillation = support_distillation
         self.model_params = model_params
         self.model: Optional[DeviceReranker] = None
+        
+        # Item features storage for lookups
+        self.item_features_df = None
+
+    def load_item_features(self, item_pool_path: str):
+        """Load item features from parquet file for inference lookup"""
+        import pandas as pd
+        self.logger.info(f"Loading item features from {item_pool_path}...")
+        try:
+            self.item_features_df = pd.read_parquet(item_pool_path)
+            # Create index on item_id for faster lookup
+            item_id_col = getattr(self.feature_map, 'dataset_config', {}).get('item_id_col', 'cand_item_id')
+            if item_id_col in self.item_features_df.columns:
+                self.item_features_df = self.item_features_df.set_index(item_id_col)
+            self.logger.info(f"Loaded {len(self.item_features_df)} items into feature memory.")
+        except Exception as e:
+            self.logger.error(f"Failed to load item features: {e}")
+            raise
     
     def build_model(self) -> DeviceReranker:
         """Build and initialize the re-ranking model"""
+        # Ensure output directories exist
+        model_dir = os.path.join(self.output_dir, self.feature_map.dataset_id)
+        os.makedirs(model_dir, exist_ok=True)
+
         # Add default FuxiCTR required parameters
         default_params = {
             'verbose': 1,
@@ -85,7 +109,7 @@ class RerankingStage(BaseStage):
             support_distillation=self.support_distillation,
             **params
         )
-        self.logger.info("Built DeviceReranker model")
+        self.logger.info(f"Built DeviceReranker model, saving to {model_dir}")
         self.model.count_parameters()
         return self.model
     
@@ -108,8 +132,21 @@ class RerankingStage(BaseStage):
         """
         if self.model is None:
             self.build_model()
+            
+        # Monkey-patch eval_step to avoid FuxiCTR's built-in evaluation crashing on None validation_data
+        self.model.eval_step = lambda: None
         
-        self.logger.info("Starting re-ranking model training")
+        self.logger.info("Starting re-ranking model training (Custom Loop)")
+        
+        epochs = kwargs.get('epochs', 1)
+        metrics = {}
+        
+        # Setup model for manual training
+        self.model._total_steps = 0
+        self.model._stop_training = False
+        self.model._max_gradient_norm = kwargs.get("max_gradient_norm", 10.0)
+        self.model._verbose = kwargs.get("verbose", 1)
+        self.model._epoch_index = 0
         
         # Distillation training if teacher provided
         if teacher_model is not None and self.support_distillation:
@@ -118,13 +155,35 @@ class RerankingStage(BaseStage):
                 train_data, teacher_model, **kwargs
             )
         else:
-            self.model.fit(train_data, validation_data=valid_data, **kwargs)
-            metrics = {}
+            # Standard training (Manual Loop)
+            for epoch in range(epochs):
+                self.model._epoch_index = epoch
+                self.logger.info(f"Epoch {epoch + 1}/{epochs}")
+                
+                self.model.train()
+                total_loss = 0.0
+                steps = 0
+                
+                for batch_data in train_data:
+                    loss = self.model.train_step(batch_data)
+                    total_loss += loss.item()
+                    steps += 1
+                
+                avg_loss = total_loss / steps if steps > 0 else 0.0
+                self.logger.info(f"Train Loss: {avg_loss:.6f}")
+                
+                if valid_data is not None:
+                     self.logger.info(f"Evaluating epoch {epoch + 1}...")
+                     
+                     # List-wise metrics (nDCG/Recall)
+                     valid_metrics = self.evaluate(valid_data)
+                     metrics.update(valid_metrics)
+                     self.logger.info(f"Validation (Ranking): {valid_metrics}")
         
-        if valid_data is not None:
-            valid_result = self.model.evaluate(valid_data)
-            metrics.update(valid_result)
-            self.logger.info(f"Validation metrics: {valid_result}")
+        # Save model manually
+        model_path = os.path.join(self.output_dir, self.feature_map.dataset_id, "DeviceReranker.model")
+        self.model.save_weights(model_path)
+        self.logger.info(f"Saved model checkpoint to {model_path}")
         
         # Save metrics to CSV
         metrics_path = os.path.join(self.output_dir, "training_metrics.csv")
@@ -138,147 +197,181 @@ class RerankingStage(BaseStage):
     
     def process(self,
                 input_data: StageOutput,
-                private_features: Optional[Dict[str, Any]] = None,
                 **kwargs) -> StageOutput:
         """
-        Re-rank candidates to produce final recommendations.
+        Re-rank candidates to produce final recommendations - scores and selects top-K.
         
         Args:
-            input_data: Output from pre-ranking stage
-            private_features: FG3 features per request_id (device-only)
+            input_data: StageOutput from previous stage containing candidate sets
+            **kwargs: Additional parameters (e.g., top_k override)
+            
+        Returns:
+            StageOutput with re-ranked Top-K candidates
+        """
+        return self._rank_candidates(input_data, mode='process', **kwargs)
+    
+    def evaluate(self,
+                 input_data: StageOutput,
+                 metrics_k: List[int] = [5, 10],  # Reranking usually focuses on smaller K
+                 **kwargs) -> Dict[str, float]:
+        """
+        Evaluate re-ranking model with list-wise metrics (nDCG, Recall).
+        
+        Uses candidate_sets directly - each CandidateItem should have a 'label' field
+        indicating if it's a ground truth positive (1) or negative (0).
+        
+        Args:
+            input_data: StageOutput containing candidate sets with labels
+            metrics_k: List of K values for Recall@K and nDCG@K
             **kwargs: Additional parameters
             
         Returns:
-            StageOutput with final recommendations
+            Dictionary of evaluation metrics
         """
-        # Auto-build model if not built (for testing)
+        return self._rank_candidates(input_data, mode='evaluate', metrics_k=metrics_k, **kwargs)
+    
+    def _rank_candidates(self,
+                         input_data: StageOutput,
+                         mode: str = 'process',  # 'process' or 'evaluate'
+                         metrics_k: List[int] = [5, 10],
+                         **kwargs) -> Union[StageOutput, Dict[str, float]]:
+        """
+        Core ranking logic shared by process and evaluate.
+        
+        Args:
+            input_data: StageOutput containing candidate sets
+            mode: 'process' (return top-K) or 'evaluate' (return metrics)
+            metrics_k: K values for evaluation metrics
+            **kwargs: Additional parameters
+            
+        Returns:
+            StageOutput (mode='process') or Dict[str, float] (mode='evaluate')
+        """
+        from ..utils import (
+            build_inference_batch_for_candidates,
+            batch_to_tensors,
+            compute_ranking_metrics,
+            select_top_k_candidates
+        )
+        
         if self.model is None:
-            self.logger.warning("Model not built, building with default params for testing...")
             self.build_model()
-        
-        # Handle missing input gracefully for testing
-        if input_data is None or len(input_data.candidate_sets) == 0:
-            self.logger.warning("No input from previous stage. Creating dummy output for testing...")
-            output = StageOutput(stage_name=self.stage_name)
-            cs = CandidateSet(request_id="test_req_0", user_id=0, source_stage=self.stage_name)
-            cs.add_candidate(item_id=0, score=1.0)
-            output.candidate_sets.append(cs)
-            return output
-        
-        output = StageOutput(stage_name=self.stage_name)
+            model_path = os.path.join(self.output_dir, self.feature_map.dataset_id, "DeviceReranker.model")
+            if os.path.exists(model_path):
+                self.model.load_weights(model_path)
+            
         self.model.eval()
         
-        self.logger.info(f"Re-ranking {len(input_data.candidate_sets)} candidate sets")
+        # Load item features if needed
+        if self.item_features_df is None:
+            data_dir = self.feature_map.data_dir
+            item_pool_path = os.path.join(data_dir, 'cand_item_list.parquet')
+            if os.path.exists(item_pool_path):
+                self.load_item_features(item_pool_path)
+            else:
+                self.logger.error(f"Item pool not found at {item_pool_path}")
+                return StageOutput(stage_name=self.stage_name) if mode == 'process' else {}
+        
+        item_id_col = getattr(self.feature_map, 'dataset_config', {}).get('item_id_col', 'cand_item_id')
+        
+        # Initialize outputs
+        if mode == 'process':
+            output = StageOutput(stage_name=self.stage_name)
+        else:
+            total_metrics = {f'{m}@{k}': 0.0 for k in metrics_k for m in ['Recall', 'nDCG']}
+            num_queries = 0
+        
+        self.logger.info(f"{'Re-ranking' if mode == 'process' else 'Evaluating'} {len(input_data.candidate_sets)} requests...")
         
         for cs in input_data.candidate_sets:
-            new_cs = CandidateSet(
-                request_id=cs.request_id,
-                user_id=cs.user_id,
-                user_features=cs.user_features.copy(),
-                context_features=cs.context_features.copy(),
-                source_stage=self.stage_name
-            )
-            
-            if len(cs.candidates) == 0:
-                output.candidate_sets.append(new_cs)
+            if not cs.candidates:
+                if mode == 'process':
+                    output.candidate_sets.append(CandidateSet(
+                        request_id=cs.request_id,
+                        user_id=cs.user_id,
+                        user_features=cs.user_features,
+                        candidates=[],
+                        source_stage=self.stage_name
+                    ))
                 continue
             
-            # Get private features for this request if available
-            req_private_features = None
-            if private_features is not None:
-                req_private_features = private_features.get(cs.request_id)
+            # 1. Extract data from CandidateSet
+            user_features = cs.user_features
+            candidate_item_ids = [c.item_id for c in cs.candidates]
+            labels = np.array([c.label if c.label is not None else 0 for c in cs.candidates])
             
-            # Get candidate scores
-            scores = np.array([c.score for c in cs.candidates])
-            
-            # Re-rank with private features
-            selected_indices, final_scores = self.model.rerank(
-                scores,
-                private_features=req_private_features,
-                top_k=self.top_k
+            # 2. Build inference batch
+            batch_dict, valid_indices = build_inference_batch_for_candidates(
+                user_features=user_features,
+                candidate_item_ids=candidate_item_ids,
+                item_features_df=self.item_features_df,
+                feature_map=self.feature_map,
+                item_id_col=item_id_col
             )
             
-            # Add selected candidates
-            for i, idx in enumerate(selected_indices):
-                old_candidate = cs.candidates[idx]
-                new_cs.add_candidate(
-                    item_id=old_candidate.item_id,
-                    features=old_candidate.features.copy(),
-                    score=float(final_scores[i]),
-                    embedding=old_candidate.embedding
+            if not valid_indices:
+                if mode == 'process':
+                    output.candidate_sets.append(CandidateSet(
+                        request_id=cs.request_id,
+                        user_id=cs.user_id,
+                        user_features=cs.user_features,
+                        candidates=[],
+                        source_stage=self.stage_name
+                    ))
+                continue
+            
+            # 3. Convert to tensors and predict
+            tensor_batch = batch_to_tensors(batch_dict, self.feature_map, self.model.device)
+            
+            with torch.no_grad():
+                pred_dict = self.model(tensor_batch)
+                scores = pred_dict['y_pred'].cpu().numpy().flatten()
+            
+            # 4. Mode-specific output
+            if mode == 'process':
+                # Select top-K candidates
+                new_cs = select_top_k_candidates(
+                    request_id=cs.request_id,
+                    user_id=cs.user_id,
+                    user_features=user_features,
+                    candidates=cs.candidates,
+                    scores=scores,
+                    valid_indices=valid_indices,
+                    top_k=kwargs.get('top_k', self.top_k),
+                    source_stage=self.stage_name
                 )
+                output.candidate_sets.append(new_cs)
+            else:
+                # Compute metrics
+                valid_labels = labels[valid_indices]
+                if np.sum(valid_labels) > 0:  # Only compute if there are positives
+                    query_metrics = compute_ranking_metrics(scores, valid_labels, metrics_k)
+                    if query_metrics:
+                        num_queries += 1
+                        for metric_name, value in query_metrics.items():
+                            total_metrics[metric_name] += value
+        
+        # Return results
+        if mode == 'process':
+            self.logger.info(f"Reranking: {input_data.get_total_candidates()} -> "
+                            f"{output.get_total_candidates()} candidates")
+            return output
+        else:
+            metrics = {}
+            if num_queries > 0:
+                for metric_name in total_metrics:
+                    metrics[metric_name] = total_metrics[metric_name] / num_queries
+                self.logger.info(f"List-wise Evaluation Results: {metrics}")
+            else:
+                self.logger.warning("No valid queries with positive labels for ranking evaluation.")
             
-            output.candidate_sets.append(new_cs)
-        
-        self.logger.info(f"Re-ranking: {input_data.get_total_candidates()} -> "
-                        f"{output.get_total_candidates()} candidates")
-        
-        return output
-    
-    def evaluate(self,
-                 test_data: Any,
-                 **kwargs) -> Dict[str, float]:
-        """
-        Evaluate re-ranking model.
-        
-        Args:
-            test_data: Test data generator
-            **kwargs: Evaluation parameters
+            # Save metrics to CSV
+            metrics_path = os.path.join(self.output_dir, "eval_metrics.csv")
+            with open(metrics_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['metric_name', 'value'])
+                for name, value in sorted(metrics.items()):
+                    writer.writerow([name, f"{value:.6f}" if isinstance(value, float) else value])
             
-        Returns:
-            Evaluation metrics
-        """
-        if self.model is None:
-            raise ValueError("Model not built")
-        
-        metrics = self.model.evaluate(test_data)
-        
-        # Save metrics to CSV
-        metrics_path = os.path.join(self.output_dir, "eval_metrics.csv")
-        with open(metrics_path, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(['metric_name', 'value'])
-            for name, value in sorted(metrics.items()):
-                writer.writerow([name, f"{value:.6f}" if isinstance(value, float) else value])
-        
-        self.logger.info(f"Evaluation metrics: {metrics}")
-        return metrics
-    
-    def export_for_device(self,
-                          export_dir: str,
-                          sample_input: torch.Tensor,
-                          formats: List[str] = ['onnx', 'torchscript']) -> Dict[str, str]:
-        """
-        Export model for device deployment.
-        
-        Args:
-            export_dir: Directory for exported models
-            sample_input: Sample input tensor
-            formats: Export formats ('onnx', 'torchscript')
-            
-        Returns:
-            Dictionary mapping format to export path
-        """
-        os.makedirs(export_dir, exist_ok=True)
-        exports = {}
-        
-        if 'onnx' in formats:
-            onnx_path = os.path.join(export_dir, "device_reranker.onnx")
-            self.model.export_onnx(onnx_path, sample_input)
-            exports['onnx'] = onnx_path
-        
-        if 'torchscript' in formats:
-            ts_path = os.path.join(export_dir, "device_reranker.pt")
-            self.model.export_torchscript(ts_path, sample_input)
-            exports['torchscript'] = ts_path
-        
-        # Save export info to CSV
-        info_path = os.path.join(export_dir, "export_info.csv")
-        with open(info_path, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(['format', 'path', 'size_mb'])
-            for fmt, path in exports.items():
-                size_mb = os.path.getsize(path) / (1024 * 1024)
-                writer.writerow([fmt, path, f"{size_mb:.2f}"])
-        
-        return exports
+            return metrics
+

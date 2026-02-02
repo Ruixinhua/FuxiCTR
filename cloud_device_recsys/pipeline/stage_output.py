@@ -25,6 +25,7 @@ class CandidateItem:
     item_id: Any
     features: Dict[str, Any] = field(default_factory=dict)
     score: float = 0.0
+    label: Optional[int] = None # Added for ground truth in candidate lists
     embedding: Optional[np.ndarray] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -51,12 +52,14 @@ class CandidateSet:
             self.timestamp = datetime.now().isoformat()
     
     def add_candidate(self, item_id: Any, features: Dict = None, 
-                     score: float = 0.0, embedding: np.ndarray = None) -> None:
+                     score: float = 0.0, label: int = None, 
+                     embedding: np.ndarray = None) -> None:
         """Add a candidate to the set"""
         self.candidates.append(CandidateItem(
             item_id=item_id,
             features=features or {},
             score=score,
+            label=label,
             embedding=embedding
         ))
     
