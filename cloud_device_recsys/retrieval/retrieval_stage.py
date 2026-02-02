@@ -69,7 +69,8 @@ class RetrievalStage(BaseStage):
         self.top_k = top_k
         self.model_params = model_params
         self.model: Optional[DualTowerRetrieval] = None
-        
+        self.best_weights_path = None
+        self.recall_k_values = model_params['recall_k_values']
         # Item index for retrieval
         self.item_embeddings: Optional[np.ndarray] = None
         self.item_ids: Optional[List[Any]] = None
@@ -136,7 +137,7 @@ class RetrievalStage(BaseStage):
         """Train loop with validation"""
         if self.model is None:
             self.build_model()
-        
+        self.best_weights_path = os.path.join(self.model.model_dir, self.model.model_id + ".model")
         epochs = kwargs.get("epochs", 1)
         patience = kwargs.get("patience", 2)
         monitor = kwargs.get("monitor", "Recall@1000")
@@ -146,8 +147,7 @@ class RetrievalStage(BaseStage):
         
         best_metric = -np.inf if mode == "max" else np.inf
         stopping_steps = 0
-        best_weights_path = os.path.join(self.model.model_dir, self.model.model_id + ".model")
-        
+
         # Setup model for manual training
         self.model._total_steps = 0
         self.model._stop_training = False
@@ -173,7 +173,7 @@ class RetrievalStage(BaseStage):
             if is_best:
                 best_metric = curr_val
                 stopping_steps = 0
-                self.model.save_weights(best_weights_path)
+                self.model.save_weights(self.best_weights_path)
                 self.logger.info(f"New Best {monitor}! Model Saved.")
             else:
                 stopping_steps += 1
@@ -190,8 +190,8 @@ class RetrievalStage(BaseStage):
                     break
 
         # Restore best
-        if os.path.exists(best_weights_path):
-             self.model.load_weights(best_weights_path)
+        if os.path.exists(self.best_weights_path):
+             self.model.load_weights(self.best_weights_path)
 
     def train_epoch(self, data_generator):
         """
@@ -264,18 +264,16 @@ class RetrievalStage(BaseStage):
         """
         self.logger.info(f"Starting retrieval process for candidate generation (top_k={self.top_k}).")
 
-        # 1. Ensure model is built and item index is ready
+        # 1. Ensure model is built
         if self.model is None:
             self.logger.warning("Model not built, building now.")
             self.build_model()
-        
-        # Load best weights if available
-        best_weights_path = os.path.join(self.model.model_dir, self.model.model_id + ".model")
-        if os.path.exists(best_weights_path):
-             self.model.load_weights(best_weights_path)
-             self.logger.info(f"Loaded best weights from {best_weights_path}")
+
+        if os.path.exists(self.best_weights_path):
+             self.model.load_weights(self.best_weights_path)
+             self.logger.info(f"Loaded best weights from {self.best_weights_path}")
         else:
-             self.logger.warning(f"No best weights found at {best_weights_path}. Using current model state.")
+             self.logger.warning(f"No best weights found at {self.best_weights_path}. Using current model state.")
 
         if self.item_embeddings is None or self.item_ids is None or self.item_id_to_idx is None:
             self.logger.info("Building item index...")
@@ -387,10 +385,12 @@ class RetrievalStage(BaseStage):
         output.end_time = datetime.datetime.now().isoformat()
         return output
 
-    def evaluate(self, test_data, k_values=[1000, 5000, 10000], **kwargs) -> Dict[str, float]:
+    def evaluate(self, test_data, k_values=None, **kwargs) -> Dict[str, float]:
         """Compute Recall@K against built item index"""
         self.logger.info("Evaluating...")
         self.model.eval()
+        if k_values is None:
+            k_values = self.recall_k_values
         
         user_embs, gt_ids = [], []
         config = getattr(self.feature_map, 'dataset_config', {})

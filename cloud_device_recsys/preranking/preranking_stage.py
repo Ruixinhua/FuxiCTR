@@ -68,8 +68,9 @@ class PrerankingStage(BaseStage):
         self.use_diversity = use_diversity
         self.diversity_weight = diversity_weight
         self.model_params = model_params
+        self.metrics_k = model_params['metrics_k']
         self.model: Optional[DINRanker] = None
-        
+        self.best_weights_path = None
         # Item features storage for lookups during evaluation/processing
         self.item_features_df = None
     
@@ -88,7 +89,7 @@ class PrerankingStage(BaseStage):
             self.logger.error(f"Failed to load item features: {e}")
             raise
     
-    def build_model(self) -> DINRanker:
+    def build_model(self):
         """Build and initialize the pre-ranking model"""
         # Ensure output directories exist
         model_dir = os.path.join(self.output_dir, self.feature_map.dataset_id)
@@ -132,7 +133,8 @@ class PrerankingStage(BaseStage):
             self.build_model()
         
         self.logger.info("Starting pre-ranking model training (Custom Loop)")
-        
+        self.best_weights_path = os.path.join(self.model.model_dir, self.model.model_id + ".model")
+
         epochs = kwargs.get('epochs', 1)
         metrics = {}
         
@@ -141,7 +143,7 @@ class PrerankingStage(BaseStage):
              self.logger.info("Initializing optimizer...")
              # FuxiCTR's compile handles optimizer/loss setup
              self.model.compile(
-                 optimizer=self.model_params.get("optimizer", "adam"),
+                 optimizer=kwargs.get("optimizer", self.model_params.get("optimizer", "adam")),
                  loss=self.model_params.get("loss", "binary_crossentropy"),
                  lr=kwargs.get("learning_rate", 1e-3)
              )
@@ -174,14 +176,12 @@ class PrerankingStage(BaseStage):
             
             # Validation (Ranking Metrics)
             self.logger.info(f"Evaluating epoch {epoch + 1}...")
-            valid_metrics = self.evaluate(valid_data, metrics_k=[10, 50, 100])
+            valid_metrics = self.evaluate(valid_data)
             metrics.update(valid_metrics)
             self.logger.info(f"Validation (Ranking): {valid_metrics}")
 
-        # Save model manually
-        model_path = os.path.join(self.output_dir, self.feature_map.dataset_id, "DINRanker.model")
-        self.model.save_weights(model_path)
-        self.logger.info(f"Saved model checkpoint to {model_path}")
+        self.model.save_weights(self.best_weights_path)
+        self.logger.info(f"Saved model checkpoint to {self.best_weights_path}")
 
         # Save metrics to CSV
         metrics_path = os.path.join(self.output_dir, "training_metrics.csv")
@@ -194,7 +194,7 @@ class PrerankingStage(BaseStage):
         return metrics
 
     def process(self,
-                input_data: StageOutput,  # Output from previous stage (retrieval)
+                input_data: StageOutput,
                 **kwargs) -> StageOutput:
         """
         Process candidates from retrieval stage - scores and selects top-K.
@@ -206,17 +206,36 @@ class PrerankingStage(BaseStage):
         Returns:
             StageOutput with Top-K candidates.
         """
-        return self._rank_candidates(input_data, mode='process', **kwargs)
+        from ..utils import process_and_rank_candidates
+
+        if os.path.exists(self.best_weights_path):
+            self.model.load_weights(self.best_weights_path)
+            self.logger.info(f"Loaded best weights from {self.best_weights_path}")
+        else:
+            self.logger.warning(f"No best weights found at {self.best_weights_path}. Using current model state.")
+        
+        # Ensure item features are loaded
+        if self.item_features_df is None:
+            raise ValueError("Item features not loaded. Call load_item_features() first.")
+
+        return process_and_rank_candidates(
+            model=self.model,
+            feature_map=self.feature_map,
+            input_data=input_data,
+            item_features_df=self.item_features_df,
+            stage_name=self.stage_name,
+            mode='process',
+            top_k=kwargs.get('top_k', self.top_k),
+            logger=self.logger,
+            **kwargs
+        )
 
     def evaluate(self,
-                 input_data: StageOutput,  # Output from previous stage
-                 metrics_k: List[int] = [100], 
+                 input_data: StageOutput,
+                 metrics_k: List[int] = None,
                  **kwargs) -> Dict[str, float]:
         """
         Evaluate pre-ranking model with list-wise metrics.
-        
-        Uses candidate_sets directly - each CandidateItem should have a 'label' field
-        indicating if it's a ground truth positive (1) or negative (0).
         
         Args:
             input_data: StageOutput containing candidate sets with labels
@@ -226,134 +245,22 @@ class PrerankingStage(BaseStage):
         Returns:
             Dictionary of evaluation metrics
         """
-        return self._rank_candidates(input_data, mode='evaluate', metrics_k=metrics_k, **kwargs)
-    
-    def _rank_candidates(self,
-                         input_data: StageOutput,
-                         mode: str = 'process',  # 'process' or 'evaluate'
-                         metrics_k: List[int] = [100],
-                         **kwargs) -> Union[StageOutput, Dict[str, float]]:
-        """
-        Core ranking logic shared by process and evaluate.
-        
-        Args:
-            input_data: StageOutput containing candidate sets
-            mode: 'process' (return top-K) or 'evaluate' (return metrics)
-            metrics_k: K values for evaluation metrics
-            **kwargs: Additional parameters
-            
-        Returns:
-            StageOutput (mode='process') or Dict[str, float] (mode='evaluate')
-        """
-        from ..utils import (
-            build_inference_batch_for_candidates,
-            batch_to_tensors,
-            compute_ranking_metrics,
-            select_top_k_candidates
-        )
-        
-        if self.model is None:
-            self.build_model()
-            model_path = os.path.join(self.output_dir, self.feature_map.dataset_id, "DINRanker.model")
-            if os.path.exists(model_path):
-                self.model.load_checkpoint(model_path)
-            
-        self.model.eval()
-        
+        from ..utils import process_and_rank_candidates
+                 
         if self.item_features_df is None:
-            self.logger.error("Item features not loaded. Call load_item_features() first.")
-            return StageOutput(stage_name=self.stage_name) if mode == 'process' else {}
-        
-        item_id_col = getattr(self.feature_map, 'dataset_config', {}).get('item_id_col', 'cand_item_id')
-        
-        # Initialize outputs
-        if mode == 'process':
-            output = StageOutput(stage_name=self.stage_name)
-        else:
-            total_metrics = {f'{m}@{k}': 0.0 for k in metrics_k for m in ['Recall', 'nDCG']}
-            num_queries = 0
-        
-        self.logger.info(f"{'Processing' if mode == 'process' else 'Evaluating'} {len(input_data.candidate_sets)} requests...")
-        
-        for cs in input_data.candidate_sets:
-            if not cs.candidates:
-                if mode == 'process':
-                    output.candidate_sets.append(CandidateSet(
-                        request_id=cs.request_id,
-                        user_id=cs.user_id,
-                        user_features=cs.user_features,
-                        candidates=[],
-                        source_stage=self.stage_name
-                    ))
-                continue
-            
-            # 1. Extract data from CandidateSet
-            user_features = cs.user_features
-            candidate_item_ids = [c.item_id for c in cs.candidates]
-            labels = np.array([c.label if c.label is not None else 0 for c in cs.candidates])
-            
-            # 2. Build inference batch
-            batch_dict, valid_indices = build_inference_batch_for_candidates(
-                user_features=user_features,
-                candidate_item_ids=candidate_item_ids,
-                item_features_df=self.item_features_df,
-                feature_map=self.feature_map,
-                item_id_col=item_id_col
-            )
-            
-            if not valid_indices:
-                if mode == 'process':
-                    output.candidate_sets.append(CandidateSet(
-                        request_id=cs.request_id,
-                        user_id=cs.user_id,
-                        user_features=cs.user_features,
-                        candidates=[],
-                        source_stage=self.stage_name
-                    ))
-                continue
-            
-            # 3. Convert to tensors and predict
-            tensor_batch = batch_to_tensors(batch_dict, self.feature_map, self.model.device)
-            
-            with torch.no_grad():
-                pred_dict = self.model(tensor_batch)
-                scores = pred_dict['y_pred'].cpu().numpy().flatten()
-            
-            # 4. Mode-specific output
-            if mode == 'process':
-                # Select top-K candidates
-                new_cs = select_top_k_candidates(
-                    request_id=cs.request_id,
-                    user_id=cs.user_id,
-                    user_features=user_features,
-                    candidates=cs.candidates,
-                    scores=scores,
-                    valid_indices=valid_indices,
-                    top_k=kwargs.get('top_k', self.top_k),
-                    source_stage=self.stage_name
-                )
-                output.candidate_sets.append(new_cs)
-            else:
-                # Compute metrics
-                valid_labels = labels[valid_indices]
-                if np.sum(valid_labels) > 0:  # Only compute if there are positives
-                    query_metrics = compute_ranking_metrics(scores, valid_labels, metrics_k)
-                    if query_metrics:
-                        num_queries += 1
-                        for metric_name, value in query_metrics.items():
-                            total_metrics[metric_name] += value
-        
-        # Return results
-        if mode == 'process':
-            self.logger.info(f"Preranking: {input_data.get_total_candidates()} -> "
-                            f"{output.get_total_candidates()} candidates")
-            return output
-        else:
-            metrics = {}
-            if num_queries > 0:
-                for metric_name in total_metrics:
-                    metrics[metric_name] = total_metrics[metric_name] / num_queries
-                self.logger.info(f"List-wise Evaluation Results: {metrics}")
-            else:
-                self.logger.warning("No valid queries with positive labels for ranking evaluation.")
-            return metrics
+            raise ValueError("Item features not loaded. Call load_item_features() first.")
+
+        if metrics_k is None:
+            metrics_k = self.metrics_k
+
+        return process_and_rank_candidates(
+            model=self.model,
+            feature_map=self.feature_map,
+            input_data=input_data,
+            item_features_df=self.item_features_df,
+            stage_name=self.stage_name,
+            mode='evaluate',
+            metrics_k=metrics_k,
+            logger=self.logger,
+            **kwargs
+        )

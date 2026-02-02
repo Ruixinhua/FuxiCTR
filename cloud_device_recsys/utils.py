@@ -6,9 +6,10 @@ import numpy as np
 import pandas as pd
 import torch
 from datetime import datetime
-from typing import Tuple, List, Dict, Any
+import argparse
+from typing import Tuple, List, Dict, Any, Union, Optional, Callable
 
-from .pipeline.stage_output import CandidateSet, CandidateItem
+from .pipeline.stage_output import CandidateSet, CandidateItem, StageOutput
 
 def setup_logging(output_dir) -> None:
     """Setup logging configuration"""
@@ -451,3 +452,181 @@ def select_top_k_candidates(
         candidates=top_k_candidates,
         source_stage=source_stage
     )
+
+
+def parse_pipeline_args():
+    """Parse command line arguments for the pipeline."""
+    parser = argparse.ArgumentParser(description='Cloud-Device Recommendation Pipeline')
+    parser.add_argument('--config', type=str, default='./config',
+                       help='Configuration directory')
+    parser.add_argument('--pipeline_id', type=str, default='default',
+                       help='Pipeline configuration ID')
+    parser.add_argument('--dataset_id', type=str, default=None,
+                       help='Dataset ID from dataset_config.yaml')
+    parser.add_argument('--mode', type=str, default='full',
+                       choices=['full', 'retrieval', 'preranking', 'reranking', 'train', 'evaluate'],
+                       help='Execution mode')
+    parser.add_argument('--stage', type=str, default=None,
+                       choices=['retrieval', 'preranking', 'reranking'],
+                       help='Stage name for train/evaluate mode')
+    parser.add_argument('--gpu', type=int, default=-1,
+                       help='GPU device ID (-1 for CPU)')
+    parser.add_argument('--output_dir', type=str, default='./outputs',
+                       help='Output directory')
+    parser.add_argument('--prev_output', type=str, default=None,
+                       help='Path to previous stage output (for individual stage runs)')
+    parser.add_argument('--prev_output_valid', type=str, default=None,
+                       help='Path to previous stage output for validation (pickle/json)')
+    parser.add_argument('--prev_output_test', type=str, default=None,
+                       help='Path to previous stage output for testing (pickle/json)')
+    parser.add_argument('--experiment_id', type=str, default=None,
+                       help='Unique identifier for the current experiment run')
+    parser.add_argument('--seed', type=int, default=2024,
+                       help='Random seed')
+    
+    parser.add_argument('--n_rows', type=int, default=None,
+                       help='Override debug n_rows (set to small number for quick testing)')
+    return parser.parse_args()
+
+
+def process_and_rank_candidates(
+    model: Any,
+    feature_map: Any,
+    input_data: StageOutput,
+    item_features_df: pd.DataFrame,
+    stage_name: str,
+    mode: str = 'process',
+    metrics_k: List[int] = [10, 50, 100],
+    top_k: int = 100,
+    logger: logging.Logger = None,
+    **kwargs
+) -> Union[StageOutput, Dict[str, float]]:
+    """
+    Shared core logic for ranking candidates in Preranking and Reranking stages.
+    
+    Args:
+        model: The trained model (must implement forward/predict logic)
+        feature_map: FeatureMap object
+        input_data: StageOutput from previous stage
+        item_features_df: DataFrame containing item features
+        stage_name: Name of the current stage (e.g., 'preranking', 'reranking')
+        mode: 'process' (return top-K) or 'evaluate' (return metrics)
+        metrics_k: K values for evaluation metrics
+        top_k: Top-K candidates to select in 'process' mode
+        logger: Logger instance
+        **kwargs: Additional arguments
+        
+    Returns:
+        StageOutput (mode='process') or Dict[str, float] (mode='evaluate')
+    """
+    if logger is None:
+        logger = logging.getLogger(stage_name)
+        
+    # Initialize
+    output = StageOutput(stage_name=stage_name)
+    total_metrics = {f'{m}@{k}': 0.0 for k in metrics_k for m in ['Recall', 'nDCG']}
+    num_queries = 0
+    
+    item_id_col = getattr(feature_map, 'dataset_config', {}).get('item_id_col', 'cand_item_id')
+    
+    logger.info(f"{'Ranking' if mode == 'process' else 'Evaluating'} {len(input_data.candidate_sets)} requests...")
+    
+    def get_empty_result():
+        if mode == 'process':
+            return output
+        return {}
+
+    if item_features_df is None:
+        logger.error("Item features DataFrame is None. Cannot rank candidates.")
+        return get_empty_result()
+
+    model.eval()
+    
+    # Pre-fetch needed data to avoid repeated lookups
+    # Note: 'tqdm' is not used here to keep it simple and avoid dependency if not needed, 
+    # but could be added if passed as argument or imported.
+    # Assuming caller handles progress bars or logging as needed.
+    
+    for cs in input_data.candidate_sets:
+        if not cs.candidates:
+            if mode == 'process':
+                output.candidate_sets.append(CandidateSet(
+                    request_id=cs.request_id,
+                    user_id=cs.user_id,
+                    user_features=cs.user_features,
+                    candidates=[],
+                    source_stage=stage_name
+                ))
+            continue
+        
+        # 1. Extract data from CandidateSet
+        user_features = cs.user_features
+        candidate_item_ids = [c.item_id for c in cs.candidates]
+        labels = np.array([c.label if c.label is not None else 0 for c in cs.candidates])
+        
+        # 2. Build inference batch
+        batch_dict, valid_indices = build_inference_batch_for_candidates(
+            user_features=user_features,
+            candidate_item_ids=candidate_item_ids,
+            item_features_df=item_features_df,
+            feature_map=feature_map,
+            item_id_col=item_id_col
+        )
+        
+        if not valid_indices:
+            if mode == 'process':
+                output.candidate_sets.append(CandidateSet(
+                    request_id=cs.request_id,
+                    user_id=cs.user_id,
+                    user_features=cs.user_features,
+                    candidates=[],
+                    source_stage=stage_name
+                ))
+            continue
+        
+        # 3. Convert to tensors and predict
+        # model.device is inferred from the model object usually
+        device = next(model.parameters()).device if hasattr(model, 'parameters') else torch.device('cpu')
+        tensor_batch = batch_to_tensors(batch_dict, feature_map, device)
+        
+        with torch.no_grad():
+            pred_dict = model(tensor_batch)
+            scores = pred_dict['y_pred'].cpu().numpy().flatten()
+        
+        # 4. Mode-specific output
+        if mode == 'process':
+            # Select top-K candidates
+            new_cs = select_top_k_candidates(
+                request_id=cs.request_id,
+                user_id=cs.user_id,
+                user_features=user_features,
+                candidates=cs.candidates,
+                scores=scores,
+                valid_indices=valid_indices,
+                top_k=kwargs.get('top_k', top_k),
+                source_stage=stage_name
+            )
+            output.candidate_sets.append(new_cs)
+        else:
+            # Compute metrics
+            valid_labels = labels[valid_indices]
+            if np.sum(valid_labels) > 0:
+                query_metrics = compute_ranking_metrics(scores, valid_labels, metrics_k)
+                if query_metrics:
+                    num_queries += 1
+                    for metric_name, value in query_metrics.items():
+                        total_metrics[metric_name] += value
+    
+    # Return results
+    if mode == 'process':
+        logger.info(f"{stage_name.capitalize()}: {input_data.get_total_candidates()} -> "
+                        f"{output.get_total_candidates()} candidates")
+        return output
+    else:
+        metrics = {}
+        if num_queries > 0:
+            for metric_name in total_metrics:
+                metrics[metric_name] = total_metrics[metric_name] / num_queries
+        else:
+            logger.warning("No valid queries with positive labels for ranking evaluation.")
+        return metrics

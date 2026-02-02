@@ -23,7 +23,6 @@ Usage:
 import os
 import copy
 import sys
-import argparse
 import logging
 import json
 import yaml
@@ -41,10 +40,9 @@ from cloud_device_recsys.config.feature_groups import FeatureGroupManager, Featu
 from cloud_device_recsys.retrieval.retrieval_stage import RetrievalStage
 from cloud_device_recsys.preranking.preranking_stage import PrerankingStage
 from cloud_device_recsys.reranking.reranking_stage import RerankingStage
-from cloud_device_recsys.pipeline.stage_output import StageOutput
 from cloud_device_recsys.utils import (
-    setup_logging, get_data_dir, get_data_paths, 
-    evaluate_stage_output, prepare_debug_paths
+    setup_logging, get_data_dir, get_data_paths,
+    prepare_debug_paths, parse_pipeline_args
 )
 from cloud_device_recsys.config.config_parser import ConfigParser
 
@@ -333,10 +331,6 @@ def run_retrival_stage(retrieval_stage, pipeline_config, dataset_config, fg_mana
     test_output = retrieval_stage.process(test_loader.make_iterator())
     valid_output = retrieval_stage.process(train_loader.make_iterator()[1])
 
-    # Evaluate Pipeline Metrics
-    # pipeline_metrics = evaluate_stage_output(test_output, logger, metrics_k=[100, 1000])
-    # metrics.update(pipeline_metrics)
-
     return metrics, valid_output, test_output
 
 
@@ -381,8 +375,9 @@ def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, logg
     # 3. Evaluate Preranking Model (List-wise if prev_output available)
     logger.info("[Preranking] Evaluating on test set...")
 
-    test_metrics = preranking_stage.evaluate(prev_output_test, metrics_k=[10, 50, 100])
+    test_metrics = preranking_stage.evaluate(prev_output_test)
     if test_metrics:
+        logger.info(f"Test (Ranking): {test_metrics}")
         metrics.update({f"preranking_test_{k}": v for k, v in test_metrics.items()})
         
     # 4. Pipeline Processing
@@ -412,26 +407,25 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, logger
         )
         train_gen, _ = loaders['train_loader'].make_iterator()
 
+    # Load Item Pool for Evaluation/Processing
+    if os.path.exists(paths['item_pool_path']):
+        reranking_stage.load_item_features(paths['item_pool_path'])
     # 2. Train Reranking Model
     logger.info("[Reranking] Training model...")
     reranking_stage.build_model()
     train_metrics = reranking_stage.train(
         train_data=train_gen,
         valid_data=prev_output_valid,
-        epochs=reranking_config.get('epochs', 5),
-        batch_size=reranking_config.get('batch_size', 4096)
+        epochs=reranking_config['training'].get('epochs', 5),
+        batch_size=reranking_config['training'].get('batch_size', 4096)
     )
     if train_metrics:
         metrics.update({f"reranking_train_{k}": v for k, v in train_metrics.items()})
-
-    # Load Item Pool for Evaluation/Processing
-    if os.path.exists(paths['item_pool_path']):
-        reranking_stage.load_item_features(paths['item_pool_path'])
-    
     # 3. Evaluate Reranking Model (List-wise if prev_output available)
     logger.info("[Reranking] Evaluating on test set...")
-    test_metrics = reranking_stage.evaluate(prev_output_test, metrics_k=[5, 10])
+    test_metrics = reranking_stage.evaluate(prev_output_test)
     if test_metrics:
+        logger.info(f"Test (Ranking): {test_metrics}")
         metrics.update({f"reranking_test_{k}": v for k, v in test_metrics.items()})
     return metrics
 
@@ -439,59 +433,7 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, logger
 def main():
     print("DEBUG: main() started", flush=True)
     """Main entry point"""
-    parser = argparse.ArgumentParser(description='Cloud-Device Recommendation Pipeline')
-    parser.add_argument('--config', type=str, default='./config',
-                       help='Configuration directory')
-    parser.add_argument('--pipeline_id', type=str, default='default',
-                       help='Pipeline configuration ID')
-    parser.add_argument('--dataset_id', type=str, default=None,
-                       help='Dataset ID from dataset_config.yaml')
-    parser.add_argument('--mode', type=str, default='full',
-                       choices=['full', 'retrieval', 'preranking', 'reranking', 'train', 'evaluate'],
-                       help='Execution mode')
-    parser.add_argument('--stage', type=str, default=None,
-                       choices=['retrieval', 'preranking', 'reranking'],
-                       help='Stage name for train/evaluate mode')
-    parser.add_argument('--gpu', type=int, default=-1,
-                       help='GPU device ID (-1 for CPU)')
-    parser.add_argument('--output_dir', type=str, default='./outputs',
-                       help='Output directory')
-    parser.add_argument('--prev_output', type=str, default=None,
-                       help='Path to previous stage output (for individual stage runs)')
-    parser.add_argument('--experiment_id', type=str, default=None,
-                       help='Unique identifier for the current experiment run')
-    parser.add_argument('--seed', type=int, default=2024,
-                       help='Random seed')
-    
-    parser.add_argument('--n_rows', type=int, default=None,
-                       help='Override debug n_rows (set to small number for quick testing)')
-    
-    # --- Retrieval Stage Overrides ---
-    parser.add_argument('--retrieval_embedding_dim', type=int, default=None,
-                       help='Override retrieval embedding dimension')
-    parser.add_argument('--retrieval_learning_rate', type=float, default=None,
-                       help='Override retrieval learning rate')
-    parser.add_argument('--retrieval_batch_size', type=int, default=None,
-                       help='Override retrieval batch size')
-    parser.add_argument('--retrieval_dropout', type=float, default=None,
-                       help='Override retrieval dropout')
-    parser.add_argument('--retrieval_regularizer', type=float, default=None,
-                       help='Override retrieval l2 regularization')
-    parser.add_argument('--retrieval_user_layers', type=str, default=None,
-                       help='Override user tower layers (comma separated, e.g., 512,256,128)')
-    parser.add_argument('--retrieval_item_layers', type=str, default=None,
-                       help='Override item tower layers (comma separated, e.g., 512,256,128)')
-    parser.add_argument('--retrieval_use_user_transformer', type=int, default=None,
-                       help='Override use_user_transformer (0 or 1)')
-    parser.add_argument('--retrieval_user_transformer_layers', type=int, default=None,
-                       help='Override user_transformer_layers')
-    parser.add_argument('--retrieval_use_item_transformer', type=int, default=None,
-                       help='Override use_item_transformer (0 or 1)')
-    parser.add_argument('--retrieval_item_transformer_layers', type=int, default=None,
-                       help='Override item_transformer_layers')
-    
-    args = parser.parse_args()
-    
+    args = parse_pipeline_args()    
     # Construct unique output directory for this run
     run_output_base = args.output_dir # e.g. ./outputs
     if args.experiment_id:
@@ -530,33 +472,7 @@ def main():
         r_stage = pipeline_config['stages']['retrieval']
         r_params = r_stage.get('model_params', {})
         r_train = r_stage.get('training', {})
-        
-        # Define override mappings: (arg_name, target_dict, target_key, transform_func)
-        overrides = [
-            ('retrieval_embedding_dim', r_params, 'embedding_dim', None),
-            ('retrieval_learning_rate', r_train, 'learning_rate', None),
-            ('retrieval_batch_size', r_train, 'batch_size', None),
-            ('retrieval_dropout', r_params, 'dropout', None),
-            ('retrieval_regularizer', r_params, ['embedding_regularizer', 'net_regularizer'], None),
-            ('retrieval_user_layers', r_params, 'user_tower_layers', lambda x: [int(i) for i in x.split(',')]),
-            ('retrieval_item_layers', r_params, 'item_tower_layers', lambda x: [int(i) for i in x.split(',')]),
-            ('retrieval_use_user_transformer', r_params, 'use_user_transformer', bool),
-            ('retrieval_user_transformer_layers', r_params, 'user_transformer_layers', None),
-            ('retrieval_use_item_transformer', r_params, 'use_item_transformer', bool),
-            ('retrieval_item_transformer_layers', r_params, 'item_transformer_layers', None),
-        ]
-        
-        for arg_name, target_dict, target_key, transform in overrides:
-            value = getattr(args, arg_name)
-            if value is not None:
-                value = transform(value) if transform else value
-                if isinstance(target_key, list):
-                    for key in target_key:
-                        target_dict[key] = value
-                else:
-                    target_dict[target_key] = value
-                logger.info(f"Override {arg_name}: {value}")
-        
+
         # Write back
         pipeline_config['stages']['retrieval']['model_params'] = r_params
         pipeline_config['stages']['retrieval']['training'] = r_train
@@ -663,7 +579,7 @@ def main():
         all_metrics.update(p_metrics)
 
         reranking_stage = stages['reranking']
-        d_metrics, d_output = run_reranking_stage(
+        d_metrics = run_reranking_stage(
             reranking_stage, pipeline_config, dataset_config, logger=logger, shared_loaders=shared_loaders,
             prev_output_valid=p_valid, prev_output_test=p_test
         )

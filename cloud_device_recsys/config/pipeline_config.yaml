@@ -51,6 +51,7 @@ stages:
     top_k: 1000
     
     model_params:
+      recall_k_values: [1000, 5000, 10000]
       embedding_dim: 64
       use_user_transformer: 1
       user_transformer_layers: 1
@@ -66,35 +67,33 @@ stages:
       dropout: 0.1                   # Dropout for
 
     training:
-      epochs: 20
+      epochs: 1
       batch_size: 4096
       learning_rate: 0.001
       optimizer: "adam"
       
-    metrics:
-      - "Recall@1000"
+    metrics: ["Recall"]
 
   preranking:
     enabled: true
-    model: "LightweightRanker"
+    model: "DINRanker"
     features: ["FG1", "FG2"]
     top_k: 100
     use_diversity: true
     
     model_params:
+      metrics_k: [10, 50, 100]
       embedding_dim: 32
       hidden_layers: [128, 64]
       
     training:
-      epochs: 5
+      epochs: 1
       batch_size: 2048
       learning_rate: 0.001
+      optimizer: "adam"
       
-    metrics:
-      - "nDCG@10"
-      - "nDCG@50"
-      - "nDCG@100"
-      - "AUC"
+    metrics: ["nDCG", "Recall"]
+
 
   reranking:
     enabled: true
@@ -103,27 +102,22 @@ stages:
     top_k: 10
     
     model_params:
+      metrics_k: [5, 10, 50]
       embedding_dim: 16
       hidden_layers: [64, 32]
       max_model_size_kb: 500  # Device model size constraint
       
     training:
-      epochs: 5
+      epochs: 1
       batch_size: 1024
       learning_rate: 0.001
+      optimizer: "adam"
       distillation:
         enabled: false
         teacher_model: null
         temperature: 3.0
         
-    metrics:
-      - "nDCG@5"
-      - "nDCG@10"
-      - "AUC"
-      
-    export:
-      formats: ["onnx", "torchscript"]
-      quantization: true
+    metrics: ["nDCG", "Recall"]
 
 # -----------------------------------------
 # Output Settings
