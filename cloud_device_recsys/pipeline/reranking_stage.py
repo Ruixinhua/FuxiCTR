@@ -257,8 +257,6 @@ class RerankingStage(BaseStage):
             self.logger.error("Item features not loaded. Call load_item_features() first.")
             return StageOutput(stage_name=self.stage_name), {}
 
-        compute_metrics = kwargs.pop('compute_metrics', True)
-
         return process_and_rank_candidates(
             model=self.model,
             feature_map=self.feature_map,
@@ -266,7 +264,7 @@ class RerankingStage(BaseStage):
             item_features_df=self.item_features_df,
             stage_name=self.stage_name,
             return_output=True,
-            compute_metrics=compute_metrics,
+            compute_metrics=kwargs.pop('compute_metrics', True),
             top_k=kwargs.get('top_k', self.top_k),
             logger=self.logger,
             metrics_k=self.metrics_k,
@@ -293,10 +291,6 @@ class RerankingStage(BaseStage):
         if self.item_features_df is None:
             self.logger.error("Item features not loaded. Call load_item_features() first.")
             return {}
-
-        if metrics_k is None:
-            metrics_k = self.metrics_k
-
         _, metrics = process_and_rank_candidates(
             model=self.model,
             feature_map=self.feature_map,
@@ -305,7 +299,7 @@ class RerankingStage(BaseStage):
             stage_name=self.stage_name,
             return_output=False,
             compute_metrics=True,
-            metrics_k=metrics_k,
+            metrics_k=metrics_k or self.metrics_k,
             logger=self.logger,
             **kwargs
         )

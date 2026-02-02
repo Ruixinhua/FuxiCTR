@@ -282,9 +282,6 @@ class PrerankingStage(BaseStage):
         if self.item_features_df is None:
             raise ValueError("Item features not loaded. Call load_item_features() first.")
 
-        if metrics_k is None:
-            metrics_k = self.metrics_k
-
         _, metrics = process_and_rank_candidates(
             model=self.model,
             feature_map=self.feature_map,
@@ -293,7 +290,7 @@ class PrerankingStage(BaseStage):
             stage_name=self.stage_name,
             return_output=False,
             compute_metrics=True,
-            metrics_k=metrics_k,
+            metrics_k=metrics_k or self.metrics_k,
             logger=self.logger,
             **kwargs
         )

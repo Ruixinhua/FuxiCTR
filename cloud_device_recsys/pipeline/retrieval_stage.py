@@ -141,8 +141,7 @@ class RetrievalStage(BaseStage):
         self.model._max_gradient_norm = kwargs.get("max_gradient_norm", 10.0)
         self.model._verbose = kwargs.get("verbose", 1)
         self.model._eval_steps = 1e9
-        
-        
+
         for epoch in range(epochs):
             self.model._epoch_index = epoch
             self.logger.info(f"*** Epoch {epoch+1} ***")
@@ -259,10 +258,6 @@ class RetrievalStage(BaseStage):
         # 1. Ensure model is built and weights loaded
         if self.model is None:
             raise RuntimeError("No model found. Train model first!")
-
-        if self.best_weights_path and os.path.exists(self.best_weights_path):
-            self.model.load_weights(self.best_weights_path)
-            self.logger.info(f"Loaded best weights from {self.best_weights_path}")
 
         # 2. Build item index if needed
         if self.item_embeddings is None or self.item_ids is None:
