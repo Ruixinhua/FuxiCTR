@@ -7,9 +7,58 @@ import pandas as pd
 import torch
 from datetime import datetime
 import argparse
-from typing import Tuple, List, Dict, Any, Optional, Callable
+from typing import Tuple, List, Dict, Any, Optional
 
 from .pipeline.stage_output import CandidateSet, CandidateItem, StageOutput
+
+
+def filter_feature_map(feature_map, fg_manager, allowed_feature_groups):
+    """
+    Create a new FeatureMap with only features belonging to allowed feature groups.
+    
+    This function filters features based on their assigned feature group, keeping only
+    those that belong to the specified allowed groups. Labels and special columns 
+    are always preserved.
+    
+    Args:
+        feature_map: FuxiCTR FeatureMap object to filter
+        fg_manager: FeatureGroupManager with feature assignments
+        allowed_feature_groups: List of allowed FeatureGroup enums (e.g., [FeatureGroup.FG1, FeatureGroup.FG2])
+        
+    Returns:
+        A new FeatureMap containing only the allowed features (deep copy of original)
+    """
+    import copy
+    from collections import OrderedDict
+    
+    new_fm = copy.deepcopy(feature_map)
+    new_features = OrderedDict()
+    use_features = []
+
+    for name, spec in feature_map.features.items():
+        # Check if feature belongs to allowed groups
+        group = fg_manager.feature_assignments.get(name)
+        is_allowed = False
+        for allowed_grp in allowed_feature_groups:
+            # Compare enum members directly if possible, or string representation
+            if group == allowed_grp or str(group) == str(allowed_grp):
+                is_allowed = True
+                break
+        
+        # Always keep label, score, and special columns (needed for training/indexing)
+        if name in ['label', 'score', 'impression_id', 'group_id']:
+            is_allowed = True
+            
+        if is_allowed:
+            new_features[name] = spec
+            use_features.append(name)
+            
+    new_fm.features = new_features
+    new_fm.use_features = use_features
+    # Re-set column indices after filtering
+    new_fm.set_column_index()
+    return new_fm
+
 
 def setup_logging(output_dir) -> None:
     """Setup logging configuration"""

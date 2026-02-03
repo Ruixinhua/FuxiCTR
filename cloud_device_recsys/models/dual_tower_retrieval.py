@@ -166,20 +166,6 @@ class DualTowerRetrieval(BaseModel):
         self.compile(kwargs["optimizer"], kwargs["loss"], learning_rate)
         self.reset_parameters()
         self.model_to_device()
-    
-    def get_inputs(self, inputs, feature_source=None):
-        """
-        Override get_inputs to robustly handle extra keys in inputs 
-        that are not in the feature_map (e.g. filtered FG3 features).
-        """
-        X_dict = dict()
-        # Iterate over feature_map features instead of inputs to ensure safety
-        for feature, spec in self.feature_map.features.items():
-            if feature in inputs:
-                if feature_source and spec.get("source") != feature_source:
-                    continue
-                X_dict[feature] = inputs[feature].to(self.device)
-        return X_dict
 
     def forward(self, inputs):
         """

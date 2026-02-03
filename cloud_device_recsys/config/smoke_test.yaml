@@ -1,0 +1,131 @@
+# =============================================================================
+# Pipeline Configuration for Cloud-Device Recommendation System
+# =============================================================================
+# This file defines pipeline stages, models, and evaluation settings.
+# Dataset-specific settings are in dataset_config.yaml.
+
+# -----------------------------------------
+# Dataset Reference
+# -----------------------------------------
+dataset_id: "TaobaoOpenMCC"
+dataset_config: "./config/dataset_config.yaml"
+
+# -----------------------------------------
+# Global Settings
+# -----------------------------------------
+seed: 2024
+gpu: 0
+debug:
+  n_rows: 100  # Set to integer (e.g., 100000) for quick testing, null for full data
+
+# -----------------------------------------
+# Stage-Specific Candidates
+# Each stage uses candidates from previous stage (linked by impression_id)
+# -----------------------------------------
+candidates:
+  # Retrieval: scores all items in item_pool
+  retrieval:
+    source: "item_pool"  # Uses full item pool
+    output: "retrieval_candidates.parquet"
+    
+  # Pre-ranking: scores retrieval output
+  preranking:
+    source: "retrieval_candidates.parquet"
+    top_k: 1000  # Use top-K from retrieval
+    output: "preranking_candidates.parquet"
+    
+  # Re-ranking: scores preranking output  
+  reranking:
+    source: "preranking_candidates.parquet"
+    top_k: 100  # Use top-K from preranking
+    output: "reranking_candidates.parquet"
+
+# -----------------------------------------
+# Pipeline Stages
+# -----------------------------------------
+stages:
+  retrieval:
+    enabled: true
+    model: "DualTowerRetrieval"
+    features: ["FG1", "FG2"]
+    top_k: 1000
+    
+    model_params:
+      metrics_k: [1000, 5000, 10000]
+      monitor: "Recall@1000"
+      embedding_dim: 64
+      use_user_transformer: 1
+      user_transformer_layers: 1
+      use_item_transformer: 0
+      item_transformer_layers: 1
+      user_tower_layers: [512, 256, 128, 64]
+#      user_tower_layers: [256, 128, 64, 32]
+      item_tower_layers: [512, 256, 128, 64]
+#      item_tower_layers: [256, 128, 64, 32]
+      embedding_regularizer: 1.0e-5  # L2
+      net_regularizer: 1.0e-5        # L2
+      max_gradient_norm: 5.0         # Gradient
+      dropout: 0.1                   # Dropout for
+
+    training:
+      epochs: 1
+      batch_size: 4096
+      learning_rate: 0.001
+      optimizer: "adam"
+      
+    metrics: ["Recall"]
+
+  preranking:
+    enabled: true
+    model: "DINRanker"
+    features: ["FG1", "FG2"]
+    top_k: 100
+    use_diversity: true
+    
+    model_params:
+      metrics_k: [10, 50, 100]
+      monitor: "Recall@100"
+      embedding_dim: 32
+      hidden_layers: [128, 64]
+      
+    training:
+      epochs: 1
+      batch_size: 2048
+      learning_rate: 0.001
+      optimizer: "adam"
+      
+    metrics: ["nDCG", "Recall"]
+
+
+  reranking:
+    enabled: true
+    model: "DINRanker"
+    features: ["FG1", "FG2", "FG3"]  # Includes FG3 (device-only features)
+    top_k: 10
+    
+    model_params:
+      metrics_k: [5, 10, 50]
+      monitor: "Recall@100"
+      embedding_dim: 16
+      hidden_layers: [64, 32]
+      max_model_size_kb: 500  # Device model size constraint
+      
+    training:
+      epochs: 1
+      batch_size: 1024
+      learning_rate: 0.001
+      optimizer: "adam"
+      distillation:
+        enabled: false
+        teacher_model: null
+        temperature: 3.0
+        
+    metrics: ["nDCG", "Recall"]
+
+# -----------------------------------------
+# Output Settings
+# -----------------------------------------
+output:
+  root: "./outputs"
+  save_intermediate: true
+  save_csv: true

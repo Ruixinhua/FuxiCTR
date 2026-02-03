@@ -18,6 +18,7 @@ from ..pipeline.stage_output import StageOutput
 from ..config.feature_groups import FeatureGroupManager, FeatureGroup
 from ..models import build_model as registry_build_model
 from ..models import DeviceReranker  # For type hints
+from ..utils import filter_feature_map
 
 from fuxictr.features import FeatureMap
 
@@ -59,7 +60,8 @@ class RerankingStage(BaseStage):
             **kwargs
         )
         
-        self.feature_map = feature_map
+        # Filter feature_map to only include allowed features (FG1, FG2, FG3)
+        self.feature_map = filter_feature_map(feature_map, feature_group_manager, self.allowed_feature_groups)
         self.top_k = top_k
         self.support_distillation = support_distillation
         self.model_params = model_params

@@ -10,14 +10,10 @@ leveraging user behavior sequences with an attention mechanism.
 """
 
 import torch
-from torch import nn
-import numpy as np
-from typing import Dict, List, Optional, Any
 import logging
 
 from fuxictr.pytorch.models import BaseModel
-from fuxictr.pytorch.layers import FeatureEmbeddingDict, MLP_Block, Dice
-from fuxictr.features import FeatureMap
+from fuxictr.pytorch.layers import FeatureEmbeddingDict, MLP_Block
 
 
 class DINRanker(BaseModel):
@@ -36,10 +32,7 @@ class DINRanker(BaseModel):
                  dropout_rates=0.1,
                  batch_norm=True,
                  attention_hidden_units=[32, 16],
-                 attention_activation="Dice",
                  attention_dropout_rates=0,
-                 use_pos_emb=True,
-                 use_negsampling=True,
                  embedding_regularizer=None,
                  net_regularizer=None,
                  **kwargs):
@@ -152,9 +145,3 @@ class DINRanker(BaseModel):
         y_pred = self.output_activation(logits)
         
         return {"y_pred": y_pred}
-    
-    def score_candidates(self, user_features, candidate_features, batch_size=1024):
-        return np.zeros((1, 1))
-
-    def select_top_k(self, scores, k, diversity_rerank=False, item_categories=None):
-        return np.argsort(-scores, axis=1)[:, :k]

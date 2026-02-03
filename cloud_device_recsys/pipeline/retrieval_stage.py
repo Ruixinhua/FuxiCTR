@@ -22,6 +22,7 @@ from ..pipeline.stage_output import StageOutput, CandidateItem, CandidateSet
 from ..config.feature_groups import FeatureGroupManager
 from ..models import build_model as registry_build_model
 from ..models import DualTowerRetrieval  # For type hints
+from ..utils import filter_feature_map
 
 from fuxictr.features import FeatureMap
 
@@ -66,7 +67,7 @@ class RetrievalStage(BaseStage):
         
         # Filter feature_map to only include allowed features
         # This fixes the issue where device features (FG3) were included in User Tower
-        self.feature_map = self._filter_feature_map(feature_map, feature_group_manager)
+        self.feature_map = filter_feature_map(feature_map, feature_group_manager, self.allowed_feature_groups)
         self.top_k = top_k
         self.model_params = model_params
         self.model: Optional[DualTowerRetrieval] = None
@@ -77,36 +78,6 @@ class RetrievalStage(BaseStage):
         self.item_embeddings: Optional[np.ndarray] = None
         self.item_ids: Optional[List[Any]] = None
 
-    def _filter_feature_map(self, feature_map: FeatureMap, fg_manager: FeatureGroupManager) -> FeatureMap:
-        """Create a new FeatureMap with only allowed features"""
-        import copy
-        from collections import OrderedDict
-        
-        new_fm = copy.deepcopy(feature_map)
-        new_features = OrderedDict()
-
-        for name, spec in feature_map.features.items():
-            # Check if feature belongs to allowed groups
-            group = fg_manager.feature_assignments.get(name)
-            is_allowed = False
-            for allowed_grp in self.allowed_feature_groups:
-                # Compare enum members directly if possible, or string representation
-                if group == allowed_grp or str(group) == str(allowed_grp):
-                    is_allowed = True
-                    break
-            
-            # Use 'label' and 'score' always if present (needed for training/indexing)
-            if name in ['label', 'score', 'impression_id', 'group_id']:
-                is_allowed = True
-                
-            if is_allowed:
-                new_features[name] = spec
-                
-        new_fm.features = new_features
-        # Re-set indices
-        new_fm.set_column_index()
-        return new_fm
-    
     def build_model(self) -> DualTowerRetrieval:
         """Build and initialize the retrieval model using unified registry"""
         # Get model name from config, default to DualTowerRetrieval
