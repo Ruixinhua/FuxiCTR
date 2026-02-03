@@ -357,21 +357,12 @@ def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, logg
         epochs=preranking_config['training'].get('epochs', 5),
         batch_size=preranking_config['training'].get('batch_size', 4096),
     )
-    if train_metrics:
-        metrics.update({f"preranking_train_{k}": v for k, v in train_metrics.items()})
+    metrics.update({f"preranking_valid_{k}": v for k, v in train_metrics.items()})
 
-    # 3. Evaluate Preranking Model (List-wise if prev_output available)
-    logger.info("[Preranking] Evaluating on test set...")
-
-    test_metrics = preranking_stage.evaluate(prev_output_test)
-    if test_metrics:
-        logger.info(f"Test (Ranking): {test_metrics}")
-        metrics.update({f"preranking_test_{k}": v for k, v in test_metrics.items()})
-        
     # 4. Pipeline Processing
     logger.info("[Preranking] Processing pipeline candidates...")
-    test_output, _ = preranking_stage.process(prev_output_test, compute_metrics=False)
-    valid_output, _ = preranking_stage.process(prev_output_valid, compute_metrics=False)
+    test_output, _ = preranking_stage.process(prev_output_test, compute_metrics=True)
+    valid_output, _ = preranking_stage.process(prev_output_valid, compute_metrics=True)
     return metrics, valid_output, test_output
 
 def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, logger=None, shared_loaders=None,
@@ -407,14 +398,12 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, logger
         epochs=reranking_config['training'].get('epochs', 5),
         batch_size=reranking_config['training'].get('batch_size', 4096)
     )
-    if train_metrics:
-        metrics.update({f"reranking_train_{k}": v for k, v in train_metrics.items()})
+    metrics.update({f"reranking_valid_{k}": v for k, v in train_metrics.items()})
     # 3. Evaluate Reranking Model (List-wise if prev_output available)
     logger.info("[Reranking] Evaluating on test set...")
     test_metrics = reranking_stage.evaluate(prev_output_test)
-    if test_metrics:
-        logger.info(f"Test (Ranking): {test_metrics}")
-        metrics.update({f"reranking_test_{k}": v for k, v in test_metrics.items()})
+    logger.info(f"Test (Ranking): {test_metrics}")
+    metrics.update({f"reranking_test_{k}": v for k, v in test_metrics.items()})
     return metrics
 
 def main():

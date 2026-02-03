@@ -581,7 +581,7 @@ def process_and_rank_candidates(
     metrics_k: List[int] = None,
     top_k: int = 100,
     logger: logging.Logger = None,
-    inference_batch_size: int = 50000,
+    inference_batch_size: int = 25000,
     **kwargs
 ) -> Tuple[Optional[StageOutput], Dict[str, float]]:
     """
@@ -878,4 +878,3 @@ def process_and_rank_candidates(
             logger.warning("No valid queries with positive labels for ranking evaluation.")
     
     return output, metrics
-

@@ -31,13 +31,13 @@ candidates:
   # Pre-ranking: scores retrieval output
   preranking:
     source: "retrieval_candidates.parquet"
-    top_k: 1000  # Use top-K from retrieval
+    top_k: 100  # Use top-K from retrieval
     output: "preranking_candidates.parquet"
     
   # Re-ranking: scores preranking output  
   reranking:
     source: "preranking_candidates.parquet"
-    top_k: 100  # Use top-K from preranking
+    top_k: 10  # Use top-K from preranking
     output: "reranking_candidates.parquet"
 
 # -----------------------------------------
@@ -48,7 +48,7 @@ stages:
     enabled: true
     model: "DualTowerRetrieval"
     features: ["FG1", "FG2"]
-    top_k: 1000
+    top_k: 100
     
     model_params:
       metrics_k: [1000, 5000, 10000]
@@ -106,7 +106,7 @@ stages:
     model_params:
       metrics_k: [5, 10, 50]
       monitor: "Recall@100"
-      embedding_dim: 16
+      embedding_dim: 4
       hidden_layers: [64, 32]
       max_model_size_kb: 500  # Device model size constraint
       

@@ -212,7 +212,7 @@ class PrerankingStage(BaseStage):
             self.logger.info(f"Restored best weights from {self.best_weights_path}")
 
         # Save metrics to CSV
-        metrics_path = os.path.join(self.output_dir, "training_metrics.csv")
+        metrics_path = os.path.join(self.output_dir, "valid_metrics.csv")
         with open(metrics_path, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(['metric_name', 'value'])
