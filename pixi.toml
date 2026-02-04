@@ -1,0 +1,34 @@
+[workspace]
+authors = ["Moeta Yuko <loli@yuko.moe>"]
+channels = ["conda-forge"]
+name = "FuxiCTR"
+platforms = ["linux-64", "win-64"]
+version = "0.1.0"
+
+[feature.cuda.system-requirements]
+cuda = "12"
+[feature.cuda.dependencies]
+pytorch-gpu = ">=2.10.0,<3"
+
+[feature.cpu.dependencies]
+pytorch-cpu = ">=2.10.0,<3"
+
+[dependencies]
+python = ">=3.12.12,<3.13"
+pandas = ">=3.0.0,<4"
+pyyaml = ">=6.0.3,<7"
+h5py = ">=3.15.1,<4"
+polars = ">=1.37.1,<2"
+scikit-learn = ">=1.8.0,<2"
+tqdm = ">=4.67.3,<5"
+keras-preprocessing = ">=1.1.2,<2"
+psutil = ">=7.2.2,<8"
+pyarrow = ">=23.0.0,<24"
+numpy = "<2"
+
+[pypi-dependencies]
+fuxictr = { path = ".", editable = true }
+
+[environments]
+default = ["cuda"]
+cpu = ["cpu"]
