@@ -115,6 +115,8 @@ class BaseModel(nn.Module):
         for feature in inputs.keys():
             if feature in self.feature_map.labels:
                 continue
+            if feature not in self.feature_map.features:
+                continue
             spec = self.feature_map.features[feature]
             if spec["type"] == "meta":
                 continue
