@@ -181,55 +181,18 @@ class FeatureGroupManager:
         """Get features available in cloud (FG1 + FG2)"""
         return self.get_features_by_group(FeatureGroup.FG1) | \
                self.get_features_by_group(FeatureGroup.FG2)
-    
+
+    def get_user_features(self) -> Set[str]:
+        """Get features available on user device (FG2 + FG3)"""
+        return self.get_features_by_group(FeatureGroup.FG2) | \
+               self.get_features_by_group(FeatureGroup.FG3)
+
     def get_device_features(self) -> Set[str]:
         """Get features available on device (FG1 + FG2 + FG3)"""
         return self.get_features_by_group(FeatureGroup.FG1) | \
                self.get_features_by_group(FeatureGroup.FG2) | \
                self.get_features_by_group(FeatureGroup.FG3)
-    
-    def filter_feature_map(self, feature_map: Any, allowed_groups: List[FeatureGroup]) -> Dict:
-        """
-        Filter feature map to only include features from allowed groups.
-        
-        Args:
-            feature_map: FuxiCTR FeatureMap object or features dict
-            allowed_groups: List of feature groups to include
-            
-        Returns:
-            Filtered features dictionary
-        """
-        features = feature_map.features if hasattr(feature_map, 'features') else feature_map
-        allowed_features = set()
-        
-        for group in allowed_groups:
-            allowed_features.update(self.get_features_by_group(group))
-        
-        filtered = {name: spec for name, spec in features.items() 
-                   if name in allowed_features}
-        
-        self.logger.info(f"Filtered features: {len(features)} -> {len(filtered)}")
-        return filtered
-    
-    def validate_cloud_module(self, used_features: Set[str]) -> bool:
-        """
-        Validate that a cloud module doesn't use FG3 features.
-        
-        Args:
-            used_features: Set of feature names used by the module
-            
-        Returns:
-            True if valid (no FG3 features used), False otherwise
-        """
-        fg3_features = self.get_features_by_group(FeatureGroup.FG3)
-        leaked_features = used_features & fg3_features
-        
-        if leaked_features:
-            self.logger.error(f"Privacy violation! Cloud module uses FG3 features: {leaked_features}")
-            return False
-        
-        return True
-    
+
     def to_dict(self) -> Dict[str, str]:
         """Export assignments to dictionary"""
         return {name: group.value for name, group in self.feature_assignments.items()}

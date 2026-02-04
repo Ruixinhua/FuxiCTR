@@ -590,7 +590,7 @@ def parse_pipeline_args():
     parser = argparse.ArgumentParser(description='Cloud-Device Recommendation Pipeline')
     parser.add_argument('--config', type=str, default='./config',
                        help='Configuration directory')
-    parser.add_argument('--pipeline_id', type=str, default='default',
+    parser.add_argument('--pipeline_id', type=str, default='pipeline_config',
                        help='Pipeline configuration ID')
     parser.add_argument('--dataset_id', type=str, default=None,
                        help='Dataset ID from dataset_config.yaml')
@@ -672,7 +672,7 @@ def process_and_rank_candidates(
     
     action = []
     if return_output:
-        action.append("Ranking")
+        action.append("Processing")
     if compute_metrics:
         action.append("Evaluating")
     logger.info(f"{'/'.join(action)} {len(input_data.candidate_sets)} requests...")
@@ -719,7 +719,7 @@ def process_and_rank_candidates(
                     user_features=user_feats, candidates=[], source_stage=stage_name
                 ))
         return output, metrics
-    
+    logger.info(f"Finish collecting {total_candidates} candidates from {num_requests} requests.")
     # ========== Phase 2: Vectorized item feature lookup ==========
     all_item_ids_arr = np.array(all_item_ids)
     all_labels_arr = np.array(all_labels)
@@ -832,7 +832,7 @@ def process_and_rank_candidates(
             chunk_scores = pred_dict['y_pred'].cpu().numpy().flatten()
         
         all_scores[chunk_start:chunk_end] = chunk_scores
-    
+    logger.info("Finish model inference for all valid candidates.")
     # ========== Phase 5: Scatter results back to requests ==========
     # Create mapping from valid indices back to original global indices
     global_to_valid_idx = np.full(total_candidates, -1, dtype=np.int64)
@@ -916,8 +916,8 @@ def process_and_rank_candidates(
     
     # Finalize outputs
     if return_output:
-        logger.info(f"{stage_name.capitalize()}: {input_data.get_total_candidates()} -> "
-                    f"{output.get_total_candidates()} candidates")
+        logger.info(f"{stage_name.capitalize()}: Total {input_data.get_total_candidates()} candidates -> "
+                    f"Filtered {output.get_total_candidates()} candidates")
     
     if compute_metrics:
         if num_queries > 0:

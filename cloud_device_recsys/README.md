@@ -28,6 +28,8 @@ python cloud_device_recsys/run_pipeline.py \
   - `preranking`: Run only the preranking stage.
   - `reranking`: Run only the reranking stage.
 - `--gpu`: GPU ID to use (`-1` for CPU, `0`, `1`, etc.).
+- `--pipeline_id`: Identifier for the pipeline configuration file (default: `default`). This loads `config/<PIPELINE_ID>.yaml`.
+- `--experiment_id`: Custom identifier for the experiment run. If provided, the output directory will be `outputs/<EXPERIMENT_ID>`. If not, a timestamp-based directory is created.
 - `--save_stage_outputs`: **Important**. Use this flag to save intermediate stage outputs (validation/test predictions) to disk. This is required if you plan to run subsequent stages independently later.
 - `--prev_output_path`: Path to a directory containing outputs from a previous stage run. Use this when running `preranking` or `reranking` in isolation.
 

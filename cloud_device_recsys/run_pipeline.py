@@ -361,8 +361,9 @@ def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, logg
 
     # 4. Pipeline Processing
     logger.info("[Preranking] Processing pipeline candidates...")
-    test_output, _ = preranking_stage.process(prev_output_test, compute_metrics=True)
-    valid_output, _ = preranking_stage.process(prev_output_valid, compute_metrics=True)
+    test_output, test_metrics = preranking_stage.process(prev_output_test, compute_metrics=True)
+    metrics.update({f"preranking_test_{k}": v for k, v in test_metrics.items()})
+    valid_output, _ = preranking_stage.process(prev_output_valid, compute_metrics=False)
     return metrics, valid_output, test_output
 
 def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, logger=None, shared_loaders=None,
@@ -412,20 +413,20 @@ def main():
     args = parse_pipeline_args()    
     # Construct unique output directory for this run
     run_output_base = args.output_dir # e.g. ./outputs
+    logger = logging.getLogger('PipelineRunner')
     if args.experiment_id:
+        logger.info(f"Experiment ID: {args.experiment_id}")
         run_output_dir = f"{run_output_base}/{args.experiment_id}"
     else:
-        run_output_dir = os.path.join(run_output_base, f"exp_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        run_output_dir = os.path.join(run_output_base, f"{args.pipeline_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     os.makedirs(run_output_dir, exist_ok=True)
     stage_output_dir = f"{run_output_dir}/stage_outputs"
 
     # Setup logging to the unique output directory
     setup_logging(run_output_dir)
-    logger = logging.getLogger('PipelineRunner')
-    
+
     logger.info(f"Starting pipeline with mode: {args.mode}")
     logger.info(f"Configuration: {args.config}, Pipeline: {args.pipeline_id}")
-    logger.info(f"Experiment ID: {args.experiment_id}")
     logger.info(f"Output Directory: {run_output_dir}")
     
     seed_everything(args.seed)

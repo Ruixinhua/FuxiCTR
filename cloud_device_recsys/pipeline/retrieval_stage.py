@@ -285,6 +285,8 @@ class RetrievalStage(BaseStage):
                             for feat_name, feat_val in batch_dict.items():
                                 if feat_name in [item_id_col, impression_id_col, 'label']:
                                     continue
+                                if feat_name not in self.feature_group_manager.get_user_features():
+                                    continue
                                 val = feat_val[i]
                                 if isinstance(val, torch.Tensor):
                                     val = val.cpu().numpy()
