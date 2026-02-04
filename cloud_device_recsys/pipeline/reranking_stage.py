@@ -61,7 +61,9 @@ class RerankingStage(BaseStage):
         )
         
         # Filter feature_map to only include allowed features (FG1, FG2, FG3)
-        self.feature_map = filter_feature_map(feature_map, feature_group_manager, self.allowed_feature_groups)
+        self.feature_map = filter_feature_map(feature_map, feature_group_manager, self.allowed_feature_groups,
+                                              use_feature_encoder=model_params.get("use_feature_encoder", False))
+        self.feature_map.default_emb_dim = model_params['embedding_dim']
         self.top_k = top_k
         self.support_distillation = support_distillation
         self.model_params = model_params

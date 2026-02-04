@@ -77,7 +77,7 @@ stages:
 
   preranking:
     enabled: true
-    model: "DINRanker"
+    model: "DIN"
     features: ["FG1", "FG2"]
     top_k: 100
     use_diversity: true
@@ -85,8 +85,14 @@ stages:
     model_params:
       metrics_k: [10, 50, 100]
       monitor: "Recall@100"
-      embedding_dim: 32
-      hidden_layers: [128, 64]
+      embedding_dim: 10
+      dnn_hidden_units: [128, 64]
+      din_target_field:
+        - [cand_item_id, cand_item_pos, cand_item_pagenum, cand_item_sex, cand_item_price_level, cand_item_age_level, cand_item_bc_type]
+      din_sequence_field:
+        - [ipv_item_id_seq, ipv_item_pos_seq, ipv_item_pagenum_seq, ipv_item_sex_seq, ipv_item_price_level_seq, ipv_item_age_level_seq, ipv_item_bc_type_seq]
+      embedding_regularizer: 1.0e-5  # L2
+      net_regularizer: 1.0e-5        # L2
       
     training:
       epochs: 1

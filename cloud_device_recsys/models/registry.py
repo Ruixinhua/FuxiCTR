@@ -74,17 +74,38 @@ def build_model(
     Raises:
         ValueError: If model_name is not in registry
     """
-    # Ensure registry is populated
-    if not MODEL_REGISTRY:
-        MODEL_REGISTRY.update(_lazy_import_models())
+    model_cls = None
     
-    if model_name not in MODEL_REGISTRY:
+    # 1. Try to load from model_zoo first
+    try:
+        import model_zoo
+        if hasattr(model_zoo, model_name):
+            # model_zoo.<ModelName>.src.<ModelName>
+            # But based on __init__.py import, it seems model_zoo exports the class directly in some cases
+            # or the module. Let's inspect model_zoo imports.
+            # From model_zoo/__init__.py: from .DIN.src import DIN
+            # So model_zoo.DIN is the class.
+            model_cls = getattr(model_zoo, model_name)
+            logger.info(f"Found model '{model_name}' in model_zoo.")
+    except ImportError:
+        pass
+        
+    # 2. If not in model_zoo, try local registry
+    if model_cls is None:
+        if not MODEL_REGISTRY:
+            MODEL_REGISTRY.update(_lazy_import_models())
+            
+        if model_name in MODEL_REGISTRY:
+            model_cls = MODEL_REGISTRY[model_name]
+            logger.info(f"Found model '{model_name}' in local registry.")
+
+    if model_cls is None:
         available = list(MODEL_REGISTRY.keys())
+        if 'model_zoo' in locals():
+            available += [m for m in dir(model_zoo) if not m.startswith('__')]
         raise ValueError(
-            f"Unknown model: '{model_name}'. Available models: {available}"
+            f"Unknown model: '{model_name}'."
         )
-    
-    model_cls = MODEL_REGISTRY[model_name]
     
     # Prepare default parameters
     default_params = {
@@ -101,6 +122,7 @@ def build_model(
     
     # Merge: defaults < model_params < kwargs
     params = {**default_params, **model_params, **kwargs}
+    model_params = params
     
     # Remove 'model' key if present (it's not a model parameter)
     params.pop('model', None)

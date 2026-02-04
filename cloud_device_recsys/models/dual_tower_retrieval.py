@@ -95,7 +95,7 @@ class DualTowerRetrieval(BaseModel):
             user_fields = 0
             item_fields = 0
             for name, spec in feature_map.features.items():
-                if any(p in name.lower() for p in ['user', 'his', 'seq', 'click', 'exposure']):
+                if any(p in name.lower() for p in ['user', 'his', 'seq', 'click', 'exp', 'ipv']):
                     user_fields += 1
                 else:
                     item_fields += 1

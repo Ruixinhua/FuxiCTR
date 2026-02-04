@@ -12,7 +12,7 @@ from typing import Tuple, List, Dict, Any, Optional
 from .pipeline.stage_output import CandidateSet, CandidateItem, StageOutput
 
 
-def filter_feature_map(feature_map, fg_manager, allowed_feature_groups):
+def filter_feature_map(feature_map, fg_manager, allowed_feature_groups, use_feature_encoder=False):
     """
     Create a new FeatureMap with only features belonging to allowed feature groups.
     
@@ -24,7 +24,7 @@ def filter_feature_map(feature_map, fg_manager, allowed_feature_groups):
         feature_map: FuxiCTR FeatureMap object to filter
         fg_manager: FeatureGroupManager with feature assignments
         allowed_feature_groups: List of allowed FeatureGroup enums (e.g., [FeatureGroup.FG1, FeatureGroup.FG2])
-        
+        use_feature_encoder: If true, use feature encoder
     Returns:
         A new FeatureMap containing only the allowed features (deep copy of original)
     """
@@ -46,10 +46,12 @@ def filter_feature_map(feature_map, fg_manager, allowed_feature_groups):
                 break
         
         # Always keep label, score, and special columns (needed for training/indexing)
-        if name in ['label', 'score', 'impression_id', 'group_id']:
+        if name in ['label', 'impression_id', 'group_id', 'click', 'clk']:
             is_allowed = True
             
         if is_allowed:
+            if not use_feature_encoder:
+                spec['feature_encoder'] = None
             new_features[name] = spec
             use_features.append(name)
             
@@ -630,7 +632,7 @@ def process_and_rank_candidates(
     metrics_k: List[int] = None,
     top_k: int = 100,
     logger: logging.Logger = None,
-    inference_batch_size: int = 25000,
+    inference_batch_size: int = 50000,
     **kwargs
 ) -> Tuple[Optional[StageOutput], Dict[str, float]]:
     """
@@ -696,10 +698,8 @@ def process_and_rank_candidates(
     
     for cs in input_data.candidate_sets:
         if not cs.candidates:
-            request_offsets.append(request_offsets[-1])
-            request_metadata.append((cs.request_id, cs.user_id, cs.user_features, []))
-            continue
-            
+            raise ValueError(f"Please ensure that input StageOutput contains candidates for all requests. ")
+
         item_ids = [c.item_id for c in cs.candidates]
         labels = [c.label if c.label is not None else 0 for c in cs.candidates]
         
@@ -741,97 +741,125 @@ def process_and_rank_candidates(
                 ))
         return output, metrics
     
-    # ========== Phase 3: Build user features for all valid items ==========
-    # Map global valid indices to request indices for user feature replication
+    # ========== Phase 3: Prepare user feature metadata (Deferred to Phase 4) ==========
+    # User features are now built lazily per chunk in Phase 4 to reduce peak memory
     valid_global_indices = np.where(valid_mask)[0]
     num_valid = len(valid_global_indices)
-    
-    # Find which request each valid item belongs to
     request_idx_for_valid = np.searchsorted(request_offsets[1:], valid_global_indices, side='right')
+    user_feature_names = [k for k in request_metadata[0][2].keys()]
     
-    # Build user feature batch by replicating user features
-    user_feature_names = [k for k in request_metadata[0][2].keys()] if request_metadata and request_metadata[0][2] else []
-    user_feature_batch = {}
-    
-    for feat_name in user_feature_names:
-        # Collect all user feature values
-        user_vals = []
-        for req_idx in request_idx_for_valid:
-            val = request_metadata[req_idx][2].get(feat_name, 0)
-            user_vals.append(val)
-        
-        if not user_vals:
-            continue
-            
-        # Check if sequence feature (2D array expected)
-        sample_val = user_vals[0]
-        if isinstance(sample_val, np.ndarray) and sample_val.ndim > 0:
-            # Stack sequence features
-            user_feature_batch[feat_name] = np.stack(user_vals)
-        else:
-            # Scalar features - ensure proper numeric dtype
-            arr = np.array(user_vals)
-            if arr.dtype == np.object_:
-                # Try to convert to float, fallback to int
-                try:
-                    arr = arr.astype(np.float32)
-                except (ValueError, TypeError):
-                    arr = arr.astype(np.int64)
-            user_feature_batch[feat_name] = arr
-    
-    # ========== Phase 4: Chunked model inference ==========
+    # ========== Phase 4: Chunked model inference (OPTIMIZED) ==========
     all_scores = np.zeros(num_valid, dtype=np.float32)
+    
+    # Optimization 1: Pre-compute column type info to avoid repeated dtype detection
+    col_type_info = {}  # {col: ('sequence'|'scalar'|'direct', target_dtype)}
+    for col in item_feature_cols:
+        sample_values = item_features_lookup[col].head(1).values
+        if len(sample_values) == 0:
+            col_type_info[col] = ('direct', np.float32)
+            continue
+        if sample_values.dtype == np.object_:
+            sample = sample_values[0]
+            if isinstance(sample, (np.ndarray, list)) and hasattr(sample, '__len__') and len(sample) > 1:
+                col_type_info[col] = ('sequence', None)
+            else:
+                col_type_info[col] = ('scalar', np.float32)
+        else:
+            col_type_info[col] = ('direct', sample_values.dtype)
+    
+    # Optimization 2: Pre-compute user feature type info
+    user_feat_is_sequence = {}
+    if user_feature_names and len(request_idx_for_valid) > 0:
+        sample_req_idx = request_idx_for_valid[0]
+        for feat_name in user_feature_names:
+            sample_val = request_metadata[sample_req_idx][2].get(feat_name, 0)
+            user_feat_is_sequence[feat_name] = isinstance(sample_val, np.ndarray) and sample_val.ndim > 0
+    
+    # Check for optional FP16 inference
+    use_fp16 = kwargs.get('use_fp16', True) and device.type == 'cuda'
     
     for chunk_start in range(0, num_valid, inference_batch_size):
         chunk_end = min(chunk_start + inference_batch_size, num_valid)
-        
-        # Build batch dict for this chunk
+        # Optimization 3: Build user features lazily per chunk (reduces peak memory)
+        chunk_req_indices = request_idx_for_valid[chunk_start:chunk_end]
         batch_dict = {}
         
-        # User features for this chunk
         for feat_name in user_feature_names:
-            batch_dict[feat_name] = user_feature_batch[feat_name][chunk_start:chunk_end]
+            is_seq = user_feat_is_sequence.get(feat_name, False)
+            if is_seq:
+                user_vals = [request_metadata[req_idx][2].get(feat_name, np.zeros(1)) for req_idx in chunk_req_indices]
+                batch_dict[feat_name] = np.stack(user_vals)
+            else:
+                user_vals = [request_metadata[req_idx][2].get(feat_name, 0) for req_idx in chunk_req_indices]
+                arr = np.array(user_vals)
+                if arr.dtype == np.object_:
+                    try:
+                        arr = arr.astype(np.float32)
+                    except (ValueError, TypeError):
+                        arr = arr.astype(np.int64)
+                batch_dict[feat_name] = arr
         
-        # Item features for this chunk
+        # Item features for this chunk (use pre-computed type info)
         chunk_item_features = item_features_lookup.iloc[chunk_start:chunk_end]
         for col in item_feature_cols:
+            col_type, target_dtype = col_type_info[col]
             col_values = chunk_item_features[col].values
             
-            # Check if this is a sequence feature (contains arrays)
-            if col_values.dtype == np.object_:
-                sample = col_values[0] if len(col_values) > 0 else None
-                if isinstance(sample, (np.ndarray, list)) and hasattr(sample, '__len__') and len(sample) > 1:
-                    # This is a sequence feature - stack the arrays
+            if col_type == 'sequence':
+                try:
+                    batch_dict[col] = np.stack(col_values)
+                except ValueError:
+                    batch_dict[col] = np.array([np.array(x) for x in col_values])
+            elif col_type == 'scalar':
+                try:
+                    batch_dict[col] = col_values.astype(np.float32)
+                except (ValueError, TypeError):
                     try:
-                        batch_dict[col] = np.stack(col_values)
-                    except ValueError:
-                        # Fallback: convert to list first to handle varying lengths
-                        batch_dict[col] = np.array([np.array(x) for x in col_values])
-                else:
-                    # Scalar values stored as objects - convert to proper dtype
-                    try:
-                        batch_dict[col] = col_values.astype(np.float32)
+                        batch_dict[col] = col_values.astype(np.int64)
                     except (ValueError, TypeError):
-                        try:
-                            batch_dict[col] = col_values.astype(np.int64)
-                        except (ValueError, TypeError):
-                            batch_dict[col] = np.array([int(x) if x is not None else 0 for x in col_values], dtype=np.int64)
-            else:
+                        batch_dict[col] = np.array([int(x) if x is not None else 0 for x in col_values], dtype=np.int64)
+            else:  # 'direct'
                 batch_dict[col] = col_values
         
         # Add item_id column if needed
         if item_id_col not in batch_dict and item_id_col in feature_map.features:
             batch_dict[item_id_col] = valid_item_ids[chunk_start:chunk_end]
         
-        # Convert to tensors
-        tensor_batch = batch_to_tensors(batch_dict, feature_map, device)
+        # Optimization 4: Optimized tensor conversion (use from_numpy for contiguous arrays)
+        tensor_batch = {}
+        for k, v in batch_dict.items():
+            if k not in feature_map.features:
+                continue
+            ftype = feature_map.features[k]['type']
+            
+            # Ensure array is contiguous and use from_numpy to avoid copy
+            if not isinstance(v, np.ndarray):
+                v = np.array(v)
+            if not v.flags['C_CONTIGUOUS']:
+                v = np.ascontiguousarray(v)
+            
+            if ftype == 'sequence' or ftype == 'categorical':
+                v_typed = v.astype(np.int64) if v.dtype != np.int64 else v
+                tensor_batch[k] = torch.from_numpy(v_typed).to(device, non_blocking=True)
+            else:
+                v_typed = v.astype(np.float32) if v.dtype != np.float32 else v
+                tensor_batch[k] = torch.from_numpy(v_typed).to(device, non_blocking=True)
         
-        # Model inference
+        # Model inference with optional FP16
         with torch.no_grad():
-            pred_dict = model(tensor_batch)
-            chunk_scores = pred_dict['y_pred'].cpu().numpy().flatten()
+            if use_fp16:
+                with torch.autocast(device_type='cuda', dtype=torch.float16):
+                    pred_dict = model(tensor_batch)
+            else:
+                pred_dict = model(tensor_batch)
+            # Optimization 5: Use non_blocking for async transfer
+            chunk_scores = pred_dict['y_pred'].detach().cpu().numpy().flatten()
         
         all_scores[chunk_start:chunk_end] = chunk_scores
+        
+        # Clean up to free memory
+        del batch_dict, tensor_batch
+        
     logger.info("Finish model inference for all valid candidates.")
     # ========== Phase 5: Scatter results back to requests ==========
     # Create mapping from valid indices back to original global indices

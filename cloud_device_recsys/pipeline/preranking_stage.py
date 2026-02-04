@@ -62,7 +62,9 @@ class PrerankingStage(BaseStage):
         )
         
         # Filter feature_map to only include allowed features (FG1, FG2)
-        self.feature_map = filter_feature_map(feature_map, feature_group_manager, self.allowed_feature_groups)
+        self.feature_map = filter_feature_map(feature_map, feature_group_manager, self.allowed_feature_groups,
+                                              use_feature_encoder=model_params.get("use_feature_encoder", False))
+        self.feature_map.default_emb_dim = model_params['embedding_dim']
         self.top_k = top_k
         self.use_diversity = use_diversity
         self.diversity_weight = diversity_weight

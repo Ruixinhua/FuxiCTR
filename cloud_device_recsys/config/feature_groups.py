@@ -22,6 +22,7 @@ class FeatureGroup(Enum):
     FG1 = "non_personalized"      # Item + Context features
     FG2 = "cloud_personalized"    # User behavioral (low privacy)
     FG3 = "device_only"           # Strong privacy features
+    Drop = "drop"                 # Feature to be dropped
     
     @classmethod
     def from_string(cls, s: str) -> 'FeatureGroup':
@@ -29,7 +30,7 @@ class FeatureGroup(Enum):
         mapping = {
             'FG1': cls.FG1, 'fg1': cls.FG1, 'non_personalized': cls.FG1,
             'FG2': cls.FG2, 'fg2': cls.FG2, 'cloud_personalized': cls.FG2,
-            'FG3': cls.FG3, 'fg3': cls.FG3, 'device_only': cls.FG3,
+            'FG3': cls.FG3, 'fg3': cls.FG3, 'device_only': cls.FG3, 'drop': cls.Drop
         }
         if s in mapping:
             return mapping[s]

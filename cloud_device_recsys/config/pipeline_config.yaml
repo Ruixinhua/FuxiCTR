@@ -77,7 +77,7 @@ stages:
 
   preranking:
     enabled: true
-    model: "DINRanker"
+    model: "DIN"
     features: ["FG1", "FG2"]
     top_k: 100
     use_diversity: true
@@ -86,7 +86,9 @@ stages:
       metrics_k: [10, 50, 100]
       monitor: "Recall@100"
       embedding_dim: 32
-      hidden_layers: [128, 64]
+      dnn_hidden_units: [128, 64]
+      din_target_field: "cand_item_id"
+      din_sequence_field: "ipv_item_id_seq"
       
     training:
       epochs: 10
@@ -99,7 +101,7 @@ stages:
 
   reranking:
     enabled: true
-    model: "DINRanker"
+    model: "DIN"
     features: ["FG1", "FG2", "FG3"]  # Includes FG3 (device-only features)
     top_k: 10
     
@@ -107,7 +109,9 @@ stages:
       metrics_k: [5, 10, 50]
       monitor: "Recall@100"
       embedding_dim: 4
-      hidden_layers: [64, 32]
+      dnn_hidden_units: [64, 32]
+      din_target_field: "cand_item_id"
+      din_sequence_field: "ipv_item_id_seq"
       max_model_size_kb: 500  # Device model size constraint
       
     training:

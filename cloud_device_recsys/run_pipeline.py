@@ -510,7 +510,7 @@ def main():
         logger.warning(f"Feature map not found at {feature_map_json}")
         logger.info("Please run data preprocessing first")
         return
-    
+
     # Build feature group manager
     fg_manager = build_feature_group_manager(pipeline_config)
     # Pass dataset_config to use explicit feature group definitions
