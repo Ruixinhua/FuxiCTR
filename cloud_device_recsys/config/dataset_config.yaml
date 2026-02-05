@@ -63,7 +63,7 @@ TaobaoOpenMCC:
     - name: score
       type: numeric
       dtype: float
-      feature_group: FG2
+      feature_group: FG1
 
     # FG2: User Behavioral Sequences (Cloud-personalized)
     - name: [exp_item_id_seq, exp_item_pos_seq, exp_item_pagenum_seq,

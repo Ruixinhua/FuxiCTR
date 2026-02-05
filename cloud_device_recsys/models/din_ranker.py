@@ -14,7 +14,6 @@ import logging
 
 from fuxictr.pytorch.models import BaseModel
 from fuxictr.pytorch.layers import FeatureEmbeddingDict, MLP_Block
-from cloud_device_recsys.config.feature_groups import FeatureGroup
 
 
 class DINRanker(BaseModel):
