@@ -14,6 +14,7 @@ import logging
 
 from fuxictr.pytorch.models import BaseModel
 from fuxictr.pytorch.layers import FeatureEmbeddingDict, MLP_Block
+from cloud_device_recsys.config.feature_groups import FeatureGroup
 
 
 class DINRanker(BaseModel):
@@ -35,6 +36,9 @@ class DINRanker(BaseModel):
                  attention_dropout_rates=0,
                  embedding_regularizer=None,
                  net_regularizer=None,
+                 use_diversity_loss=False,
+                 diversity_lambda=0.7,
+                 diversity_theta=0.7,
                  **kwargs):
         super(DINRanker, self).__init__(
             feature_map,
@@ -45,6 +49,11 @@ class DINRanker(BaseModel):
             **kwargs
         )
         self.logger = logging.getLogger(self.__class__.__name__)
+        
+        # --- Diversity Loss Parameters ---
+        self.use_diversity_loss = use_diversity_loss
+        self.diversity_lambda = diversity_lambda
+        self.diversity_theta = diversity_theta
         
         # --- Feature Embedding Layer ---
         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
@@ -64,6 +73,7 @@ class DINRanker(BaseModel):
         
         if 'cand_item_id' not in self.target_item_features and 'cand_item_id' in feature_map.features:
             self.target_item_features.append('cand_item_id')
+        self.logger.info(self.target_item_features)
 
         self.target_item_attention_key = self.target_item_features[0] 
         
@@ -108,6 +118,26 @@ class DINRanker(BaseModel):
     def forward(self, inputs):
         X = self.get_inputs(inputs)
         feat_emb_dict = self.embedding_layer(X)
+
+        # --- Calculate Inner Product Matrix ---
+        item_feature_embs = []
+        for feature_name in self.target_item_features:
+            if feature_name in feat_emb_dict:
+                item_feature_embs.append(feat_emb_dict[feature_name])
+
+        inner_product_matrix = None
+        if self.use_diversity_loss and item_feature_embs:
+            # Concatenate features to form a single vector for each item
+            item_vectors = torch.cat(item_feature_embs, dim=-1)
+            self.logger.info("use_diversity_loss is True")
+
+            # Calculate the inner product matrix (item-item similarity)
+            item_vectors_normalized = torch.nn.functional.normalize(item_vectors, p=2, dim=1)
+            cosine_similarity = torch.matmul(item_vectors_normalized, item_vectors_normalized.t())
+            
+            # Apply the formula (1 + Ii . Ij) / 2
+            inner_product_matrix = (1 + cosine_similarity) / 2
+        # --- End of Inner Product Calculation ---
         
         target_item_emb = feat_emb_dict[self.target_item_attention_key] 
         
@@ -144,4 +174,47 @@ class DINRanker(BaseModel):
         logits = self.mlp(final_mlp_input)
         y_pred = self.output_activation(logits)
         
-        return {"y_pred": y_pred}
+        return_dict = {"y_pred": y_pred}
+        if inner_product_matrix is not None:
+            return_dict["inner_product_matrix"] = inner_product_matrix
+        return return_dict
+
+    def compute_loss(self, return_dict, y_true):
+        """
+        Compute loss with optional diversity regularization.
+
+        Args:
+            return_dict: Output from forward pass
+            y_true: Ground truth labels
+
+        Returns:
+            Total loss
+        """
+        # Base loss (BCE or other) + regularization
+        base_loss = self.loss_fn(return_dict["y_pred"], y_true, reduction='mean')
+        reg_loss = self.regularization_loss()
+
+        if not self.use_diversity_loss or "inner_product_matrix" not in return_dict:
+            self.logger.info(f"Base Loss: {base_loss}, Reg Loss: {reg_loss}")
+            return base_loss + reg_loss
+
+        # Retrieve predictions and similarity matrix
+        y_pred = return_dict["y_pred"]
+        similarity_matrix = return_dict["inner_product_matrix"]
+
+        # Add a small identity matrix for numerical stability before logdet
+        identity = torch.eye(similarity_matrix.size(0), device=similarity_matrix.device) * 1e-6
+        log_det_similarity = torch.logdet(similarity_matrix + identity)
+
+        # Sum of predicted scores
+        r_ui_sum = torch.sum(y_pred)
+
+        # Diversity Loss Calculation
+        diversity_loss = self.diversity_theta * r_ui_sum + (1 - self.diversity_theta) * log_det_similarity
+
+        self.logger.info(f"Base Loss: {base_loss}, Reg Loss: {reg_loss}, Diversity Loss: {diversity_loss}")
+        
+        # Final Loss
+        total_loss = base_loss + reg_loss - self.diversity_lambda * diversity_loss
+
+        return total_loss
