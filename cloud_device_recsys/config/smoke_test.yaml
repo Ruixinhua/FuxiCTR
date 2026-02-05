@@ -77,14 +77,14 @@ stages:
 
   preranking:
     enabled: true
-    model: "DIN"
+    model: "DINRanker"
     features: ["FG1", "FG2"]
     top_k: 100
-    use_diversity: true
     
     model_params:
       metrics_k: [10, 50, 100]
       monitor: "Recall@100"
+      use_diversity_loss: true
       embedding_dim: 10
       dnn_hidden_units: [128, 64]
       din_target_field:
