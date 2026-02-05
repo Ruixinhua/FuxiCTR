@@ -11,13 +11,13 @@ TaobaoOpenMCC:
 #  raw_data_root: "/scratch/dliu2/FuxiCTR/datasets/TaobaoOpenMCC/with_item_id"
   raw_data_root: "/Users/dairui/PycharmProjects/FuxiCTR/datasets/raw_data/TaobaoOpenMCC/with_item_id"
   raw_data_format: "csv"
-  raw_files: [train, valid, test, cand_item_list, item_profile]  # Auto-appends format extension
+  raw_files: [train, valid, test]  # Auto-appends format extension
   
   # -----------------------------------------
   # Processed Data Settings (Server paths)
   # -----------------------------------------
-#  processed_data_root: "/scratch/dliu2/FuxiCTR/data/TaobaoOpenMCC"
-  processed_data_root: "/Users/dairui/PycharmProjects/FuxiCTR/data/TaobaoOpenMCC"
+  processed_data_root: "/scratch/dliu2/FuxiCTR/processed/TaobaoOpenMCC"
+#  processed_data_root: "/Users/dairui/PycharmProjects/FuxiCTR/data/TaobaoOpenMCC"
   processed_data_format: "parquet"
   # Default outputs: train.parquet, valid.parquet, test.parquet, feature_map.json, feature_vocab.json
   
@@ -58,7 +58,7 @@ TaobaoOpenMCC:
       dtype: int
       max_len: 50
       splitter: ","
-      feature_group: FG2
+      feature_group: drop
       share_embedding_map:
         exp_item_id_seq: cand_item_id
         exp_item_pos_seq: cand_item_pos
@@ -103,10 +103,7 @@ TaobaoOpenMCC:
   # Item Pool Configuration
   # -----------------------------------------
   item_pool:
-    file: "cand_item_list"  # References raw_files
-    id_col: "item_id"
-    feature_cols: [item_id, item_pos, item_pagenum, item_sex, 
-                   item_price_level, item_age_level, item_bc_type]
+    file: "cand_items_test"  # References raw_files
 
 # =============================================================================
 # TaobaoAd Dataset
@@ -117,12 +114,13 @@ TaobaoAd:
   # -----------------------------------------
   raw_data_root: "/scratch/dliu2/FuxiCTR/datasets/TaobaoAd/with_item_id"
   raw_data_format: "csv"
-  raw_files: [train, valid, test, cand_item_list]
+  raw_files: [train, valid, test]
   
   # -----------------------------------------
   # Processed Data Settings
   # -----------------------------------------
-  processed_data_root: "/scratch/dliu2/FuxiCTR/data/TaobaoAd"
+#  processed_data_root: "/scratch/dliu2/FuxiCTR/processed/TaobaoAd"
+  processed_data_root: "/Users/dairui/PycharmProjects/FuxiCTR/processed/TaobaoAd"
   processed_data_format: "parquet"
   
   # -----------------------------------------
@@ -201,6 +199,4 @@ TaobaoAd:
   # Item Pool Configuration
   # -----------------------------------------
   item_pool:
-    file: "cand_item_list"
-    id_col: "adgroup_id"
-    feature_cols: [adgroup_id, cate_id, campaign_id, customer, brand, pid]
+    file: "cand_items_test"

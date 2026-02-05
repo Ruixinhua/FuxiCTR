@@ -48,6 +48,11 @@ class ParquetDataset(Dataset):
         all_cols = list(self.feature_map.features.keys()) + self.feature_map.labels
         data_arrays = []
         for col in all_cols:
+            if col not in df.columns:
+                if col == "impression_id" or col =="index":
+                    array = np.array(df.index.tolist())
+                    data_arrays.append(array)
+                continue
             if df[col].dtype == "object":
                 array = np.array(df[col].to_list())
             else:

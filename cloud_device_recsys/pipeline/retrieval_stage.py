@@ -67,8 +67,10 @@ class RetrievalStage(BaseStage):
         
         # Filter feature_map to only include allowed features
         # This fixes the issue where device features (FG3) were included in User Tower
+        use_feature_encoder = model_params.get("use_feature_encoder", False)
         self.feature_map = filter_feature_map(feature_map, feature_group_manager, self.allowed_feature_groups,
-                                              use_feature_encoder=model_params.get("use_feature_encoder", False))
+                                              use_feature_encoder=use_feature_encoder)
+        self.logger.info(f"Use feature encoder: {use_feature_encoder}")
         self.top_k = top_k
         self.model_params = model_params
         self.model: Optional[DualTowerRetrieval] = None

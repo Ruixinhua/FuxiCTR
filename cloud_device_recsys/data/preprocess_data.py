@@ -167,8 +167,7 @@ def apply_vocab_mapping(path: str, vocab: dict, feature_cols: list, logger: logg
     Overwrite the file at path.
     """
     import pandas as pd
-    import numpy as np
-    
+
     if not os.path.exists(path):
         return
         
@@ -503,17 +502,8 @@ def main():
             logger.info(f"Renaming item pool columns: {rename_map}")
             item_pool_df = item_pool_df.rename(rename_map)
             
-        # Map item_pool columns to indices using vocab
-        # This is critical because item_pool contains Raw IDs (from CSV)
-        # But pipeline expects Mapped Indices (consistent with train.parquet)
         if vocab:
             for col_name in item_pool_df.columns:
-                # Check if this column has a vocabulary
-                # Note: raw item_id in vocab is 'item_id'? 
-                # We renamed 'item_id' to 'cand_item_id'.
-                # vocab was built from 'train_df'.
-                # train_df columns: 'cand_item_id' etc.
-                # So vocab keys should match updated item_pool names.
                 if col_name in vocab:
                     logger.info(f"Mapping column {col_name} using vocab")
                     mapping = vocab[col_name]

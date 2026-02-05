@@ -34,7 +34,7 @@ def filter_feature_map(feature_map, fg_manager, allowed_feature_groups, use_feat
     new_fm = copy.deepcopy(feature_map)
     new_features = OrderedDict()
     use_features = []
-
+    user_features = fg_manager.get_user_features()
     for name, spec in feature_map.features.items():
         # Check if feature belongs to allowed groups
         group = fg_manager.feature_assignments.get(name)
@@ -43,10 +43,14 @@ def filter_feature_map(feature_map, fg_manager, allowed_feature_groups, use_feat
             # Compare enum members directly if possible, or string representation
             if group == allowed_grp or str(group) == str(allowed_grp):
                 is_allowed = True
+                if name in user_features:
+                    spec['source'] = 'user'
+                else:
+                    spec['source'] = 'item'
                 break
-        
+        impression_col = feature_map.dataset_config.get('impression_id_col', 'impression_id')
         # Always keep label, score, and special columns (needed for training/indexing)
-        if name in ['label', 'impression_id', 'group_id', 'click', 'clk']:
+        if name in [impression_col, 'group_id', 'click', 'clk', 'label'] + feature_map.labels:
             is_allowed = True
             
         if is_allowed:
@@ -181,9 +185,6 @@ def get_data_paths(dataset_config: dict, pipeline_config: dict, logger):
     # Item pool path
     item_pool_config = dataset_config.get('item_pool', {})
     item_pool_file = item_pool_config.get('file', 'cand_item_list')
-    # if debug_n_rows:
-    #     item_pool_path = os.path.join(debug_dir, f'{item_pool_file}.parquet')
-    # else:
     item_pool_path = os.path.join(dataset_config.get('processed_data_root', data_dir), f'{item_pool_file}.parquet')
     
     return {

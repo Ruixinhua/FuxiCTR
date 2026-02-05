@@ -153,13 +153,23 @@ def _prepare_stage_data_loaders(feature_map, stage_config: dict, paths: dict,
     result = {}
     
     if create_train:
+        train_fm = copy.deepcopy(feature_map)
+        if "impression_id" in train_fm.labels:
+            train_fm.labels.remove("impression_id")
         result['train_loader'] = RankDataLoader(
-            feature_map=feature_map,
+            feature_map=train_fm,
             stage='train',
             train_data=paths['train_path'],
-            valid_data=paths['valid_path'],
             batch_size=batch_size,
             shuffle=shuffle_train,
+            data_format=data_format
+        )
+        result['valid_loader'] = RankDataLoader(
+            feature_map=feature_map,
+            stage='test',
+            test_data=paths['valid_path'],
+            batch_size=batch_size,
+            shuffle=False,
             data_format=data_format
         )
     
@@ -226,6 +236,7 @@ def prepare_shared_data_loaders(feature_map, dataset_config, pipeline_config, fg
     return {
         'paths': paths,
         'train_loader': loaders['train_loader'],
+        'valid_loader': loaders['valid_loader'],
         'test_loader': loaders['test_loader'],
         'item_loader': loaders['item_loader'],
     }
@@ -247,13 +258,10 @@ def _create_item_feature_map(feature_map, fg_manager, dataset_config):
     
     item_fm = copy.deepcopy(feature_map)
     item_fm.features = {k: v for k, v in item_fm.features.items() if k in item_feature_names}
-    
-    # Remove impression_id from labels if present, as item pool doesn't have it
-    impression_id_col = dataset_config.get('impression_id_col', 'impression_id')
-    if impression_id_col in item_fm.labels:
-        item_fm.labels.remove(impression_id_col)
+    item_fm.labels = []
+
     item_fm.set_column_index()
-    
+    item_fm.column_index = {k: v for k, v in item_fm.column_index.items() if k in item_feature_names}
     return item_fm
 
 def run_retrieval_stage(retrieval_stage, pipeline_config, dataset_config, fg_manager, logger=None, shared_loaders=None):
@@ -265,6 +273,7 @@ def run_retrieval_stage(retrieval_stage, pipeline_config, dataset_config, fg_man
     # 1. Prepare data loaders (use shared if provided, otherwise create them)
     if shared_loaders is not None:
         train_loader = shared_loaders['train_loader']
+        valid_loader = shared_loaders['valid_loader']
         item_loader = shared_loaders['item_loader']
         test_loader = shared_loaders['test_loader']
     else:
@@ -277,12 +286,14 @@ def run_retrieval_stage(retrieval_stage, pipeline_config, dataset_config, fg_man
             logger=logger
         )
         train_loader = loaders['train_loader']
+        valid_loader = loaders['valid_loader']
         item_loader = loaders['item_loader']
         test_loader = loaders['test_loader']
     # 2. Train and build item index if needed
     if retrieval_stage.item_embeddings is None:
         logger.info("[Training] Building item index for retrieval stage...")
-        train_gen, valid_gen = train_loader.make_iterator()
+        train_gen, _ = train_loader.make_iterator()
+        valid_gen = valid_loader.make_iterator()
         item_gen, _ = item_loader.make_iterator()
         retrieval_stage.build_model()
         train_metrics = retrieval_stage.train(
@@ -318,7 +329,7 @@ def run_retrieval_stage(retrieval_stage, pipeline_config, dataset_config, fg_man
     # 4. Generate Candidates for Pipeline
     logger.info("Generating candidates for pipeline flow...")
     test_output, test_metrics = retrieval_stage.process(test_loader.make_iterator())
-    valid_output, _ = retrieval_stage.process(train_loader.make_iterator()[1], compute_metrics=False)
+    valid_output, _ = retrieval_stage.process(valid_loader.make_iterator(), compute_metrics=False)
     metrics.update({f"retrieval_test_{k}": v for k, v in test_metrics.items()})
     return metrics, valid_output, test_output
 
@@ -333,7 +344,7 @@ def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, logg
     # 1. Prepare Data Loaders (use shared if provided)
     if shared_loaders is not None:
         paths = shared_loaders['paths']
-        train_gen, valid_gen = shared_loaders['train_loader'].make_iterator()
+        train_gen, _ = shared_loaders['train_loader'].make_iterator()
     else:
         paths = get_data_paths(dataset_config, pipeline_config, logger)
         loaders = _prepare_stage_data_loaders(
@@ -341,7 +352,7 @@ def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, logg
             stage_config=preranking_config,
             paths=paths
         )
-        train_gen, valid_gen = loaders['train_loader'].make_iterator()
+        train_gen, _ = loaders['train_loader'].make_iterator()
 
     # Load Item Pool for Evaluation/Processing
     if os.path.exists(paths['item_pool_path']):
@@ -497,7 +508,6 @@ def main():
         feature_map = FeatureMap(pipeline_config['dataset_id'], data_dir)
         feature_map.load(feature_map_json, dataset_config)
         feature_map.dataset_config = dataset_config # Attach config for access in stages
-
         # --- Critical Fix: Ensure impression_id is loaded by DataLoaders ---
         # Add impression_id_col to labels so it gets loaded but not treated as a feature
         impression_id_col = dataset_config.get('impression_id_col', 'impression_id')
@@ -530,7 +540,7 @@ def main():
     # Execute based on mode
     if args.mode == 'full':
         logger.info("Running full pipeline")
-        
+        retrieval_stage = stages['retrieval']
         # Prepare shared data loaders once for all stages
         logger.info("Preparing shared data loaders...")
         shared_loaders = prepare_shared_data_loaders(
@@ -540,8 +550,6 @@ def main():
             fg_manager=fg_manager,
             logger=logger
         )
-
-        retrieval_stage = stages['retrieval']
         r_metrics, r_valid, r_test = run_retrieval_stage(
             retrieval_stage, pipeline_config, dataset_config, fg_manager, 
             logger=logger, shared_loaders=shared_loaders
