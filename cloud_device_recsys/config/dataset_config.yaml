@@ -202,3 +202,97 @@ TaobaoAd:
       dtype: int
       fill_na: 0
       feature_group: FG3
+
+Ali_CCP:
+  # -----------------------------------------
+  # Raw Data Settings (Server paths)
+  # -----------------------------------------
+  raw_data_root: ""
+  raw_data_format: "csv"
+  raw_files: [train, valid, test]  # Auto-appends format extension
+  
+  # -----------------------------------------
+  # Processed Data Settings (Server paths)
+  # -----------------------------------------
+  processed_data_root: ""
+  processed_data_format: "parquet"
+  # Default outputs: train.parquet, valid.parquet, test.parquet, feature_map.json, feature_vocab.json
+  
+  # -----------------------------------------
+  # Label Column
+  # -----------------------------------------
+  label_col:
+    name: "click"
+    dtype: float
+
+  # -----------------------------------------
+  # Impression ID (for linking samples across stages)
+  # -----------------------------------------
+  impression_id_col: "impression_id"  # Will be generated if not present
+  item_id_col: "205"
+  
+  # -----------------------------------------
+  # Feature Columns (Compact Format)
+  # -----------------------------------------
+  feature_cols:
+    # FG1: Non-personalized Item + Context Features
+    - name: '205'
+      type: categorical
+      dtype: int
+      feature_group: FG1
+    - name: ['206', '207', '216']
+      type: categorical
+      dtype: str
+      feature_group: FG1
+    - name: '301'
+      type: categorical
+      dtype: int
+      feature_group: FG1
+    - name: '210'
+      type: sequence
+      dtype: int
+      max_len: 30
+      splitter: "^"
+      feature_group: FG1
+      
+    # FG2: User Behavioral Sequences (Cloud-personalized)
+    - name: ['508', '509', '702']  # ID
+      type: categorical
+      dtype: int
+      feature_group: FG2
+    - name: [D508, D509, D702]  # value
+      type: numeric
+      dtype: float
+      feature_group: FG2
+
+    - name: ['109_14', '110_14', '127_14', '150_14']
+      type: sequence
+      dtype: int
+      max_len: 30
+      splitter: "^"
+      feature_group: FG2
+      share_embedding_map:
+        '109_14': '206'
+        '110_14': '207'
+        '127_14': '216'
+        '150_14': '210'
+
+    # FG3: Device-only Privacy Features
+    - name: ['101', '121', '122', '124', '125', '126', '127', '128', '129']
+      type: categorical
+      dtype: int
+      feature_group: FG3
+
+  # -----------------------------------------
+  # Preprocessing Options
+  # -----------------------------------------
+  preprocessing:
+    min_categr_count: 1
+    positive_only_eval: true  # Filter valid/test to positive samples only
+    generate_impression_id: true  # Auto-generate impression_id if missing
+    
+  # -----------------------------------------
+  # Item Pool Configuration
+  # -----------------------------------------
+  # item_pool:
+  #   file: "cand_item_list"  # References raw_files
