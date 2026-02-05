@@ -278,7 +278,7 @@ class DataPreprocessor:
             Preprocessed LazyFrame
         """
         # Generate impression_id if configured
-        if self.preprocess_opts.get('generate_impression_id', True) and split != 'train':
+        if self.preprocess_opts.get('generate_impression_id', True):
             impression_col = self.config.get('impression_id_col', 'impression_id')
             ddf = generate_impression_id(ddf, impression_col)
         

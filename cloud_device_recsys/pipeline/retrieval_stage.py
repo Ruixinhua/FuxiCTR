@@ -441,7 +441,7 @@ class RetrievalStage(BaseStage):
     def process(self,
                 input_data: Any,
                 item_data=None,
-                **kwargs) -> StageOutput:
+                **kwargs):
         """
         Process user queries to retrieve top-K candidates from the item pool.
         
@@ -450,8 +450,6 @@ class RetrievalStage(BaseStage):
         Args:
             input_data: FuxiCTR DataGenerator with user queries
             item_data: FuxiCTR DataGenerator for item features (to build index)
-            compute_metrics: If True, also compute Recall@K metrics
-            metrics_k: K values for metrics computation
             **kwargs: Additional parameters (chunk_size, etc.)
             
         Returns:
