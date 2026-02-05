@@ -52,9 +52,11 @@ class DIN(BaseModel):
                                   **kwargs)
         if not isinstance(din_target_field, list):
             din_target_field = [din_target_field]
+        din_target_field = [tuple(field) if type(field) != tuple else field for field in din_target_field]
         self.din_target_field = din_target_field
         if not isinstance(din_sequence_field, list):
             din_sequence_field = [din_sequence_field]
+        din_sequence_field = [tuple(field) if type(field) != tuple else field for field in din_sequence_field]
         self.din_sequence_field = din_sequence_field
         assert len(self.din_target_field) == len(self.din_sequence_field), \
                "len(din_target_field) != len(din_sequence_field)"

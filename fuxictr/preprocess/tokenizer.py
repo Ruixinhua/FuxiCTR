@@ -132,16 +132,19 @@ class Tokenizer(object):
             self.build_vocab(word_counts)
         else: # for considering meta data in test data
             self.update_vocab(word_counts.keys())
-        series = series.map(lambda x: self.vocab.get(x, self.vocab["__OOV__"]))
+        # Convert to string before lookup since vocab keys are strings
+        series = series.map(lambda x: self.vocab.get(str(x), self.vocab["__OOV__"]))
         return series.values
 
     def encode_category(self, series):
-        series = series.map(lambda x: self.vocab.get(x, self.vocab["__OOV__"]))
+        # Convert to string before lookup since vocab keys are strings
+        series = series.map(lambda x: self.vocab.get(str(x), self.vocab["__OOV__"]))
         return series.values
 
     def encode_sequence(self, series):
+        # Convert tokens to string before lookup since vocab keys are strings
         series = series.map(
-            lambda text: [self.vocab.get(x, self.vocab["__OOV__"]) if x != self._na_value \
+            lambda text: [self.vocab.get(str(x), self.vocab["__OOV__"]) if x != self._na_value \
             else self.vocab["__PAD__"] for x in text.split(self._splitter)]
         )
         seqs = pad_sequences(series.to_list(), maxlen=self.max_len,
