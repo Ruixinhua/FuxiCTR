@@ -128,7 +128,7 @@ class DINRanker(BaseModel):
         if self.use_diversity_loss and item_feature_embs:
             # Concatenate features to form a single vector for each item
             item_vectors = torch.cat(item_feature_embs, dim=-1)
-            self.logger.info("use_diversity_loss is True")
+            # self.logger.info("use_diversity_loss is True")
 
             # Calculate the inner product matrix (item-item similarity)
             item_vectors_normalized = torch.nn.functional.normalize(item_vectors, p=2, dim=1)

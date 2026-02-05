@@ -362,19 +362,18 @@ def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, logg
     # 2. Train Preranking Model
     logger.info("[Preranking] Training model...")
     preranking_stage.build_model()
-    train_metrics = preranking_stage.train(
+    preranking_stage.train(
         train_data=train_gen,
         valid_data=prev_output_valid,
         epochs=preranking_config['training'].get('epochs', 5),
         batch_size=preranking_config['training'].get('batch_size', 4096),
     )
-    metrics.update({f"preranking_valid_{k}": v for k, v in train_metrics.items()})
-
     # 4. Pipeline Processing
     logger.info("[Preranking] Processing pipeline candidates...")
     test_output, test_metrics = preranking_stage.process(prev_output_test, compute_metrics=True)
     metrics.update({f"preranking_test_{k}": v for k, v in test_metrics.items()})
-    valid_output, _ = preranking_stage.process(prev_output_valid, compute_metrics=False)
+    valid_output, valid_metrics = preranking_stage.process(prev_output_valid, compute_metrics=True)
+    metrics.update({f"preranking_valid_{k}": v for k, v in valid_metrics.items()})
     return metrics, valid_output, test_output
 
 def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, logger=None, shared_loaders=None,
@@ -404,13 +403,14 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, logger
     # 2. Train Reranking Model
     logger.info("[Reranking] Training model...")
     reranking_stage.build_model()
-    train_metrics = reranking_stage.train(
+    reranking_stage.train(
         train_data=train_gen,
         valid_data=prev_output_valid,
         epochs=reranking_config['training'].get('epochs', 5),
         batch_size=reranking_config['training'].get('batch_size', 4096)
     )
-    metrics.update({f"reranking_valid_{k}": v for k, v in train_metrics.items()})
+    valid_metrics = reranking_stage.evaluate(prev_output_valid)
+    metrics.update({f"reranking_valid_{k}": v for k, v in valid_metrics.items()})
     # 3. Evaluate Reranking Model (List-wise if prev_output available)
     logger.info("[Reranking] Evaluating on test set...")
     test_metrics = reranking_stage.evaluate(prev_output_test)
