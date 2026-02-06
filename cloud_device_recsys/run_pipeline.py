@@ -44,6 +44,7 @@ from cloud_device_recsys.utils import (
     save_stage_output, load_stage_outputs_from_dir
 )
 from cloud_device_recsys.config.config_parser import ConfigParser
+import pandas as pd
 
 def build_feature_group_manager(config: dict) -> FeatureGroupManager:
     """Build and configure feature group manager"""
@@ -296,10 +297,28 @@ def run_retrieval_stage(retrieval_stage, pipeline_config, dataset_config, fg_man
         valid_gen = valid_loader.make_iterator()
         item_gen, _ = item_loader.make_iterator()
         retrieval_stage.build_model()
+        
+        # Load item features for negative sampling if enabled
+        item_features_df = None
+        num_negatives = retrieval_stage.num_negatives if hasattr(retrieval_stage, 'num_negatives') else 0
+        if num_negatives > 0:
+            paths = shared_loaders['paths'] if shared_loaders else get_data_paths(dataset_config, pipeline_config, logger)
+            item_pool_path = paths.get('item_pool_path')
+            if item_pool_path and os.path.exists(item_pool_path):
+                logger.info(f"Loading item features for negative sampling from {item_pool_path}")
+                if item_pool_path.endswith('.parquet'):
+                    item_features_df = pd.read_parquet(item_pool_path)
+                else:
+                    item_features_df = pd.read_csv(item_pool_path)
+                logger.info(f"Loaded {len(item_features_df)} items for negative sampling")
+            else:
+                logger.warning(f"Item pool not found at {item_pool_path}. Negative sampling will be disabled.")
+        
         train_metrics = retrieval_stage.train(
             train_data=train_gen,
             valid_data=valid_gen,
             item_data=item_gen,
+            item_features_df=item_features_df,
             epochs=retrieval_config['training'].get('epochs', 10),
             patience=retrieval_config['training'].get('patience', 2),
             monitor=retrieval_config['training'].get('monitor', 'Recall@1000'),

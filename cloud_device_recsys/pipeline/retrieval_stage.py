@@ -18,10 +18,12 @@ import torch
 from tqdm import tqdm
 
 from ..pipeline.base_stage import BaseStage, StageType
-from ..pipeline.stage_output import StageOutput, CandidateItem, CandidateSet
+from ..pipeline.stage_output import StageOutput
 from ..config.feature_groups import FeatureGroupManager
 from ..models import build_model as registry_build_model
 from ..models import DualTowerRetrieval  # For type hints
+from ..models.losses import bpr_loss, margin_ranking_loss, softmax_cross_entropy_loss
+from ..data.negative_sampler import NegativeSampler
 from ..utils import filter_feature_map
 
 from fuxictr.features import FeatureMap
@@ -77,6 +79,11 @@ class RetrievalStage(BaseStage):
         self.best_weights_path = None
         self.metrics_k = model_params['metrics_k']
         self.monitor = model_params.get('monitor', 'Recall@1000')
+        # Negative sampling parameters
+        self.num_negatives = model_params.get('num_negatives', 4)
+        self.loss_type = model_params.get('loss_type', 'bpr')  # 'bpr', 'margin', 'softmax'
+        self.margin = model_params.get('margin', 1.0)
+        self.negative_sampler: Optional[NegativeSampler] = None
         # Item index for retrieval
         self.item_embeddings: Optional[np.ndarray] = None
         self.item_ids: Optional[List[Any]] = None
@@ -95,14 +102,33 @@ class RetrievalStage(BaseStage):
         self.logger.info(f"Built {model_name} model")
         return self.model
     
-    def train(self, train_data, valid_data=None, item_data=None, **kwargs):
-        """Train loop with validation"""
+    def train(self, train_data, valid_data=None, item_data=None, item_features_df=None, **kwargs):
+        """
+        Train loop with validation.
+        
+        Args:
+            train_data: Training data generator (positive examples only)
+            valid_data: Validation data generator
+            item_data: Item data generator (for building item index during validation)
+            item_features_df: DataFrame with item features (for negative sampling)
+            **kwargs: Additional training parameters
+        """
         if self.model is None:
             self.build_model()
         self.best_weights_path = os.path.join(self.model.model_dir, self.model.model_id + ".model")
         epochs = kwargs.get("epochs", 1)
         patience = kwargs.get("patience", 2)
         mode = kwargs.get("mode", "max")
+        
+        # Initialize negative sampler if using negative sampling
+        use_negative_sampling = self.num_negatives > 0 and item_features_df is not None
+        if use_negative_sampling:
+            item_id_col = getattr(self.feature_map, 'dataset_config', {}).get('item_id_col', 'cand_item_id')
+            self.negative_sampler = NegativeSampler(item_features_df, item_id_col=item_id_col)
+            self.logger.info(f"Negative Sampling: {self.num_negatives} negatives per positive, loss_type={self.loss_type}")
+        else:
+            if self.num_negatives > 0 and item_features_df is None:
+                self.logger.warning("num_negatives > 0 but item_features_df not provided. Using standard training.")
         
         self.logger.info(f"Start Training: epochs={epochs}, monitor={self.monitor}")
         
@@ -120,7 +146,11 @@ class RetrievalStage(BaseStage):
             self.model._epoch_index = epoch
             self.logger.info(f"*** Epoch {epoch+1} ***")
             
-            self.train_epoch(train_data)
+            # Choose training method based on negative sampling
+            if use_negative_sampling:
+                self.train_epoch_with_negatives(train_data)
+            else:
+                self.train_epoch(train_data)
             
             # Validation
             self.logger.info("Building Item Index...")
@@ -155,7 +185,7 @@ class RetrievalStage(BaseStage):
 
     def train_epoch(self, data_generator):
         """
-        Train the model for one epoch.
+        Train the model for one epoch (standard training with BCE loss).
         Reference: fuxictr/pytorch/models/rank_model.py
         """
         self.model.train()
@@ -179,9 +209,110 @@ class RetrievalStage(BaseStage):
         
         if total_batches > 0:
             avg_loss = train_loss / total_batches
-             # Check if regularization is actually working/enabled
             reg_loss = self.model.regularization_loss() if hasattr(self.model, 'regularization_loss') else 0
             self.logger.info(f"Train loss: {avg_loss:.6f} (Reg Loss: {reg_loss:.6f})")
+
+    def train_epoch_with_negatives(self, data_generator):
+        """
+        Train the model for one epoch with negative sampling and pairwise ranking loss.
+        
+        For each positive example in the batch, samples n negative items and
+        computes pairwise ranking loss (BPR, margin, or softmax).
+        """
+        import torch
+        
+        self.model.train()
+        train_loss = 0
+        total_batches = 0
+        
+        if self.negative_sampler is None:
+            raise ValueError("Negative sampler not initialized. Call train() with item_features_df.")
+        
+        item_id_col = getattr(self.feature_map, 'dataset_config', {}).get('item_id_col', 'cand_item_id')
+        
+        if self.model._verbose == 0:
+            batch_iterator = data_generator
+        else:
+            batch_iterator = tqdm(data_generator, disable=True, file=sys.stdout)
+            
+        for batch_index, batch_data in enumerate(batch_iterator):
+            self.model._batch_index = batch_index
+            self.model._total_steps += 1
+            
+            batch_dict = dict(batch_data)
+            
+            # Get positive item IDs
+            pos_item_ids = batch_dict[item_id_col].cpu().numpy()
+            
+            # Sample negative items for each positive
+            neg_item_ids = self.negative_sampler.sample_negatives_batch(
+                pos_item_ids, self.num_negatives
+            )  # [batch_size, num_negatives]
+            
+            # Compute positive item embeddings (from the batch)
+            pos_user_emb = self.model.get_user_embedding(batch_data)  # [B, D]
+            pos_item_emb = self.model.get_item_embedding(batch_data)  # [B, D]
+            pos_scores = self.model.cal_similarity(pos_user_emb, pos_item_emb)  # [B, 1]
+            
+            # Compute negative item embeddings
+            # We need to create batch data for negative items
+            neg_scores_list = []
+            for neg_idx in range(self.num_negatives):
+                neg_ids = neg_item_ids[:, neg_idx]  # [B]
+                
+                # Get negative item features
+                neg_features = self.negative_sampler.get_item_features(neg_ids.tolist())
+                
+                # Build negative batch dict (copy user features, replace item features)
+                neg_batch_dict = {}
+                for key, val in batch_dict.items():
+                    if key == item_id_col:
+                        neg_batch_dict[key] = torch.tensor(neg_ids, device=self.model.device)
+                    elif key in neg_features.columns:
+                        # Replace with negative item feature
+                        neg_val = neg_features[key].values
+                        neg_batch_dict[key] = torch.tensor(neg_val, device=self.model.device)
+                    else:
+                        # Keep user features
+                        neg_batch_dict[key] = val.to(self.model.device) if hasattr(val, 'to') else val
+                
+                # Get negative item embedding
+                neg_item_emb = self.model.get_item_embedding(neg_batch_dict)  # [B, D]
+                neg_score = self.model.cal_similarity(pos_user_emb, neg_item_emb)  # [B, 1]
+                neg_scores_list.append(neg_score)
+            
+            # Stack negative scores: [B, num_negatives]
+            neg_scores = torch.cat(neg_scores_list, dim=1)
+            
+            # Compute pairwise ranking loss
+            if self.loss_type == 'bpr':
+                loss = bpr_loss(pos_scores, neg_scores)
+            elif self.loss_type == 'margin':
+                loss = margin_ranking_loss(pos_scores, neg_scores, margin=self.margin)
+            elif self.loss_type == 'softmax':
+                loss = softmax_cross_entropy_loss(pos_scores, neg_scores)
+            else:
+                raise ValueError(f"Unknown loss_type: {self.loss_type}")
+            
+            # Add regularization
+            if hasattr(self.model, 'regularization_loss'):
+                loss = loss + self.model.regularization_loss()
+            
+            # Backprop
+            self.model.optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.model._max_gradient_norm)
+            self.model.optimizer.step()
+            
+            train_loss += loss.item()
+            total_batches += 1
+            
+            if self.model._stop_training:
+                break
+        
+        if total_batches > 0:
+            avg_loss = train_loss / total_batches
+            self.logger.info(f"Train loss ({self.loss_type}): {avg_loss:.6f}")
 
     def build_item_index(self, item_data):
         """Build item embeddings index from iterator"""
@@ -282,13 +413,15 @@ class RetrievalStage(BaseStage):
                         request_ids_list.append(req_id)
                         user_embs_list.append(u_emb[i].cpu().numpy())
                         
-                        # Extract user features only if returning output
+                        # Extract ALL user features (FG2 + FG3) for downstream stages
                         if return_output:
                             user_features = {}
+                            all_user_features = self.feature_group_manager.get_user_features()  # FG2 + FG3
                             for feat_name, feat_val in batch_dict.items():
                                 if feat_name in [item_id_col, impression_id_col, 'label']:
                                     continue
-                                if feat_name not in self.feature_group_manager.get_user_features():
+                                # Save all user features that are available (no filtering by FG2)
+                                if feat_name not in all_user_features:
                                     continue
                                 val = feat_val[i]
                                 if isinstance(val, torch.Tensor):
@@ -334,6 +467,10 @@ class RetrievalStage(BaseStage):
         else:
             fetch_k = min(self.top_k + max_positives, num_items)
         
+        # DataFrame-first: collect candidates as lists for efficient DataFrame creation
+        candidates_data = [] if return_output else None
+        user_features_data = [] if return_output else None
+        
         for chunk_start in range(0, num_requests, chunk_size):
             chunk_end = min(chunk_start + chunk_size, num_requests)
             user_chunk = user_embs[chunk_start:chunk_end]
@@ -376,11 +513,15 @@ class RetrievalStage(BaseStage):
                         if preds_k & gt_indices_set:  # Intersection check
                             total_recall[k] += 1
                 
-                # Build candidate set if returning output
+                # Build candidate data if returning output (DataFrame-first)
                 if return_output:
                     user_features = user_features_list[global_idx]
                     
-                    candidate_list = []
+                    # Collect user features for this request
+                    user_feat_row = {'request_id': req_id}
+                    user_feat_row.update(user_features)
+                    user_features_data.append(user_feat_row)
+                    
                     added_item_ids = set()
                     
                     # Add true positives first (with their actual scores)
@@ -390,30 +531,30 @@ class RetrievalStage(BaseStage):
                             if tp_item_id in self.item_id_to_idx:
                                 tp_idx = self.item_id_to_idx[tp_item_id]
                                 tp_score = scores[i, tp_idx]
-                            candidate_list.append(CandidateItem(item_id=tp_item_id, score=float(tp_score), label=1))
+                            candidates_data.append({
+                                'request_id': req_id,
+                                'item_id': tp_item_id,
+                                'score': float(tp_score),
+                                'label': 1
+                            })
                             added_item_ids.add(tp_item_id)
                     
                     # Fill with top-K items
+                    num_added = len(added_item_ids)
                     for j in range(len(user_topk_indices)):
-                        if len(candidate_list) >= self.top_k:
+                        if num_added >= self.top_k:
                             break
                         item_idx = user_topk_indices[j]
                         item_id = self.item_ids[item_idx]
                         if item_id not in added_item_ids:
-                            candidate_list.append(CandidateItem(
-                                item_id=item_id,
-                                score=float(user_topk_scores[j]),
-                                label=0
-                            ))
+                            candidates_data.append({
+                                'request_id': req_id,
+                                'item_id': item_id,
+                                'score': float(user_topk_scores[j]),
+                                'label': 0
+                            })
                             added_item_ids.add(item_id)
-                    
-                    cs = CandidateSet(
-                        request_id=req_id,
-                        candidates=candidate_list,
-                        user_features=user_features,
-                        source_stage=self.stage_name
-                    )
-                    output.candidate_sets.append(cs)
+                            num_added += 1
         
         # Finalize metrics
         metrics = None
@@ -429,12 +570,21 @@ class RetrievalStage(BaseStage):
                 for name, value in sorted(metrics.items()):
                     writer.writerow([name, f"{value:.6f}"])
         
-        # Finalize output
+        # Finalize output using DataFrame-first API
         if return_output:
-            self.logger.info(f"Generated {output.get_total_candidates()} candidates across {len(output.candidate_sets)} requests.")
+            import pandas as pd
+            candidates_df = pd.DataFrame(candidates_data)
+            user_features_df = pd.DataFrame(user_features_data)
+            
+            output = StageOutput.from_dataframes(
+                stage_name=self.stage_name,
+                candidates_df=candidates_df,
+                user_features_df=user_features_df,
+                metrics=metrics or {},
+                metadata={}
+            )
+            self.logger.info(f"Generated {output.get_total_candidates()} candidates across {output.get_num_requests()} requests.")
             output.end_time = datetime.datetime.now().isoformat()
-            if metrics:
-                output.metadata['metrics'] = metrics
         
         return output, metrics
 

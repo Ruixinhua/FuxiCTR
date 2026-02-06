@@ -10,12 +10,9 @@ This module defines the abstract base class for all pipeline stages.
 
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import List, Dict, Optional, Any, Set
+from typing import List, Dict, Optional, Any
 import logging
 import os
-from datetime import datetime
-
-from .stage_output import StageOutput, CandidateSet
 from ..config.feature_groups import FeatureGroupManager, FeatureGroup
 
 
@@ -67,23 +64,6 @@ class BaseStage(ABC):
         self.logger.info(f"Initialized {stage_type.value} stage: {stage_name}")
         self.logger.info(f"Allowed feature groups: {[fg.value for fg in allowed_feature_groups]}")
     
-    def get_allowed_features(self) -> Set[str]:
-        """Get set of feature names allowed for this stage"""
-        allowed = set()
-        for fg in self.allowed_feature_groups:
-            allowed.update(self.feature_group_manager.get_features_by_group(fg))
-        return allowed
-    
-    def validate_features(self, used_features: Set[str]) -> bool:
-        """Validate that only allowed features are being used"""
-        allowed = self.get_allowed_features()
-        disallowed = used_features - allowed
-        
-        if disallowed:
-            self.logger.error(f"Stage uses disallowed features: {disallowed}")
-            return False
-        return True
-    
     @abstractmethod
     def train(self, 
               train_data: Any,
@@ -118,20 +98,3 @@ class BaseStage(ABC):
         """
         pass
 
-    def load_previous_output(self, filepath: str) -> StageOutput:
-        """Load output from a previous stage"""
-        output = StageOutput.load(filepath)
-        self.logger.info(f"Loaded previous stage output from {filepath}")
-        self.logger.info(f"  - {len(output.candidate_sets)} candidate sets")
-        self.logger.info(f"  - {output.get_total_candidates()} total candidates")
-        return output
-    
-    def get_stage_info(self) -> Dict[str, Any]:
-        """Get information about this stage"""
-        return {
-            'stage_name': self.stage_name,
-            'stage_type': self.stage_type.value,
-            'allowed_feature_groups': [fg.value for fg in self.allowed_feature_groups],
-            'allowed_features': list(self.get_allowed_features()),
-            'output_dir': self.output_dir
-        }

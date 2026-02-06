@@ -17,6 +17,129 @@ from typing import Dict, Optional, List
 logger = logging.getLogger(__name__)
 
 
+# =============================================================================
+# Pairwise Ranking Loss Functions
+# =============================================================================
+
+def bpr_loss(
+    pos_scores: torch.Tensor,
+    neg_scores: torch.Tensor,
+    reduction: str = 'mean'
+) -> torch.Tensor:
+    """
+    Bayesian Personalized Ranking (BPR) Loss.
+    
+    BPR loss encourages positive items to have higher scores than negative items:
+        loss = -log(sigmoid(pos_score - neg_score))
+    
+    Args:
+        pos_scores: Positive item scores, shape [batch_size, 1] or [batch_size]
+        neg_scores: Negative item scores, shape [batch_size, num_negatives] 
+                   or [batch_size]
+        reduction: 'mean', 'sum', or 'none'
+        
+    Returns:
+        BPR loss value
+        
+    Example:
+        >>> pos_scores = model(pos_batch)["y_pred"]  # [B, 1]
+        >>> neg_scores = model(neg_batch)["y_pred"]  # [B, num_neg]
+        >>> loss = bpr_loss(pos_scores, neg_scores)
+    """
+    pos_scores = pos_scores.view(-1, 1)  # [B, 1]
+    
+    if neg_scores.dim() == 1:
+        neg_scores = neg_scores.view(-1, 1)  # [B, 1]
+    
+    # Difference: pos - neg for each negative
+    diff = pos_scores - neg_scores  # [B, num_neg]
+    
+    # BPR loss: -log(sigmoid(diff))
+    loss = -torch.nn.functional.logsigmoid(diff)
+    
+    if reduction == 'mean':
+        return loss.mean()
+    elif reduction == 'sum':
+        return loss.sum()
+    else:
+        return loss
+
+
+def margin_ranking_loss(
+    pos_scores: torch.Tensor,
+    neg_scores: torch.Tensor,
+    margin: float = 1.0,
+    reduction: str = 'mean'
+) -> torch.Tensor:
+    """
+    Margin Ranking Loss (Hinge Loss).
+    
+    Margin loss enforces a minimum margin between positive and negative scores:
+        loss = max(0, margin - pos_score + neg_score)
+    
+    Args:
+        pos_scores: Positive item scores, shape [batch_size, 1] or [batch_size]
+        neg_scores: Negative item scores, shape [batch_size, num_negatives]
+        margin: Minimum margin between positive and negative scores (default: 1.0)
+        reduction: 'mean', 'sum', or 'none'
+        
+    Returns:
+        Margin ranking loss value
+    """
+    pos_scores = pos_scores.view(-1, 1)  # [B, 1]
+    
+    if neg_scores.dim() == 1:
+        neg_scores = neg_scores.view(-1, 1)  # [B, 1]
+    
+    # Hinge loss: max(0, margin - pos + neg)
+    loss = torch.clamp(margin - pos_scores + neg_scores, min=0.0)
+    
+    if reduction == 'mean':
+        return loss.mean()
+    elif reduction == 'sum':
+        return loss.sum()
+    else:
+        return loss
+
+
+def softmax_cross_entropy_loss(
+    pos_scores: torch.Tensor,
+    neg_scores: torch.Tensor,
+    reduction: str = 'mean'
+) -> torch.Tensor:
+    """
+    Softmax Cross-Entropy Loss for Pairwise Ranking.
+    
+    Treats ranking as classification: positive item should have highest score
+    among all candidates (positive + negatives).
+    
+    Args:
+        pos_scores: Positive item scores, shape [batch_size, 1]
+        neg_scores: Negative item scores, shape [batch_size, num_negatives]
+        reduction: 'mean', 'sum', or 'none'
+        
+    Returns:
+        Cross-entropy loss value
+    """
+    pos_scores = pos_scores.view(-1, 1)  # [B, 1]
+    
+    if neg_scores.dim() == 1:
+        neg_scores = neg_scores.view(-1, 1)  # [B, 1]
+    
+    # Concatenate: [pos, neg1, neg2, ...] -> [B, 1+num_neg]
+    all_scores = torch.cat([pos_scores, neg_scores], dim=1)
+    
+    # Target: positive is at index 0
+    targets = torch.zeros(pos_scores.size(0), dtype=torch.long, device=pos_scores.device)
+    
+    loss = torch.nn.functional.cross_entropy(all_scores, targets, reduction=reduction)
+    
+    return loss
+
+
+
+
+
 def compute_diversity_loss(
     item_embeddings: torch.Tensor,
     y_pred: torch.Tensor,

@@ -18,6 +18,8 @@ from ..pipeline.stage_output import StageOutput
 from ..config.feature_groups import FeatureGroupManager, FeatureGroup
 from ..models import build_model as registry_build_model
 from ..models import DINRanker  # For type hints
+from ..models.losses import bpr_loss, margin_ranking_loss, softmax_cross_entropy_loss
+from ..data.negative_sampler import NegativeSampler
 from ..utils import filter_feature_map
 
 from fuxictr.features import FeatureMap
@@ -73,6 +75,11 @@ class PrerankingStage(BaseStage):
         self.monitor = model_params.get('monitor', 'Recall@100')
         self.model: Optional[DINRanker] = None
         self.best_weights_path = None
+        # Negative sampling parameters
+        self.num_negatives = model_params.get('num_negatives', 4)
+        self.loss_type = model_params.get('loss_type', 'bpr')  # 'bpr', 'margin', 'softmax'
+        self.margin = model_params.get('margin', 1.0)
+        self.negative_sampler: Optional[NegativeSampler] = None
         # Item features storage for lookups during evaluation/processing
         self.item_features_df = None
     
@@ -117,7 +124,7 @@ class PrerankingStage(BaseStage):
         Train the pre-ranking model with custom loop and best model monitoring.
         
         Args:
-            train_data: Training data generator
+            train_data: Training data generator (positive examples only for negative sampling)
             valid_data: Validation data generator (used for internal training)
             **kwargs: Training parameters including:
                 - epochs: Number of training epochs
@@ -129,6 +136,8 @@ class PrerankingStage(BaseStage):
         Returns:
             Training metrics
         """
+        import torch
+        
         if self.model is None:
             self.build_model()
         
@@ -139,6 +148,16 @@ class PrerankingStage(BaseStage):
         patience = kwargs.get('patience', 2)
         mode = kwargs.get('mode', 'max')
         metrics = {}
+        
+        # Initialize negative sampler if using negative sampling
+        use_negative_sampling = self.num_negatives > 0 and self.item_features_df is not None
+        if use_negative_sampling:
+            item_id_col = getattr(self.feature_map, 'dataset_config', {}).get('item_id_col', 'cand_item_id')
+            self.negative_sampler = NegativeSampler(self.item_features_df, item_id_col=item_id_col)
+            self.logger.info(f"Negative Sampling: {self.num_negatives} negatives per positive, loss_type={self.loss_type}")
+        else:
+            if self.num_negatives > 0 and self.item_features_df is None:
+                self.logger.warning("num_negatives > 0 but item_features_df not loaded. Using standard training.")
         
         # Ensure optimizer is initialized
         if not hasattr(self.model, 'optimizer') or self.model.optimizer is None:
@@ -161,25 +180,34 @@ class PrerankingStage(BaseStage):
         
         best_metric = -np.inf if mode == "max" else np.inf
         stopping_steps = 0
+        
+        item_id_col = getattr(self.feature_map, 'dataset_config', {}).get('item_id_col', 'cand_item_id')
 
         for epoch in range(epochs):
             self.model._epoch_index = epoch
             self.logger.info(f"*** Epoch {epoch + 1}/{epochs} ***")
             
-            # Manual Training Loop
+            # Training Loop
             self.model.train()
             total_loss = 0.0
             steps = 0
             
-            # Iterate over train_data directly
             for batch_data in train_data:
-                loss = self.model.train_step(batch_data)
+                if use_negative_sampling:
+                    # Negative sampling training
+                    loss = self._train_step_with_negatives(batch_data, item_id_col, torch)
+                else:
+                    # Standard training
+                    loss = self.model.train_step(batch_data)
                 
                 total_loss += loss.item()
                 steps += 1
             
             avg_loss = total_loss / steps if steps > 0 else 0.0
-            self.logger.info(f"Train Loss: {avg_loss:.6f}")
+            if use_negative_sampling:
+                self.logger.info(f"Train Loss ({self.loss_type}): {avg_loss:.6f}")
+            else:
+                self.logger.info(f"Train Loss: {avg_loss:.6f}")
             
             # Validation (Ranking Metrics)
             self.logger.info(f"Evaluating epoch {epoch + 1}...")
@@ -224,6 +252,81 @@ class PrerankingStage(BaseStage):
                 writer.writerow([name, f"{value:.6f}" if isinstance(value, float) else value])
         
         return metrics
+    
+    def _train_step_with_negatives(self, batch_data, item_id_col: str, torch):
+        """
+        Single training step with negative sampling for pairwise ranking.
+        
+        Args:
+            batch_data: Positive example batch
+            item_id_col: Name of item ID column
+            torch: Torch module reference
+            
+        Returns:
+            Loss tensor
+        """
+        batch_dict = dict(batch_data)
+        
+        # Get positive item IDs
+        pos_item_ids = batch_dict[item_id_col].cpu().numpy()
+        
+        # Sample negative items for each positive
+        neg_item_ids = self.negative_sampler.sample_negatives_batch(
+            pos_item_ids, self.num_negatives
+        )  # [batch_size, num_negatives]
+        
+        # Get positive predictions
+        pos_output = self.model.forward(batch_data)
+        pos_scores = pos_output['y_pred']  # [B, 1]
+        
+        # Get negative predictions
+        neg_scores_list = []
+        for neg_idx in range(self.num_negatives):
+            neg_ids = neg_item_ids[:, neg_idx]  # [B]
+            
+            # Get negative item features
+            neg_features = self.negative_sampler.get_item_features(neg_ids.tolist())
+            
+            # Build negative batch dict (copy user features, replace item features)
+            neg_batch_dict = {}
+            for key, val in batch_dict.items():
+                if key == item_id_col:
+                    neg_batch_dict[key] = torch.tensor(neg_ids, device=self.model.device)
+                elif key in neg_features.columns:
+                    # Replace with negative item feature
+                    neg_val = neg_features[key].values
+                    neg_batch_dict[key] = torch.tensor(neg_val, device=self.model.device)
+                else:
+                    # Keep user features
+                    neg_batch_dict[key] = val.to(self.model.device) if hasattr(val, 'to') else val
+            
+            neg_output = self.model.forward(neg_batch_dict)
+            neg_scores_list.append(neg_output['y_pred'])
+        
+        # Stack negative scores: [B, num_negatives]
+        neg_scores = torch.cat(neg_scores_list, dim=1)
+        
+        # Compute pairwise ranking loss
+        if self.loss_type == 'bpr':
+            loss = bpr_loss(pos_scores, neg_scores)
+        elif self.loss_type == 'margin':
+            loss = margin_ranking_loss(pos_scores, neg_scores, margin=self.margin)
+        elif self.loss_type == 'softmax':
+            loss = softmax_cross_entropy_loss(pos_scores, neg_scores)
+        else:
+            raise ValueError(f"Unknown loss_type: {self.loss_type}")
+        
+        # Add regularization
+        if hasattr(self.model, 'regularization_loss'):
+            loss = loss + self.model.regularization_loss()
+        
+        # Backprop
+        self.model.optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.model._max_gradient_norm)
+        self.model.optimizer.step()
+        
+        return loss
 
     def process(self,
                 input_data: StageOutput,
