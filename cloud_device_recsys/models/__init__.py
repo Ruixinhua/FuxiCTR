@@ -14,8 +14,10 @@ from .registry import MODEL_REGISTRY, build_model, get_available_models
 # Re-export individual model classes for convenience
 from .dual_tower_retrieval import DualTowerRetrieval
 from .din_ranker import DINRanker
-from .lightweight_ranker import LightweightRanker
 from .device_reranker import DeviceReranker
+
+# Export loss utilities
+from .losses import DiversityLossMixin, compute_diversity_loss, compute_item_similarity_matrix
 
 __all__ = [
     # Registry functions
@@ -25,6 +27,10 @@ __all__ = [
     # Model classes
     'DualTowerRetrieval',
     'DINRanker',
-    'LightweightRanker',
     'DeviceReranker',
+    # Loss utilities
+    'DiversityLossMixin',
+    'compute_diversity_loss',
+    'compute_item_similarity_matrix',
 ]
+

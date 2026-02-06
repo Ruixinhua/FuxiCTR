@@ -5,7 +5,7 @@
 """
 Pre-ranking Stage Implementation
 
-This module wraps the LightweightRanker model as a pipeline stage.
+This module wraps the preranking model as a pipeline stage.
 """
 
 import os
@@ -46,7 +46,7 @@ class PrerankingStage(BaseStage):
         Args:
             feature_map: FuxiCTR FeatureMap
             feature_group_manager: Feature group manager
-            model_params: Parameters for LightweightRanker model
+            model_params: Parameters for preranking model
             output_dir: Output directory
             top_k: Number of candidates to pass to next stage
             use_diversity: Whether to apply diversity in selection

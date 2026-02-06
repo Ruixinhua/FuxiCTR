@@ -22,7 +22,6 @@ def _lazy_import_models():
     """Lazy import to avoid circular dependencies."""
     from .dual_tower_retrieval import DualTowerRetrieval
     from .din_ranker import DINRanker
-    from .lightweight_ranker import LightweightRanker
     from .device_reranker import DeviceReranker
     
     return {
@@ -31,8 +30,7 @@ def _lazy_import_models():
         
         # Preranking models
         "DINRanker": DINRanker,
-        "LightweightRanker": LightweightRanker,
-        
+
         # Reranking models
         "DeviceReranker": DeviceReranker,
     }

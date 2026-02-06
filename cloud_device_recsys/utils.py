@@ -92,18 +92,6 @@ def setup_logging(output_dir) -> None:
     logging.info(f"Logging initialized. Saving to {log_file}")
 
 
-def load_pipeline_config(config_dir: str, pipeline_id: str) -> dict:
-    """Load pipeline configuration"""
-    config_path = os.path.join(config_dir, f"{pipeline_id}.yaml")
-    if not os.path.exists(config_path):
-        config_path = os.path.join(config_dir, "pipeline_config.yaml")
-
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-
-    return config
-
-
 def get_data_dir(dataset_config, dataset_id=None):
     """Get the data directory from dataset configuration."""
     if 'processed_data_root' in dataset_config:
@@ -233,71 +221,9 @@ def prepare_debug_paths(paths: dict, dataset_config: dict, logger) -> dict:
     return paths
 
 
-def evaluate_stage_output(stage_output, logger=None, metrics_k=None):
-    """
-    Helper to evaluate StageOutput (CandidateSets).
-    
-    Computes Recall@K and nDCG@K for each K in metrics_k.
-    
-    Args:
-        stage_output: StageOutput object containing candidate sets
-        logger: Optional logger instance
-        metrics_k: List of K values for metrics computation
-        
-    Returns:
-        dict of metric names to values
-    """
-    if not stage_output or not stage_output.candidate_sets:
-        return {}
-    
-    total_recall = {k: 0.0 for k in metrics_k}
-    total_ndcg = {k: 0.0 for k in metrics_k}
-    num_queries = 0
-    
-    for cs in stage_output.candidate_sets:
-        # Sort candidates by score descending
-        sorted_candidates = sorted(cs.candidates, key=lambda x: x.score, reverse=True)
-        sorted_labels = [c.label for c in sorted_candidates]
-        
-        true_relevant_count = sum(sorted_labels)
-        if true_relevant_count == 0:
-            continue
-            
-        num_queries += 1
-        
-        for k in metrics_k:
-            top_k = sorted_labels[:k]
-            hits = sum(top_k)
-            total_recall[k] += (hits / true_relevant_count)
-            
-            dcg = 0.0
-            for rank, label in enumerate(top_k, 1):
-                if label == 1:
-                    dcg += 1.0 / np.log2(rank + 1)
-            
-            idcg = 0.0
-            for rank in range(1, min(int(true_relevant_count), k) + 1):
-                idcg += 1.0 / np.log2(rank + 1)
-                
-            if idcg > 0:
-                total_ndcg[k] += (dcg / idcg)
-                
-    metrics = {}
-    if num_queries > 0:
-        for k in metrics_k:
-            metrics[f"{stage_output.stage_name}_pipeline_Recall@{k}"] = total_recall[k] / num_queries
-            metrics[f"{stage_output.stage_name}_pipeline_nDCG@{k}"] = total_ndcg[k] / num_queries
-            
-    if logger:
-        logger.info(f"Pipeline Metrics for {stage_output.stage_name}: {metrics}")
-        
-    return metrics
-
-
 # =========================================================================
 # Shared Inference Utilities for Preranking/Reranking Stages
 # =========================================================================
-
 
 def build_inference_batch_for_candidates(
     user_features: Dict[str, Any],
@@ -415,16 +341,25 @@ def compute_ranking_metrics(
     metrics_k: List[int] = None
 ) -> Dict[str, float]:
     """
-    Compute Recall@K and nDCG@K for a single query.
+    Compute ranking metrics for a single query/user.
+    
+    Metrics computed:
+        - Recall@K: Proportion of relevant items in top-K
+        - nDCG@K: Normalized Discounted Cumulative Gain at K
+        - MRR: Mean Reciprocal Rank (1 / rank of first relevant item)
+        - gAUC: Group AUC (AUC computed for this single user's predictions)
     
     Args:
-        scores: Predicted scores for each item
-        labels: Ground truth labels (1 for relevant, 0 otherwise)
-        metrics_k: List of K values for metrics
+        scores: Predicted scores for each item (1D array/list)
+        labels: Ground truth labels (1 for relevant, 0 otherwise, 1D array/list)
+        metrics_k: List of K values for Recall@K and nDCG@K metrics
         
     Returns:
         Dict of metric names to values
     """
+    scores = np.asarray(scores)
+    labels = np.asarray(labels)
+    
     # Sort by score descending
     sorted_indices = np.argsort(-scores)
     sorted_labels = labels[sorted_indices]
@@ -434,6 +369,45 @@ def compute_ranking_metrics(
         return {}
     
     metrics = {}
+    
+    # ========== MRR: Mean Reciprocal Rank ==========
+    # Find the rank of the first relevant item (1-indexed)
+    first_relevant_positions = np.where(sorted_labels == 1)[0]
+    if len(first_relevant_positions) > 0:
+        first_relevant_rank = first_relevant_positions[0] + 1  # Convert to 1-indexed
+        metrics['MRR'] = 1.0 / first_relevant_rank
+    else:
+        metrics['MRR'] = 0.0
+    
+    # ========== gAUC: Group AUC ==========
+    # AUC for this single user/group
+    # Count pairs: (positive, negative) where positive has higher score
+    num_positive = int(true_relevant_count)
+    num_negative = len(labels) - num_positive
+    
+    if num_positive > 0 and num_negative > 0:
+        # Efficient AUC calculation using ranking
+        # For each positive sample, count how many negatives have lower scores
+        positive_scores = scores[labels == 1]
+        negative_scores = scores[labels == 0]
+        
+        # Count concordant pairs
+        concordant = 0
+        ties = 0
+        for pos_score in positive_scores:
+            concordant += np.sum(negative_scores < pos_score)
+            ties += np.sum(negative_scores == pos_score)
+        
+        # AUC = (concordant + 0.5 * ties) / (num_positive * num_negative)
+        metrics['gAUC'] = (concordant + 0.5 * ties) / (num_positive * num_negative)
+    else:
+        # Cannot compute AUC without both positive and negative samples
+        metrics['gAUC'] = 0.0
+    
+    # ========== Recall@K and nDCG@K ==========
+    if metrics_k is None:
+        metrics_k = []
+        
     for k in metrics_k:
         top_k = sorted_labels[:k]
         hits = np.sum(top_k)
@@ -480,14 +454,15 @@ def save_stage_output(stage_output: StageOutput, output_dir: str, prefix: str,
     os.makedirs(output_dir, exist_ok=True)
     filename = f"{prefix}_stage_output.pkl"
     filepath = os.path.join(output_dir, filename)
-    
-    stage_output.save(filepath)
+        
+    # Save as Parquet directory structure by default for efficiency
+    stage_output.save_parquet(filepath.replace('.pkl', '')) # save_parquet takes directory
     
     if logger:
         logger.info(f"Saved {stage_output.stage_name} output ({len(stage_output.candidate_sets)} requests, "
-                   f"{stage_output.get_total_candidates()} total candidates) to {filepath}")
+                   f"{stage_output.get_total_candidates()} total candidates) to {filepath.replace('.pkl', '')} (Parquet)")
     
-    return filepath
+    return filepath.replace('.pkl', '')
 
 
 def load_stage_output(filepath: str, logger: logging.Logger = None) -> Optional[StageOutput]:
@@ -505,7 +480,13 @@ def load_stage_output(filepath: str, logger: logging.Logger = None) -> Optional[
         raise FileNotFoundError(f"File {filepath} not found")
 
     try:
-        stage_output = StageOutput.load(filepath)
+        if os.path.isdir(filepath) or filepath.endswith('.parquet') or (not filepath.endswith('.pkl') and os.path.exists(os.path.join(filepath, 'metadata.json'))):
+             # Assume parquet directory if it's a dir or looks like one
+             stage_output = StageOutput.load_parquet(filepath)
+        else:
+             # Fallback to pickle
+             stage_output = StageOutput.load(filepath)
+        
         if logger:
             logger.info(f"Loaded {stage_output.stage_name} output from {filepath}: "
                        f"{len(stage_output.candidate_sets)} requests, "
@@ -533,59 +514,18 @@ def load_stage_outputs_from_dir(
     Returns:
         Tuple of (valid_output, test_output), both can be None if loading fails
     """
-    valid_path = os.path.join(output_dir, f"{prev_stage_name}_valid_stage_output.pkl")
-    test_path = os.path.join(output_dir, f"{prev_stage_name}_test_stage_output.pkl")
+    # Try loading Parquet format first (directory without extension often)
+    valid_path_pq = os.path.join(output_dir, f"{prev_stage_name}_valid_stage_output")
+    test_path_pq = os.path.join(output_dir, f"{prev_stage_name}_test_stage_output")
+
+    # If parquet dirs don't exist, fall back to .pkl files
+    valid_path = valid_path_pq if os.path.exists(valid_path_pq) else os.path.join(output_dir, f"{prev_stage_name}_valid_stage_output.pkl")
+    test_path = test_path_pq if os.path.exists(test_path_pq) else os.path.join(output_dir, f"{prev_stage_name}_test_stage_output.pkl")
     
     valid_output = load_stage_output(valid_path, logger)
     test_output = load_stage_output(test_path, logger)
     
     return valid_output, test_output
-
-
-def select_top_k_candidates(
-    request_id: str,
-    user_id: Any,
-    user_features: Dict[str, Any],
-    candidates: List[CandidateItem],
-    scores: np.ndarray,
-    valid_indices: List[int],
-    top_k: int,
-    source_stage: str
-) -> CandidateSet:
-    """
-    Select top-K candidates based on scores and create a CandidateSet.
-    
-    Args:
-        request_id: Request/impression ID
-        user_id: User ID
-        user_features: User feature dict
-        candidates: Original list of CandidateItem objects
-        scores: Predicted scores (aligned with valid_indices)
-        valid_indices: Indices of items that were scored
-        top_k: Number of top candidates to select
-        source_stage: Name of the current stage
-        
-    Returns:
-        CandidateSet with top-K candidates
-    """
-    # Update scores for valid candidates
-    scored_candidates = []
-    for idx, score in zip(valid_indices, scores):
-        cand = candidates[idx]
-        cand.score = float(score)
-        scored_candidates.append(cand)
-    
-    # Sort by score descending and take top-K
-    scored_candidates.sort(key=lambda x: x.score, reverse=True)
-    top_k_candidates = scored_candidates[:top_k]
-    
-    return CandidateSet(
-        request_id=request_id,
-        user_id=user_id,
-        user_features=user_features,
-        candidates=top_k_candidates,
-        source_stage=source_stage
-    )
 
 
 def parse_pipeline_args():
@@ -869,6 +809,8 @@ def process_and_rank_candidates(
     
     if compute_metrics:
         total_metrics = {f'{m}@{k}': 0.0 for k in metrics_k for m in ['Recall', 'nDCG']}
+        total_metrics['MRR'] = 0.0
+        total_metrics['gAUC'] = 0.0
         num_queries = 0
     
     effective_top_k = kwargs.get('top_k', top_k)
