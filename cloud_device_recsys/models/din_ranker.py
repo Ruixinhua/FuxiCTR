@@ -14,11 +14,14 @@ import logging
 
 from fuxictr.pytorch.models import BaseModel
 from fuxictr.pytorch.layers import FeatureEmbeddingDict, MLP_Block
+from .losses import DiversityLossMixin
 
 
-class DINRanker(BaseModel):
+class DINRanker(DiversityLossMixin, BaseModel):
     """
     Deep Interest Network (DIN) model for pre-ranking.
+    
+    Supports optional diversity loss via DiversityLossMixin.
     """
     
     def __init__(self,
@@ -39,7 +42,16 @@ class DINRanker(BaseModel):
                  diversity_lambda=0.7,
                  diversity_theta=0.7,
                  **kwargs):
-        super(DINRanker, self).__init__(
+        # Initialize DiversityLossMixin first
+        DiversityLossMixin.__init__(
+            self,
+            use_diversity_loss=use_diversity_loss,
+            diversity_lambda=diversity_lambda,
+            diversity_theta=diversity_theta,
+        )
+        # Initialize BaseModel
+        BaseModel.__init__(
+            self,
             feature_map,
             model_id=model_id,
             gpu=gpu,
@@ -48,12 +60,8 @@ class DINRanker(BaseModel):
             **kwargs
         )
         self.logger = logging.getLogger(self.__class__.__name__)
-        
-        # --- Diversity Loss Parameters ---
-        self.use_diversity_loss = use_diversity_loss
-        self.diversity_lambda = diversity_lambda
-        self.diversity_theta = diversity_theta
-        
+        if self.use_diversity_loss:
+            self.logger.info(f"Using Diversity Loss: lambda={diversity_lambda}, theta={diversity_theta}")
         # --- Feature Embedding Layer ---
         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
         
@@ -73,6 +81,9 @@ class DINRanker(BaseModel):
         if 'cand_item_id' not in self.target_item_features and 'cand_item_id' in feature_map.features:
             self.target_item_features.append('cand_item_id')
         self.logger.info(self.target_item_features)
+        
+        # Set item features for diversity loss (from mixin)
+        self._diversity_item_features = self.target_item_features
 
         self.target_item_attention_key = self.target_item_features[0] 
         
@@ -118,25 +129,8 @@ class DINRanker(BaseModel):
         X = self.get_inputs(inputs)
         feat_emb_dict = self.embedding_layer(X)
 
-        # --- Calculate Inner Product Matrix ---
-        item_feature_embs = []
-        for feature_name in self.target_item_features:
-            if feature_name in feat_emb_dict:
-                item_feature_embs.append(feat_emb_dict[feature_name])
-
-        inner_product_matrix = None
-        if self.use_diversity_loss and item_feature_embs:
-            # Concatenate features to form a single vector for each item
-            item_vectors = torch.cat(item_feature_embs, dim=-1)
-            # self.logger.info("use_diversity_loss is True")
-
-            # Calculate the inner product matrix (item-item similarity)
-            item_vectors_normalized = torch.nn.functional.normalize(item_vectors, p=2, dim=1)
-            cosine_similarity = torch.matmul(item_vectors_normalized, item_vectors_normalized.t())
-            
-            # Apply the formula (1 + Ii . Ij) / 2
-            inner_product_matrix = (1 + cosine_similarity) / 2
-        # --- End of Inner Product Calculation ---
+        # Store feat_emb_dict for diversity loss computation
+        self._last_feat_emb_dict = feat_emb_dict
         
         target_item_emb = feat_emb_dict[self.target_item_attention_key] 
         
@@ -173,10 +167,7 @@ class DINRanker(BaseModel):
         logits = self.mlp(final_mlp_input)
         y_pred = self.output_activation(logits)
         
-        return_dict = {"y_pred": y_pred}
-        if inner_product_matrix is not None:
-            return_dict["inner_product_matrix"] = inner_product_matrix
-        return return_dict
+        return {"y_pred": y_pred}
 
     def compute_loss(self, return_dict, y_true):
         """
@@ -192,28 +183,20 @@ class DINRanker(BaseModel):
         # Base loss (BCE or other) + regularization
         base_loss = self.loss_fn(return_dict["y_pred"], y_true, reduction='mean')
         reg_loss = self.regularization_loss()
+        total_base = base_loss + reg_loss
 
-        if not self.use_diversity_loss or "inner_product_matrix" not in return_dict:
-            self.logger.info(f"Base Loss: {base_loss}, Reg Loss: {reg_loss}")
-            return base_loss + reg_loss
+        # Compute diversity regularization using mixin method
+        if hasattr(self, '_last_feat_emb_dict'):
+            diversity_loss = self.compute_diversity_regularization(
+                self._last_feat_emb_dict, 
+                return_dict["y_pred"]
+            )
+        else:
+            diversity_loss = None
 
-        # Retrieve predictions and similarity matrix
-        y_pred = return_dict["y_pred"]
-        similarity_matrix = return_dict["inner_product_matrix"]
-
-        # Add a small identity matrix for numerical stability before logdet
-        identity = torch.eye(similarity_matrix.size(0), device=similarity_matrix.device) * 1e-6
-        log_det_similarity = torch.logdet(similarity_matrix + identity)
-
-        # Sum of predicted scores
-        r_ui_sum = torch.sum(y_pred)
-
-        # Diversity Loss Calculation
-        diversity_loss = self.diversity_theta * r_ui_sum + (1 - self.diversity_theta) * log_det_similarity
-
-        self.logger.info(f"Base Loss: {base_loss}, Reg Loss: {reg_loss}, Diversity Loss: {diversity_loss}")
-        
-        # Final Loss
-        total_loss = base_loss + reg_loss - self.diversity_lambda * diversity_loss
+        total_loss = self.add_diversity_to_loss(
+            total_base, 
+            diversity_loss
+        )
 
         return total_loss

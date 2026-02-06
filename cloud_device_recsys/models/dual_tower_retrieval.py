@@ -11,15 +11,14 @@ Based on the DSSM architecture from FuxiCTR.
 
 import torch
 from torch import nn
-import numpy as np
-from typing import Dict, List, Optional, Any
 import logging
 
 from fuxictr.pytorch.models import BaseModel
 from fuxictr.pytorch.layers import FeatureEmbeddingDict, MLP_Block
+from .losses import DiversityLossMixin
 
 
-class DualTowerRetrieval(BaseModel):
+class DualTowerRetrieval(DiversityLossMixin, BaseModel):
     """
     Dual-tower model for candidate retrieval.
     
@@ -27,6 +26,8 @@ class DualTowerRetrieval(BaseModel):
     - User Tower: Processes FG1 + FG2 features related to user
     - Item Tower: Processes FG1 + FG2 features related to item
     - Similarity: Dot product of user and item embeddings
+    
+    Supports optional diversity loss via DiversityLossMixin.
     """
     
     def __init__(self,
@@ -46,6 +47,9 @@ class DualTowerRetrieval(BaseModel):
                  temperature=0.1,
                  embedding_regularizer=None,
                  net_regularizer=None,
+                 use_diversity_loss=False,
+                 diversity_lambda=0.7,
+                 diversity_theta=0.7,
                  **kwargs):
         """
         Initialize Dual Tower Retrieval model.
@@ -65,8 +69,19 @@ class DualTowerRetrieval(BaseModel):
             batch_norm: Whether to use batch normalization
             use_l2_norm: Whether to L2 normalize embeddings
             temperature: Temperature for similarity computation
+            use_diversity_loss: Whether to use diversity loss
+            diversity_lambda: Weight of diversity loss in total loss
+            diversity_theta: Weight between prediction sum and diversity term
         """
-        super(DualTowerRetrieval, self).__init__(
+        # Initialize DiversityLossMixin first
+        DiversityLossMixin.__init__(
+            self,
+            use_diversity_loss=use_diversity_loss,
+            diversity_lambda=diversity_lambda,
+            diversity_theta=diversity_theta,
+        )
+        BaseModel.__init__(
+            self,
             feature_map,
             model_id=model_id,
             gpu=gpu,
@@ -74,12 +89,13 @@ class DualTowerRetrieval(BaseModel):
             net_regularizer=net_regularizer,
             **kwargs
         )
-        
         self.use_l2_norm = use_l2_norm
         self.temperature = temperature
         self.embedding_dim = embedding_dim
         self.logger = logging.getLogger(self.__class__.__name__)
-        
+
+        if self.use_diversity_loss:
+            self.logger.info(f"Using Diversity Loss: lambda={diversity_lambda}, theta={diversity_theta}")
         # Create embedding layer
         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
         
@@ -295,3 +311,46 @@ class DualTowerRetrieval(BaseModel):
         similarity = similarity / self.temperature
         # Apply output activation (sigmoid for binary classification)
         return self.output_activation(similarity)
+
+    def get_diversity_item_embeddings(self, feat_emb_dict):
+        """
+        Override mixin method to use item tower embeddings for diversity.
+        
+        For DualTowerRetrieval, we use the final item embeddings from the item tower
+        instead of raw feature embeddings.
+        """
+        # Use stored item embedding from forward pass
+        if hasattr(self, '_last_item_embedding'):
+            return self._last_item_embedding
+        return None
+
+    def compute_loss(self, return_dict, y_true):
+        """
+        Compute loss with optional diversity regularization.
+
+        Args:
+            return_dict: Output from forward pass (contains y_pred, item_embedding)
+            y_true: Ground truth labels
+
+        Returns:
+            Total loss
+        """
+        total_base = super().compute_loss(return_dict, y_true)
+
+        # For diversity loss, use item embeddings from forward pass
+        if self._use_diversity_loss and "item_embedding" in return_dict:
+            from .losses import compute_diversity_loss
+            diversity_loss = compute_diversity_loss(
+                item_embeddings=return_dict["item_embedding"],
+                y_pred=return_dict["y_pred"],
+                theta=self._diversity_theta,
+            )
+        else:
+            diversity_loss = None
+
+        total_loss = self.add_diversity_to_loss(
+            total_base, 
+            diversity_loss
+        )
+
+        return total_loss
