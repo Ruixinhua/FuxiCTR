@@ -117,34 +117,7 @@ class BaseStage(ABC):
             Dictionary of evaluation metrics
         """
         pass
-    
-    def save_output(self, output: StageOutput, save_csv: bool = True) -> Dict[str, str]:
-        """
-        Save stage output to files.
-        
-        Args:
-            output: StageOutput to save
-            save_csv: Whether to also save as CSV files
-            
-        Returns:
-            Dictionary mapping output type to filepath
-        """
-        saved_files = {}
-        
-        # Save pickle (full data)
-        pickle_path = os.path.join(self.output_dir, f"{self.stage_name}_output.pkl")
-        output.save(pickle_path)
-        saved_files['pickle'] = pickle_path
-        self.logger.info(f"Saved stage output to {pickle_path}")
-        
-        # Save CSV (human-readable)
-        if save_csv:
-            csv_files = output.save_to_csv(self.output_dir)
-            saved_files.update(csv_files)
-            self.logger.info(f"Saved CSV files: {list(csv_files.values())}")
-        
-        return saved_files
-    
+
     def load_previous_output(self, filepath: str) -> StageOutput:
         """Load output from a previous stage"""
         output = StageOutput.load(filepath)

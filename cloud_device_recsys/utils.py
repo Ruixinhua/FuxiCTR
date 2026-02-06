@@ -434,17 +434,17 @@ def compute_ranking_metrics(
     return metrics
 
 
-def save_stage_output(stage_output: StageOutput, output_dir: str, prefix: str, 
-                       logger: logging.Logger = None) -> str:
+def save_stage_output(stage_output: StageOutput, output_dir: str, prefix: str,
+                      logger: logging.Logger = None) -> str:
     """
     Save a StageOutput object to disk using pickle format.
-    
+
     Args:
         stage_output: StageOutput object to save
         output_dir: Directory to save the output file
         prefix: Prefix for the output filename (e.g., 'retrieval_valid', 'preranking_test')
         logger: Optional logger instance
-        
+
     Returns:
         Path to the saved file
     """
@@ -454,25 +454,23 @@ def save_stage_output(stage_output: StageOutput, output_dir: str, prefix: str,
     os.makedirs(output_dir, exist_ok=True)
     filename = f"{prefix}_stage_output.pkl"
     filepath = os.path.join(output_dir, filename)
-        
-    # Save as Parquet directory structure by default for efficiency
-    stage_output.save_parquet(filepath.replace('.pkl', '')) # save_parquet takes directory
-    
+
+    stage_output.save(filepath)
+
     if logger:
         logger.info(f"Saved {stage_output.stage_name} output ({len(stage_output.candidate_sets)} requests, "
-                   f"{stage_output.get_total_candidates()} total candidates) to {filepath.replace('.pkl', '')} (Parquet)")
-    
-    return filepath.replace('.pkl', '')
+                    f"{stage_output.get_total_candidates()} total candidates) to {filepath}")
 
+    return filepath
 
 def load_stage_output(filepath: str, logger: logging.Logger = None) -> Optional[StageOutput]:
     """
     Load a StageOutput object from disk.
-    
+
     Args:
         filepath: Path to the pickle file
         logger: Optional logger instance
-        
+
     Returns:
         StageOutput object, or None if loading fails
     """
@@ -480,53 +478,40 @@ def load_stage_output(filepath: str, logger: logging.Logger = None) -> Optional[
         raise FileNotFoundError(f"File {filepath} not found")
 
     try:
-        if os.path.isdir(filepath) or filepath.endswith('.parquet') or (not filepath.endswith('.pkl') and os.path.exists(os.path.join(filepath, 'metadata.json'))):
-             # Assume parquet directory if it's a dir or looks like one
-             stage_output = StageOutput.load_parquet(filepath)
-        else:
-             # Fallback to pickle
-             stage_output = StageOutput.load(filepath)
-        
+        stage_output = StageOutput.load(filepath)
         if logger:
             logger.info(f"Loaded {stage_output.stage_name} output from {filepath}: "
-                       f"{len(stage_output.candidate_sets)} requests, "
-                       f"{stage_output.get_total_candidates()} total candidates")
+                        f"{len(stage_output.candidate_sets)} requests, "
+                        f"{stage_output.get_total_candidates()} total candidates")
         return stage_output
     except Exception as e:
         if logger:
             logger.error(f"Failed to load stage output from {filepath}: {e}")
         return None
 
-
 def load_stage_outputs_from_dir(
-    output_dir: str, 
-    prev_stage_name: str, 
-    logger: logging.Logger = None
+        output_dir: str,
+        prev_stage_name: str,
+        logger: logging.Logger = None
 ) -> Tuple[Optional[StageOutput], Optional[StageOutput]]:
     """
     Load valid and test stage outputs from a directory.
-    
+
     Args:
         output_dir: Directory containing stage output files (e.g., './outputs/exp_xxx/stage_outputs')
         prev_stage_name: Name of the previous stage (e.g., 'retrieval' or 'preranking')
         logger: Optional logger instance
-        
+
     Returns:
         Tuple of (valid_output, test_output), both can be None if loading fails
     """
-    # Try loading Parquet format first (directory without extension often)
-    valid_path_pq = os.path.join(output_dir, f"{prev_stage_name}_valid_stage_output")
-    test_path_pq = os.path.join(output_dir, f"{prev_stage_name}_test_stage_output")
+    valid_path = os.path.join(output_dir, f"{prev_stage_name}_valid_stage_output.pkl")
+    test_path = os.path.join(output_dir, f"{prev_stage_name}_test_stage_output.pkl")
 
-    # If parquet dirs don't exist, fall back to .pkl files
-    valid_path = valid_path_pq if os.path.exists(valid_path_pq) else os.path.join(output_dir, f"{prev_stage_name}_valid_stage_output.pkl")
-    test_path = test_path_pq if os.path.exists(test_path_pq) else os.path.join(output_dir, f"{prev_stage_name}_test_stage_output.pkl")
-    
     valid_output = load_stage_output(valid_path, logger)
     test_output = load_stage_output(test_path, logger)
-    
-    return valid_output, test_output
 
+    return valid_output, test_output
 
 def parse_pipeline_args():
     """Parse command line arguments for the pipeline."""
