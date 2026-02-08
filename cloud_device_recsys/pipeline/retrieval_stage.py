@@ -216,8 +216,7 @@ class RetrievalStage(BaseStage):
         """
         Train the model for one epoch with negative sampling and pairwise ranking loss.
         
-        For each positive example in the batch, samples n negative items and
-        computes pairwise ranking loss (BPR, margin, or softmax).
+        Optimized: batches all negative embeddings into a single call.
         """
         import torch
         
@@ -240,49 +239,53 @@ class RetrievalStage(BaseStage):
             self.model._total_steps += 1
             
             batch_dict = dict(batch_data)
+            batch_size = len(batch_dict[item_id_col])
             
             # Get positive item IDs
             pos_item_ids = batch_dict[item_id_col].cpu().numpy()
             
-            # Sample negative items for each positive
+            # Sample negative items for each positive: [B, num_negatives]
             neg_item_ids = self.negative_sampler.sample_negatives_batch(
                 pos_item_ids, self.num_negatives
-            )  # [batch_size, num_negatives]
+            )
             
-            # Compute positive item embeddings (from the batch)
+            # Compute positive embeddings
             pos_user_emb = self.model.get_user_embedding(batch_data)  # [B, D]
             pos_item_emb = self.model.get_item_embedding(batch_data)  # [B, D]
             pos_scores = self.model.cal_similarity(pos_user_emb, pos_item_emb)  # [B, 1]
             
-            # Compute negative item embeddings
-            # We need to create batch data for negative items
-            neg_scores_list = []
-            for neg_idx in range(self.num_negatives):
-                neg_ids = neg_item_ids[:, neg_idx]  # [B]
-                
-                # Get negative item features
-                neg_features = self.negative_sampler.get_item_features(neg_ids.tolist())
-                
-                # Build negative batch dict (copy user features, replace item features)
-                neg_batch_dict = {}
-                for key, val in batch_dict.items():
-                    if key == item_id_col:
-                        neg_batch_dict[key] = torch.tensor(neg_ids, device=self.model.device)
-                    elif key in neg_features.columns:
-                        # Replace with negative item feature
-                        neg_val = neg_features[key].values
-                        neg_batch_dict[key] = torch.tensor(neg_val, device=self.model.device)
-                    else:
-                        # Keep user features
-                        neg_batch_dict[key] = val.to(self.model.device) if hasattr(val, 'to') else val
-                
-                # Get negative item embedding
-                neg_item_emb = self.model.get_item_embedding(neg_batch_dict)  # [B, D]
-                neg_score = self.model.cal_similarity(pos_user_emb, neg_item_emb)  # [B, 1]
-                neg_scores_list.append(neg_score)
+            # === Optimized: Batch all negatives into single embedding call ===
+            # Flatten: [B, num_neg] -> [B * num_neg]
+            neg_ids_flat = neg_item_ids.reshape(-1)
             
-            # Stack negative scores: [B, num_negatives]
-            neg_scores = torch.cat(neg_scores_list, dim=1)
+            # Get features for all negatives at once
+            neg_features_dict = self.negative_sampler.get_item_features_as_dict(neg_ids_flat.tolist())
+            
+            # Build batched negative dict
+            neg_batch_dict = {}
+            for key, val in batch_dict.items():
+                if key == item_id_col:
+                    neg_batch_dict[key] = torch.tensor(neg_ids_flat, device=self.model.device)
+                elif key in neg_features_dict:
+                    neg_batch_dict[key] = torch.tensor(neg_features_dict[key], device=self.model.device)
+                else:
+                    # Repeat user features along batch dimension: [B, ...] -> [B * num_neg, ...]
+                    if hasattr(val, 'to'):
+                        val = val.to(self.model.device)
+                        # Repeat each element num_negatives times along batch dim (dim=0)
+                        neg_batch_dict[key] = val.repeat_interleave(self.num_negatives, dim=0)
+                    else:
+                        neg_batch_dict[key] = val
+            
+            # Single call for all negative embeddings: [B * num_neg, D]
+            neg_item_emb_flat = self.model.get_item_embedding(neg_batch_dict)
+            
+            # Repeat user embedding and compute all similarities at once
+            pos_user_emb_repeated = pos_user_emb.repeat_interleave(self.num_negatives, dim=0)  # [B * num_neg, D]
+            neg_scores_flat = self.model.cal_similarity(pos_user_emb_repeated, neg_item_emb_flat)  # [B * num_neg, 1]
+            
+            # Reshape: [B * num_neg, 1] -> [B, num_neg]
+            neg_scores = neg_scores_flat.view(batch_size, self.num_negatives)
             
             # Compute pairwise ranking loss
             if self.loss_type == 'bpr':

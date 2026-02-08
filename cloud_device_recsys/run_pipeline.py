@@ -41,8 +41,11 @@ from cloud_device_recsys.pipeline import RetrievalStage, PrerankingStage, Rerank
 from cloud_device_recsys.utils import (
     setup_logging, get_data_dir, get_data_paths,
     prepare_debug_paths, parse_pipeline_args,
-    save_stage_output, load_stage_outputs_from_dir
+    save_stage_output, load_stage_outputs_from_dir,
+    enrich_stage_output_user_features
 )
+from cloud_device_recsys.data.item_pool import ensure_item_pool
+from cloud_device_recsys.data.positive_data import get_train_path_for_mode
 from cloud_device_recsys.config.config_parser import ConfigParser
 import pandas as pd
 
@@ -131,7 +134,9 @@ def create_stages(
 
 def _prepare_stage_data_loaders(feature_map, stage_config: dict, paths: dict, 
                                   create_train=True, create_test=True, shuffle_train=True,
-                                  create_item_loader=False, item_feature_map=None):
+                                  create_item_loader=False, item_feature_map=None,
+                                  num_negatives: int = 0, label_col: str = "label",
+                                  logger=None):
     """
     Create data loaders for a pipeline stage.
     
@@ -144,6 +149,9 @@ def _prepare_stage_data_loaders(feature_map, stage_config: dict, paths: dict,
         shuffle_train: Whether to shuffle training data
         create_item_loader: Whether to create item pool loader (for retrieval)
         item_feature_map: Feature map for item pool (required if create_item_loader=True)
+        num_negatives: Number of negatives per positive (0 = pointwise, >0 = pairwise)
+        label_col: Label column name for filtering positive samples
+        logger: Logger instance for positive data creation
         
     Returns:
         dict with keys: train_loader, test_loader, item_loader (based on flags)
@@ -154,13 +162,21 @@ def _prepare_stage_data_loaders(feature_map, stage_config: dict, paths: dict,
     result = {}
     
     if create_train:
+        # Select training data path based on training mode
+        train_path = get_train_path_for_mode(
+            train_path=paths['train_path'],
+            num_negatives=num_negatives,
+            label_col=label_col,
+            logger=logger
+        )
+        
         train_fm = copy.deepcopy(feature_map)
         if "impression_id" in train_fm.labels:
             train_fm.labels.remove("impression_id")
         result['train_loader'] = RankDataLoader(
             feature_map=train_fm,
             stage='train',
-            train_data=paths['train_path'],
+            train_data=train_path,
             batch_size=batch_size,
             shuffle=shuffle_train,
             data_format=data_format
@@ -214,6 +230,14 @@ def prepare_shared_data_loaders(feature_map, dataset_config, pipeline_config, fg
     paths = get_data_paths(dataset_config, pipeline_config, logger)
     paths = prepare_debug_paths(paths, dataset_config, logger)
     
+    # Ensure item pool exists (generate if missing)
+    ensure_item_pool(
+        data_paths={'item_pool_path': paths['item_pool_path'], 'test_path': paths['test_path'], 'valid_path': paths['valid_path']},
+        dataset_config=dataset_config,
+        feature_group_manager=fg_manager,
+        logger=logger
+    )
+    
     # Create item feature map for item pool loader
     item_fm = _create_item_feature_map(feature_map, fg_manager, dataset_config)
     logger.info(f"Loading item pool from {paths['item_pool_path']}")
@@ -221,6 +245,11 @@ def prepare_shared_data_loaders(feature_map, dataset_config, pipeline_config, fg
     # Get batch_size from retrieval config (primary stage)
     retrieval_config = pipeline_config['stages'].get('retrieval', {})
     batch_size = retrieval_config.get('training', {}).get('batch_size', 4096)
+    
+    # Detect training mode from retrieval config
+    # Note: For shared loaders in full pipeline, retrieval stage determines training mode
+    num_negatives = retrieval_config.get('model_params', {}).get('num_negatives', 0)
+    label_col = dataset_config.get('label_col', {}).get('name', 'label')
     
     # Create all loaders once
     loaders = _prepare_stage_data_loaders(
@@ -231,7 +260,10 @@ def prepare_shared_data_loaders(feature_map, dataset_config, pipeline_config, fg
         create_test=True,
         shuffle_train=True,
         create_item_loader=True,
-        item_feature_map=item_fm
+        item_feature_map=item_fm,
+        num_negatives=num_negatives,
+        label_col=label_col,
+        logger=logger
     )
     
     return {
@@ -265,7 +297,7 @@ def _create_item_feature_map(feature_map, fg_manager, dataset_config):
     item_fm.column_index = {k: v for k, v in item_fm.column_index.items() if k in item_feature_names}
     return item_fm
 
-def run_retrieval_stage(retrieval_stage, pipeline_config, dataset_config, fg_manager, logger=None, shared_loaders=None):
+def run_retrieval_stage(retrieval_stage, pipeline_config, dataset_config, fg_manager, logger=None, shared_loaders=None, full_feature_map=None):
     if logger is None:
         logger = logging.getLogger('PipelineRunner')
     retrieval_config = pipeline_config['stages']['retrieval']
@@ -279,8 +311,10 @@ def run_retrieval_stage(retrieval_stage, pipeline_config, dataset_config, fg_man
         test_loader = shared_loaders['test_loader']
     else:
         # Create loaders using shared function
+        # Use full_feature_map if provided to include FG3 features for downstream stages
+        loader_fm = full_feature_map if full_feature_map is not None else retrieval_stage.feature_map
         loaders = prepare_shared_data_loaders(
-            feature_map=retrieval_stage.feature_map,
+            feature_map=loader_fm,
             dataset_config=dataset_config,
             pipeline_config=pipeline_config,
             fg_manager=fg_manager,
@@ -348,11 +382,12 @@ def run_retrieval_stage(retrieval_stage, pipeline_config, dataset_config, fg_man
     # 4. Generate Candidates for Pipeline
     logger.info("Generating candidates for pipeline flow...")
     test_output, test_metrics = retrieval_stage.process(test_loader.make_iterator())
+    logger.info(f"Test (Retrieval): {test_metrics}")
     valid_output, _ = retrieval_stage.process(valid_loader.make_iterator(), compute_metrics=False)
     metrics.update({f"retrieval_test_{k}": v for k, v in test_metrics.items()})
     return metrics, valid_output, test_output
 
-def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, logger=None, shared_loaders=None,
+def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, fg_manager=None, logger=None, shared_loaders=None,
                          prev_output_test=None, prev_output_valid=None):
     if logger is None:
         logger = logging.getLogger('PipelineRunner')
@@ -366,10 +401,21 @@ def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, logg
         train_gen, _ = shared_loaders['train_loader'].make_iterator()
     else:
         paths = get_data_paths(dataset_config, pipeline_config, logger)
+        # Ensure item pool exists when running standalone
+        if fg_manager is not None:
+            ensure_item_pool(
+                data_paths={'item_pool_path': paths['item_pool_path'], 'valid_path': paths['valid_path'], 'test_path': paths['test_path']},
+                dataset_config=dataset_config,
+                feature_group_manager=fg_manager,
+                logger=logger
+            )
         loaders = _prepare_stage_data_loaders(
             feature_map=preranking_stage.feature_map,
             stage_config=preranking_config,
-            paths=paths
+            paths=paths,
+            num_negatives=preranking_config.get('model_params', {}).get('num_negatives', 0),
+            label_col=dataset_config.get('label_col', {}).get('name', 'label'),
+            logger=logger
         )
         train_gen, _ = loaders['train_loader'].make_iterator()
 
@@ -395,7 +441,7 @@ def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, logg
     metrics.update({f"preranking_valid_{k}": v for k, v in valid_metrics.items()})
     return metrics, valid_output, test_output
 
-def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, logger=None, shared_loaders=None,
+def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_manager=None, logger=None, shared_loaders=None,
                         prev_output_valid=None, prev_output_test=None):
     if logger is None:
         logger = logging.getLogger('PipelineRunner')
@@ -409,16 +455,37 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, logger
         train_gen, _ = shared_loaders['train_loader'].make_iterator()
     else:
         paths = get_data_paths(dataset_config, pipeline_config, logger)
+        # Ensure item pool exists when running standalone
+        if fg_manager is not None:
+            ensure_item_pool(
+                data_paths={'item_pool_path': paths['item_pool_path'], 'valid_path': paths['valid_path'], 'test_path': paths['test_path']},
+                dataset_config=dataset_config,
+                feature_group_manager=fg_manager,
+                logger=logger
+            )
         loaders = _prepare_stage_data_loaders(
             feature_map=reranking_stage.feature_map,
             stage_config=reranking_config,
-            paths=paths
+            paths=paths,
+            num_negatives=reranking_config.get('model_params', {}).get('num_negatives', 0),
+            label_col=dataset_config.get('label_col', {}).get('name', 'label'),
+            logger=logger
         )
         train_gen, _ = loaders['train_loader'].make_iterator()
 
     # Load Item Pool for Evaluation/Processing
     if os.path.exists(paths['item_pool_path']):
         reranking_stage.load_item_features(paths['item_pool_path'])
+    
+    # Enrich stage outputs with missing FG3 user features (backward compatibility)
+    if fg_manager is not None:
+        impression_id_col = dataset_config.get('impression_id_col', 'impression_id')
+        prev_output_valid = enrich_stage_output_user_features(
+            prev_output_valid, paths['valid_path'], fg_manager, impression_id_col, logger
+        )
+        prev_output_test = enrich_stage_output_user_features(
+            prev_output_test, paths['test_path'], fg_manager, impression_id_col, logger
+        )
     # 2. Train Reranking Model
     logger.info("[Reranking] Training model...")
     reranking_stage.build_model()
@@ -584,7 +651,7 @@ def main():
             
         preranking_stage = stages['preranking']
         p_metrics, p_valid, p_test = run_preranking_stage(
-            preranking_stage, pipeline_config, dataset_config, 
+            preranking_stage, pipeline_config, dataset_config, fg_manager=fg_manager,
             logger=logger, prev_output_valid=r_valid, prev_output_test=r_test,
             shared_loaders=shared_loaders
         )
@@ -599,7 +666,8 @@ def main():
 
         reranking_stage = stages['reranking']
         d_metrics = run_reranking_stage(
-            reranking_stage, pipeline_config, dataset_config, logger=logger, shared_loaders=shared_loaders,
+            reranking_stage, pipeline_config, dataset_config, fg_manager=fg_manager,
+            logger=logger, shared_loaders=shared_loaders,
             prev_output_valid=p_valid, prev_output_test=p_test
         )
         all_metrics.update(d_metrics)
@@ -635,8 +703,8 @@ def main():
         
         preranking_stage = stages['preranking']
         p_metrics, p_valid, p_test = run_preranking_stage(
-            preranking_stage, pipeline_config, dataset_config, logger=logger,
-            prev_output_valid=prev_output_valid, prev_output_test=prev_output_test
+            preranking_stage, pipeline_config, dataset_config, fg_manager=fg_manager,
+            logger=logger, prev_output_valid=prev_output_valid, prev_output_test=prev_output_test
         )
         all_metrics.update(p_metrics)
         
@@ -661,7 +729,8 @@ def main():
 
         reranking_stage = stages['reranking']
         d_metrics = run_reranking_stage(
-            reranking_stage, pipeline_config, dataset_config, logger=logger,
+            reranking_stage, pipeline_config, dataset_config, fg_manager=fg_manager,
+            logger=logger,
             prev_output_valid=prev_output_valid, prev_output_test=prev_output_test
         )
         all_metrics.update(d_metrics)

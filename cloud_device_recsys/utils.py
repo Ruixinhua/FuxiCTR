@@ -1,3 +1,4 @@
+from __future__ import annotations
 import logging
 import os
 import sys
@@ -6,9 +7,10 @@ import pandas as pd
 import torch
 from datetime import datetime
 import argparse
-from typing import Tuple, List, Dict, Any, Optional
+from typing import Tuple, List, Dict, Any, Optional, TYPE_CHECKING
 
-from .pipeline.stage_output import StageOutput
+if TYPE_CHECKING:
+    from .pipeline.stage_output import StageOutput
 
 
 def filter_feature_map(feature_map, fg_manager, allowed_feature_groups, use_feature_encoder=False):
@@ -356,11 +358,16 @@ def compute_ranking_metrics(
     Returns:
         Dict of metric names to values
     """
-    scores = np.asarray(scores)
+    scores = np.asarray(scores, dtype=np.float64)
     labels = np.asarray(labels)
     
-    # Sort by score descending
-    sorted_indices = np.argsort(-scores)
+    # Sort by score descending with PESSIMISTIC tie-breaking:
+    # When scores are tied, positive items (label=1) are ranked LAST among ties.
+    # This is achieved by using a secondary sort key: +labels (so label=0 comes before label=1)
+    # We use lexsort which sorts by the LAST key first (in ascending order).
+    # lexsort((labels, -scores)) means: primary sort by -scores DESC, secondary by labels ASC
+    # Since label=0 < label=1 in ascending order, negatives come first among ties.
+    sorted_indices = np.lexsort((labels, -scores))
     sorted_labels = labels[sorted_indices]
     
     true_relevant_count = np.sum(sorted_labels)
@@ -479,6 +486,7 @@ def load_stage_output(filepath: str, logger: logging.Logger = None) -> Optional[
         StageOutput object, or None if loading fails
     """
     import time
+    from .pipeline.stage_output import StageOutput  # Runtime import to avoid circular dependency
     if filepath is None or not os.path.exists(filepath):
         raise FileNotFoundError(f"Path {filepath} not found")
 
@@ -535,6 +543,103 @@ def load_stage_outputs_from_dir(
     test_output = load_stage_output(test_path, logger)
 
     return valid_output, test_output
+
+
+def enrich_stage_output_user_features(
+        stage_output: StageOutput,
+        data_path: str,
+        fg_manager,
+        impression_id_col: str = 'impression_id',
+        logger: logging.Logger = None
+) -> StageOutput:
+    """
+    Enrich StageOutput with missing FG3 user features from original data files.
+    
+    This provides backward compatibility for stage_output files that were saved
+    without FG3 features (due to filtered feature_map in DataLoader).
+    
+    Args:
+        stage_output: StageOutput to enrich
+        data_path: Path to original data file (parquet/csv) with complete features
+        fg_manager: FeatureGroupManager with feature assignments
+        impression_id_col: Column name for request IDs (default: 'impression_id')
+        logger: Optional logger instance
+        
+    Returns:
+        StageOutput with enriched user features (modified in-place)
+    """
+    if stage_output is None:
+        return None
+        
+    if logger is None:
+        logger = logging.getLogger(__name__)
+    
+    user_features_df = stage_output.user_features_df
+    if user_features_df is None or len(user_features_df) == 0:
+        logger.warning("No user features to enrich")
+        return stage_output
+    
+    # Get all user features (FG2 + FG3) that should be present
+    all_user_features = fg_manager.get_user_features()
+    existing_columns = set(user_features_df.columns)
+    missing_features = all_user_features - existing_columns
+    
+    if not missing_features:
+        logger.info("All expected user features already present, no enrichment needed")
+        return stage_output
+    
+    logger.info(f"Found {len(missing_features)} missing user features: {sorted(missing_features)}")
+    
+    # Load source data
+    if not os.path.exists(data_path):
+        logger.warning(f"Data file not found: {data_path}, cannot enrich features")
+        return stage_output
+    
+    try:
+        if data_path.endswith('.parquet'):
+            # Only load required columns for efficiency
+            required_cols = [impression_id_col] + list(missing_features)
+            source_df = pd.read_parquet(data_path, columns=required_cols)
+        else:
+            source_df = pd.read_csv(data_path, usecols=lambda c: c in [impression_id_col] + list(missing_features))
+        
+        # Check which columns actually exist in source
+        available_missing = [f for f in missing_features if f in source_df.columns]
+        if not available_missing:
+            logger.warning(f"None of the missing features found in source data: {data_path}")
+            return stage_output
+        
+        logger.info(f"Loading {len(available_missing)} features from source: {sorted(available_missing)}")
+        
+        # Deduplicate source data by impression_id (keep first occurrence)
+        cols_to_keep = [impression_id_col] + available_missing
+        source_df = source_df[cols_to_keep].drop_duplicates(subset=[impression_id_col], keep='first')
+        
+        # Merge with existing user features
+        merge_key = 'request_id' if 'request_id' in user_features_df.columns else impression_id_col
+        source_merge_key = impression_id_col
+        
+        # Rename source key if needed
+        if merge_key != source_merge_key and merge_key in user_features_df.columns:
+            source_df = source_df.rename(columns={source_merge_key: merge_key})
+        
+        # Perform left merge to add missing features
+        enriched_df = user_features_df.merge(
+            source_df, 
+            on=merge_key, 
+            how='left'
+        )
+        
+        # Replace the user features DataFrame
+        stage_output._user_features_df = enriched_df
+        
+        logger.info(f"Successfully enriched user features: {len(user_features_df)} -> {len(enriched_df)} rows, "
+                   f"added {len(available_missing)} columns")
+        
+    except Exception as e:
+        logger.error(f"Failed to enrich user features: {e}")
+    
+    return stage_output
 
 def parse_pipeline_args():
     """Parse command line arguments for the pipeline."""
@@ -612,6 +717,8 @@ def process_and_rank_candidates(
     """
     if logger is None:
         logger = logging.getLogger(stage_name)
+    
+    from .pipeline.stage_output import StageOutput  # Runtime import to avoid circular dependency
     
     # Validate arguments
     if compute_metrics and not metrics_k:
@@ -692,9 +799,35 @@ def process_and_rank_candidates(
     all_item_ids_arr = np.array(all_item_ids)
     all_labels_arr = np.array(all_labels)
     
+    # Ensure dtype consistency between candidate item IDs and item_features_df index
+    # This fixes issues where item IDs may be stored as float (e.g., 182966.0) but index is int64
+    index_dtype = item_features_df.index.dtype
+    if all_item_ids_arr.dtype != index_dtype:
+        logger.info(f"Converting candidate item_ids from {all_item_ids_arr.dtype} to {index_dtype}")
+        try:
+            all_item_ids_arr = all_item_ids_arr.astype(index_dtype)
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Failed to convert item_ids dtype: {e}")
+    
     # Find which items exist in the item pool
     valid_mask = np.isin(all_item_ids_arr, item_features_df.index)
     valid_item_ids = all_item_ids_arr[valid_mask]
+    
+    # Debug: Check how many candidates are filtered out
+    num_filtered = total_candidates - len(valid_item_ids)
+    if num_filtered > 0:
+        # Get filtered items for debugging
+        filtered_mask = ~valid_mask
+        filtered_item_ids = all_item_ids_arr[filtered_mask]
+        filtered_labels = all_labels_arr[filtered_mask]
+        num_positive_filtered = np.sum(filtered_labels == 1)
+        
+        logger.warning(f"Phase 2: {num_filtered}/{total_candidates} ({100*num_filtered/total_candidates:.1f}%) "
+                      f"candidates filtered out (item not in item_features_df)")
+        logger.warning(f"  - Positive items filtered: {num_positive_filtered}/{num_filtered}")
+        logger.warning(f"  - Sample filtered item IDs: {filtered_item_ids[:5].tolist()}")
+        logger.warning(f"  - item_features_df index dtype: {item_features_df.index.dtype}, "
+                      f"candidate item_id dtype: {all_item_ids_arr.dtype}")
     
     # Batch lookup item features
     if len(valid_item_ids) > 0:
@@ -807,9 +940,15 @@ def process_and_rank_candidates(
                 v = np.ascontiguousarray(v)
             
             if ftype == 'sequence' or ftype == 'categorical':
+                # Handle None values in object arrays before conversion
+                if v.dtype == np.object_:
+                    v = np.array([x if x is not None else 0 for x in v.flat]).reshape(v.shape)
                 v_typed = v.astype(np.int64) if v.dtype != np.int64 else v
                 tensor_batch[k] = torch.from_numpy(v_typed).to(device, non_blocking=True)
             else:
+                # Handle None values in object arrays before conversion
+                if v.dtype == np.object_:
+                    v = np.array([x if x is not None else 0.0 for x in v.flat]).reshape(v.shape)
                 v_typed = v.astype(np.float32) if v.dtype != np.float32 else v
                 tensor_batch[k] = torch.from_numpy(v_typed).to(device, non_blocking=True)
         
@@ -834,6 +973,7 @@ def process_and_rank_candidates(
     global_to_valid_idx = np.full(total_candidates, -1, dtype=np.int64)
     global_to_valid_idx[valid_global_indices] = np.arange(num_valid)
     num_queries = 0
+    valid_queries = 0
     if compute_metrics:
         total_metrics = {f'{m}@{k}': 0.0 for k in metrics_k for m in ['Recall', 'nDCG']}
         total_metrics['MRR'] = 0.0
@@ -890,7 +1030,28 @@ def process_and_rank_candidates(
         num_queries += 1
         # Compute metrics if requested
         if compute_metrics and np.sum(req_labels) > 0:
+            num_candidates = len(req_labels)
+            num_positive = int(np.sum(req_labels))
+            num_negative = num_candidates - num_positive
+            valid_queries += 1
+            # Detailed debugging for first 3 queries
+            if num_queries < 3:
+                pos_scores = req_scores[req_labels == 1]
+                neg_scores = req_scores[req_labels == 0]
+                # Pessimistic rank: all negatives with score >= positive come first
+                pos_rank_pessimistic = int(np.sum(neg_scores >= pos_scores[0])) + 1
+                logger.info(f"[DEBUG] Query {req_id}: {num_candidates} cands ({num_positive} pos, {num_negative} neg)")
+                logger.info(f"[DEBUG]   Positive score: {pos_scores[0]:.6f}")
+                logger.info(f"[DEBUG]   Negative scores: min={neg_scores.min():.6f}, max={neg_scores.max():.6f}, mean={neg_scores.mean():.6f}")
+                logger.info(f"[DEBUG]   Positive rank (pessimistic): {pos_rank_pessimistic} (1=best)")
+                logger.info(f"[DEBUG]   # negatives >= pos: {np.sum(neg_scores >= pos_scores[0])}, # negatives < pos: {np.sum(neg_scores < pos_scores[0])}")
+            
             query_metrics = compute_ranking_metrics(req_scores, req_labels, metrics_k)
+            
+            # Log individual query metrics for first 3 queries
+            if num_queries < 3 and query_metrics:
+                logger.info(f"[DEBUG]   Query metrics: MRR={query_metrics.get('MRR', 0):.4f}, gAUC={query_metrics.get('gAUC', 0):.4f}")
+            
             if query_metrics:
                 for metric_name, value in query_metrics.items():
                     total_metrics[metric_name] += value
@@ -911,7 +1072,10 @@ def process_and_rank_candidates(
     if compute_metrics:
         if num_queries > 0:
             for metric_name in total_metrics:
-                metrics[metric_name] = total_metrics[metric_name] / num_queries
+                if metric_name == 'gAUC':  # gAUC should averaged across valid queries
+                    metrics[metric_name] = total_metrics['gAUC'] / valid_queries if valid_queries > 0 else 0.0
+                else:
+                    metrics[metric_name] = total_metrics[metric_name] / num_queries
         else:
             logger.warning("No valid queries with positive labels for ranking evaluation.")
     

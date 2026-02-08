@@ -39,7 +39,7 @@ class PrerankingStage(BaseStage):
                  model_params: Dict[str, Any],
                  output_dir: str = "./outputs/preranking",
                  top_k: int = 100,
-                 use_diversity: bool = False,
+                 use_diversity_loss: bool = False,
                  diversity_weight: float = 0.1,
                  **kwargs):
         """
@@ -68,7 +68,10 @@ class PrerankingStage(BaseStage):
                                               use_feature_encoder=model_params.get("use_feature_encoder", False))
         self.feature_map.default_emb_dim = model_params['embedding_dim']
         self.top_k = top_k
-        self.use_diversity = use_diversity
+        self.use_diversity_loss = model_params['use_diversity_loss']
+        if self.use_diversity_loss:
+            self.logger.info(
+                f"Computing diversity loss theta: {model_params.get('diversity_theta', 0.7)} lambda: {model_params.get('diversity_lambda', 0.7)}")
         self.diversity_weight = diversity_weight
         self.model_params = model_params
         self.metrics_k = model_params['metrics_k']
@@ -257,6 +260,9 @@ class PrerankingStage(BaseStage):
         """
         Single training step with negative sampling for pairwise ranking.
         
+        Optimized: batches all negatives into a single forward pass instead of
+        processing each negative separately.
+        
         Args:
             batch_data: Positive example batch
             item_id_col: Name of item ID column
@@ -266,45 +272,50 @@ class PrerankingStage(BaseStage):
             Loss tensor
         """
         batch_dict = dict(batch_data)
+        batch_size = len(batch_dict[item_id_col])
         
         # Get positive item IDs
         pos_item_ids = batch_dict[item_id_col].cpu().numpy()
         
-        # Sample negative items for each positive
+        # Sample negative items for each positive: [B, num_negatives]
         neg_item_ids = self.negative_sampler.sample_negatives_batch(
             pos_item_ids, self.num_negatives
-        )  # [batch_size, num_negatives]
+        )
         
         # Get positive predictions
         pos_output = self.model.forward(batch_data)
         pos_scores = pos_output['y_pred']  # [B, 1]
         
-        # Get negative predictions
-        neg_scores_list = []
-        for neg_idx in range(self.num_negatives):
-            neg_ids = neg_item_ids[:, neg_idx]  # [B]
-            
-            # Get negative item features
-            neg_features = self.negative_sampler.get_item_features(neg_ids.tolist())
-            
-            # Build negative batch dict (copy user features, replace item features)
-            neg_batch_dict = {}
-            for key, val in batch_dict.items():
-                if key == item_id_col:
-                    neg_batch_dict[key] = torch.tensor(neg_ids, device=self.model.device)
-                elif key in neg_features.columns:
-                    # Replace with negative item feature
-                    neg_val = neg_features[key].values
-                    neg_batch_dict[key] = torch.tensor(neg_val, device=self.model.device)
-                else:
-                    # Keep user features
-                    neg_batch_dict[key] = val.to(self.model.device) if hasattr(val, 'to') else val
-            
-            neg_output = self.model.forward(neg_batch_dict)
-            neg_scores_list.append(neg_output['y_pred'])
+        # === Optimized: Batch all negatives into single forward pass ===
+        # Flatten: [B, num_neg] -> [B * num_neg]
+        neg_ids_flat = neg_item_ids.reshape(-1)
         
-        # Stack negative scores: [B, num_negatives]
-        neg_scores = torch.cat(neg_scores_list, dim=1)
+        # Get features for all negatives at once using the optimized method
+        neg_features_dict = self.negative_sampler.get_item_features_as_dict(neg_ids_flat.tolist())
+        
+        # Build batched negative dict: repeat user features, use negative item features
+        neg_batch_dict = {}
+        for key, val in batch_dict.items():
+            if key == item_id_col:
+                neg_batch_dict[key] = torch.tensor(neg_ids_flat, device=self.model.device)
+            elif key in neg_features_dict:
+                # Use negative item feature
+                neg_batch_dict[key] = torch.tensor(neg_features_dict[key], device=self.model.device)
+            else:
+                # Repeat user features along batch dimension: [B, ...] -> [B * num_neg, ...]
+                if hasattr(val, 'to'):
+                    val = val.to(self.model.device)
+                    # Repeat each element num_negatives times along batch dim (dim=0)
+                    neg_batch_dict[key] = val.repeat_interleave(self.num_negatives, dim=0)
+                else:
+                    neg_batch_dict[key] = val
+        
+        # Single forward pass for all negatives
+        neg_output = self.model.forward(neg_batch_dict)
+        neg_scores_flat = neg_output['y_pred']  # [B * num_neg, 1]
+        
+        # Reshape back: [B * num_neg, 1] -> [B, num_neg]
+        neg_scores = neg_scores_flat.view(batch_size, self.num_negatives)
         
         # Compute pairwise ranking loss
         if self.loss_type == 'bpr':
@@ -315,11 +326,24 @@ class PrerankingStage(BaseStage):
             loss = softmax_cross_entropy_loss(pos_scores, neg_scores)
         else:
             raise ValueError(f"Unknown loss_type: {self.loss_type}")
+            
+        # Add diversity loss if enabled (only on positive samples for recommendation diversity)
+        if self.use_diversity_loss:
+            # Get embeddings from positive output (must use pos_output, not _last_feat_emb_dict
+            # which gets overwritten by negative forward pass)
+            pos_feat_emb_dict = pos_output.get('feat_emb_dict')
+                
+            if pos_feat_emb_dict is not None:
+                div_loss = self.model.compute_diversity_regularization(
+                    pos_feat_emb_dict, pos_scores
+                )
+                if div_loss is not None:
+                    self.logger.debug(f"Diversity loss: {div_loss.item():.6f}")
+                    loss = self.model.add_diversity_to_loss(loss, div_loss)
         
         # Add regularization
         if hasattr(self.model, 'regularization_loss'):
             loss = loss + self.model.regularization_loss()
-        
         # Backprop
         self.model.optimizer.zero_grad()
         loss.backward()

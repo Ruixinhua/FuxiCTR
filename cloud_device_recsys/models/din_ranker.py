@@ -167,7 +167,13 @@ class DINRanker(DiversityLossMixin, BaseModel):
         logits = self.mlp(final_mlp_input)
         y_pred = self.output_activation(logits)
         
-        return {"y_pred": y_pred}
+        return_dict = {"y_pred": y_pred}
+        
+        # Add embedding dict for diversity loss (needed to avoid overwrite during negative sampling)
+        if self.use_diversity_loss:
+            return_dict["feat_emb_dict"] = feat_emb_dict
+            
+        return return_dict
 
     def compute_loss(self, return_dict, y_true):
         """
