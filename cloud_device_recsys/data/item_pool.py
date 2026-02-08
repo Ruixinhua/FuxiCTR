@@ -1,259 +1,239 @@
 # =========================================================================
-# Copyright (C) 2024. Cloud-Device Recommendation System.
+# Copyright (C) 2026. Cloud-Device Recommendation System.
 # =========================================================================
 
 """
-Item Pool Manager
+Item Pool Generation Utilities
 
-Manages the candidate item pool for retrieval evaluation.
+This module provides utilities for generating and managing item pools
+for the recommendation pipeline. The item pool is essential for:
+- Building item embeddings index (Retrieval stage)
+- Negative sampling during training
+- Item feature lookup during inference (Preranking/Reranking)
 """
 
 import os
 import logging
-from typing import Dict, List, Optional, Any, Set
-import polars as pl
+from typing import List
 import pandas as pd
-import numpy as np
-import csv
 
 
-class ItemPool:
+def extract_item_corpus(
+    input_paths: List[str],
+    output_path: str,
+    item_id_col: str,
+    item_feature_cols: List[str],
+    logger: logging.Logger = None
+) -> pd.DataFrame:
     """
-    Manages the item pool for retrieval and candidate evaluation.
+    Extract a unique item corpus from one or more dataset files.
     
-    The item pool contains all unique items with their features
-    for use in retrieval evaluation (scoring all items).
+    This function reads items from multiple data files (train/valid/test),
+    extracts unique items based on item_id, and saves the result.
+    
+    Args:
+        input_paths: List of paths to input datasets (parquet or csv)
+        output_path: Path to save the output item pool (parquet)
+        item_id_col: Column name for the unique item ID
+        item_feature_cols: List of item feature column names to include
+        logger: Optional logger instance
+        
+    Returns:
+        DataFrame containing the unique item pool
     """
+    if logger is None:
+        logger = logging.getLogger(__name__)
     
-    def __init__(self, item_features: List[str] = None):
-        """
-        Initialize item pool.
-        
-        Args:
-            item_features: List of feature names that identify/describe items
-        """
-        self.item_features = item_features or []
-        self.items_df: Optional[pd.DataFrame] = None
-        self.item_embeddings: Optional[np.ndarray] = None
-        self.item_id_to_idx: Dict[Any, int] = {}
-        self.logger = logging.getLogger(self.__class__.__name__)
+    cols_to_keep = [item_id_col] + item_feature_cols
+    all_items = []
     
-    def extract_from_data(self,
-                          data_path: str,
-                          item_features: List[str] = None,
-                          positive_only: bool = True,
-                          label_col: str = 'label') -> pd.DataFrame:
-        """
-        Extract unique items from data.
-        
-        Args:
-            data_path: Path to data (parquet file or directory)
-            item_features: Features to extract for each item
-            positive_only: Only extract items from positive samples
-            label_col: Name of label column
+    for input_path in input_paths:
+        if not os.path.exists(input_path):
+            logger.warning(f"Input file not found: {input_path}, skipping...")
+            continue
             
-        Returns:
-            DataFrame with unique items
-        """
-        if item_features:
-            self.item_features = item_features
+        logger.info(f"Loading data from {input_path}...")
         
-        if not self.item_features:
-            raise ValueError("item_features must be specified")
+        if input_path.endswith('.parquet'):
+            # Only load required columns for efficiency
+            try:
+                df = pd.read_parquet(input_path, columns=cols_to_keep)
+            except Exception:
+                # Fall back to loading all columns if specified columns don't exist
+                df = pd.read_parquet(input_path)
+                df = df[[c for c in cols_to_keep if c in df.columns]]
+        elif input_path.endswith('.csv'):
+            df = pd.read_csv(input_path, usecols=lambda c: c in cols_to_keep)
+        else:
+            logger.warning(f"Unsupported file format: {input_path}, skipping...")
+            continue
         
-        self.logger.info(f"Extracting items from {data_path}")
-        self.logger.info(f"Item features: {self.item_features}")
+        # Check for missing columns
+        missing_cols = [col for col in cols_to_keep if col not in df.columns]
+        if missing_cols:
+            logger.warning(f"Columns not found in {input_path}: {missing_cols}")
+            # Use available columns only
+            available_cols = [c for c in cols_to_keep if c in df.columns]
+            df = df[available_cols]
+        else:
+            df = df[cols_to_keep]
         
-        # Handle directory or file path
-        if os.path.isdir(data_path):
-            data_path = os.path.join(data_path, "*.parquet")
-        
-        # Load data
-        df = pl.scan_parquet(data_path)
-        
-        # Filter to positive samples if requested
-        if positive_only:
-            df = df.filter(pl.col(label_col) == 1)
-        
-        # Get available columns
-        schema = df.collect_schema()
-        available_features = [f for f in self.item_features if f in schema.names()]
-        
-        if not available_features:
-            raise ValueError(f"None of item_features found in data: {self.item_features}")
-        
-        self.logger.info(f"Available item features: {available_features}")
-        
-        # Extract unique items
-        self.items_df = df.select(available_features).unique().collect().to_pandas()
-        
-        # Build item ID mapping
-        self._build_item_index()
-        
-        self.logger.info(f"Extracted {len(self.items_df)} unique items")
-        
-        return self.items_df
+        all_items.append(df)
+        logger.info(f"  Loaded {len(df)} rows from {os.path.basename(input_path)}")
     
-    def _build_item_index(self) -> None:
-        """Build mapping from item ID to index"""
-        if self.items_df is None:
-            return
-        
-        # Use first feature as primary item ID
-        primary_id = self.item_features[0] if self.item_features else self.items_df.columns[0]
-        
-        self.item_id_to_idx = {
-            item_id: idx 
-            for idx, item_id in enumerate(self.items_df[primary_id].values)
-        }
+    if not all_items:
+        raise ValueError("No valid input files found")
     
-    def get_item_features(self, item_ids: List[Any]) -> pd.DataFrame:
-        """
-        Get features for specific items.
-        
-        Args:
-            item_ids: List of item IDs
-            
-        Returns:
-            DataFrame with item features
-        """
-        if self.items_df is None:
-            raise ValueError("Item pool not loaded")
-        
-        primary_id = self.item_features[0] if self.item_features else self.items_df.columns[0]
-        
-        return self.items_df[self.items_df[primary_id].isin(item_ids)]
+    # Concatenate all items and drop duplicates
+    item_df = pd.concat(all_items, ignore_index=True)
+    original_count = len(item_df)
+    item_df = item_df.drop_duplicates(subset=[item_id_col])
     
-    def get_all_items(self) -> pd.DataFrame:
-        """Get all items in the pool"""
-        return self.items_df
+    logger.info(f"Total rows: {original_count} -> Unique items: {len(item_df)}")
     
-    def get_item_count(self) -> int:
-        """Get number of items in pool"""
-        return len(self.items_df) if self.items_df is not None else 0
+    # Save to output path
+    output_dir = os.path.dirname(output_path)
+    if output_dir and not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        logger.info(f"Created output directory: {output_dir}")
     
-    def set_item_embeddings(self, embeddings: np.ndarray) -> None:
-        """
-        Set precomputed item embeddings.
-        
-        Args:
-            embeddings: Item embeddings [num_items, embedding_dim]
-        """
-        if self.items_df is None:
-            raise ValueError("Item pool not loaded")
-        
-        if len(embeddings) != len(self.items_df):
-            raise ValueError(f"Embedding count {len(embeddings)} != item count {len(self.items_df)}")
-        
-        self.item_embeddings = embeddings
-        self.logger.info(f"Set item embeddings: {embeddings.shape}")
+    item_df.to_parquet(output_path, index=False)
+    logger.info(f"Saved item pool to {output_path}")
     
-    def get_item_embeddings(self) -> np.ndarray:
-        """Get item embeddings"""
-        return self.item_embeddings
+    return item_df
+
+
+def ensure_item_pool(
+    data_paths: dict,
+    dataset_config: dict,
+    feature_group_manager,
+    logger: logging.Logger = None,
+    force_regenerate: bool = False
+) -> str:
+    """
+    Ensure item pool exists, generating it if necessary.
     
-    def save(self, path: str) -> Dict[str, str]:
-        """
-        Save item pool to files.
-        
-        Args:
-            path: Base path for saving
-            
-        Returns:
-            Dictionary of saved file paths
-        """
-        saved_files = {}
-        
-        # Save items DataFrame
-        if self.items_df is not None:
-            parquet_path = path if path.endswith('.parquet') else f"{path}.parquet"
-            self.items_df.to_parquet(parquet_path, index=False)
-            saved_files['items'] = parquet_path
-            
-            # Also save as CSV
-            csv_path = parquet_path.replace('.parquet', '.csv')
-            self.items_df.to_csv(csv_path, index=False)
-            saved_files['items_csv'] = csv_path
-            
-            self.logger.info(f"Saved {len(self.items_df)} items to {parquet_path}")
-        
-        # Save embeddings if available
-        if self.item_embeddings is not None:
-            emb_path = path.replace('.parquet', '') + '_embeddings.npy'
-            np.save(emb_path, self.item_embeddings)
-            saved_files['embeddings'] = emb_path
-            self.logger.info(f"Saved embeddings to {emb_path}")
-        
-        # Save metadata
-        meta_path = path.replace('.parquet', '') + '_meta.csv'
-        with open(meta_path, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(['key', 'value'])
-            writer.writerow(['num_items', len(self.items_df) if self.items_df is not None else 0])
-            writer.writerow(['item_features', ','.join(self.item_features)])
-            if self.item_embeddings is not None:
-                writer.writerow(['embedding_dim', self.item_embeddings.shape[1]])
-        saved_files['meta'] = meta_path
-        
-        return saved_files
+    This function checks if the item pool file exists. If not, or if
+    force_regenerate is True, it generates the item pool from the
+    train/valid/test data files.
     
-    def load(self, path: str) -> 'ItemPool':
-        """
-        Load item pool from files.
+    Args:
+        data_paths: Dict with keys 'train_path', 'valid_path', 'test_path', 'item_pool_path'
+        dataset_config: Dataset configuration dict with 'item_id_col' and optionally 'item_features'
+        feature_group_manager: FeatureGroupManager to get FG1 (item) features
+        logger: Optional logger instance
+        force_regenerate: If True, regenerate even if file exists
         
-        Args:
-            path: Path to parquet file
-            
-        Returns:
-            Self for chaining
-        """
-        parquet_path = path if path.endswith('.parquet') else f"{path}.parquet"
-        
-        if not os.path.exists(parquet_path):
-            raise FileNotFoundError(f"Item pool not found: {parquet_path}")
-        
-        self.items_df = pd.read_parquet(parquet_path)
-        self.item_features = list(self.items_df.columns)
-        self._build_item_index()
-        
-        self.logger.info(f"Loaded {len(self.items_df)} items from {parquet_path}")
-        
-        # Load embeddings if available
-        emb_path = parquet_path.replace('.parquet', '_embeddings.npy')
-        if os.path.exists(emb_path):
-            self.item_embeddings = np.load(emb_path)
-            self.logger.info(f"Loaded embeddings: {self.item_embeddings.shape}")
-        
-        return self
+    Returns:
+        Path to the item pool file
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
     
-    def sample_negatives(self,
-                         positive_items: List[Any],
-                         num_negatives: int,
-                         exclude_items: Set[Any] = None) -> List[Any]:
-        """
-        Sample negative items (items not in positive set).
+    item_pool_path = data_paths.get('item_pool_path')
+    
+    if item_pool_path is None:
+        raise ValueError("item_pool_path not found in data_paths")
+    
+    # Check if item pool exists and skip regeneration if not forced
+    if os.path.exists(item_pool_path) and not force_regenerate:
+        logger.info(f"Item pool already exists at {item_pool_path}")
+        return item_pool_path
+    
+    # Get item ID column and feature columns
+    item_id_col = dataset_config.get('item_id_col', 'cand_item_id')
+    
+    # Get FG1 (item) features from feature group manager
+    from ..config.feature_groups import FeatureGroup
+    item_feature_cols = []
+    for feat_name, group in feature_group_manager.feature_assignments.items():
+        if group == FeatureGroup.FG1 and feat_name != item_id_col:
+            item_feature_cols.append(feat_name)
+    
+    # Also add any explicitly configured item features
+    explicit_item_features = dataset_config.get('item_features', [])
+    for feat in explicit_item_features:
+        if feat not in item_feature_cols and feat != item_id_col:
+            item_feature_cols.append(feat)
+    
+    logger.info(f"Generating item pool with features: {item_feature_cols}")
+    
+    # Collect input paths (valid, test only - not train, as item pool is for evaluation)
+    input_paths = []
+    for key in ['valid_path', 'test_path']:
+        path = data_paths.get(key)
+        if path and os.path.exists(path):
+            input_paths.append(path)
+    
+    if not input_paths:
+        raise ValueError("No valid data paths found for item pool generation")
+    
+    # Generate item pool
+    extract_item_corpus(
+        input_paths=input_paths,
+        output_path=item_pool_path,
+        item_id_col=item_id_col,
+        item_feature_cols=item_feature_cols,
+        logger=logger
+    )
+    
+    return item_pool_path
+
+
+def validate_item_pool_coverage(
+    item_pool_path: str,
+    data_path: str,
+    item_id_col: str,
+    logger: logging.Logger = None
+) -> dict:
+    """
+    Validate that the item pool covers all items in a dataset.
+    
+    Args:
+        item_pool_path: Path to item pool parquet file
+        data_path: Path to data file to validate against
+        item_id_col: Column name for item ID
+        logger: Optional logger instance
         
-        Args:
-            positive_items: List of positive item IDs
-            num_negatives: Number of negatives to sample
-            exclude_items: Additional items to exclude
-            
-        Returns:
-            List of negative item IDs
-        """
-        if self.items_df is None:
-            raise ValueError("Item pool not loaded")
-        
-        primary_id = self.item_features[0] if self.item_features else self.items_df.columns[0]
-        all_items = set(self.items_df[primary_id].values)
-        
-        exclude = set(positive_items)
-        if exclude_items:
-            exclude.update(exclude_items)
-        
-        candidates = list(all_items - exclude)
-        
-        if len(candidates) < num_negatives:
-            return candidates
-        
-        return list(np.random.choice(candidates, size=num_negatives, replace=False))
+    Returns:
+        Dict with validation results:
+            - total_data_items: Number of unique items in data
+            - total_pool_items: Number of items in pool
+            - covered_items: Number of data items covered by pool
+            - missing_items: Set of item IDs not in pool
+            - coverage_rate: Percentage of data items covered
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+    
+    # Load item pool
+    item_pool = pd.read_parquet(item_pool_path)
+    pool_item_ids = set(item_pool[item_id_col].unique())
+    
+    # Load data file
+    if data_path.endswith('.parquet'):
+        data_df = pd.read_parquet(data_path, columns=[item_id_col])
+    else:
+        data_df = pd.read_csv(data_path, usecols=[item_id_col])
+    
+    data_item_ids = set(data_df[item_id_col].unique())
+    
+    # Calculate coverage
+    covered_items = data_item_ids & pool_item_ids
+    missing_items = data_item_ids - pool_item_ids
+    
+    result = {
+        'total_data_items': len(data_item_ids),
+        'total_pool_items': len(pool_item_ids),
+        'covered_items': len(covered_items),
+        'missing_items': missing_items,
+        'coverage_rate': len(covered_items) / len(data_item_ids) * 100 if data_item_ids else 100.0
+    }
+    
+    if missing_items:
+        logger.warning(f"Item pool coverage: {result['coverage_rate']:.2f}% "
+                      f"({len(missing_items)} items missing from pool)")
+    else:
+        logger.info(f"Item pool coverage: 100% ({len(covered_items)} items)")
+    
+    return result
