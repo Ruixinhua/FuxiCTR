@@ -80,7 +80,7 @@ class RetrievalStage(BaseStage):
         self.metrics_k = model_params['metrics_k']
         self.monitor = model_params.get('monitor', 'Recall@1000')
         # Negative sampling parameters
-        self.num_negatives = model_params.get('num_negatives', 4)
+        self.num_negatives = model_params.get('num_negatives', 0)
         self.loss_type = model_params.get('loss_type', 'bpr')  # 'bpr', 'margin', 'softmax'
         self.margin = model_params.get('margin', 1.0)
         self.negative_sampler: Optional[NegativeSampler] = None

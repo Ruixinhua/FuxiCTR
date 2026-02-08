@@ -272,6 +272,8 @@ def prepare_shared_data_loaders(feature_map, dataset_config, pipeline_config, fg
         'valid_loader': loaders['valid_loader'],
         'test_loader': loaders['test_loader'],
         'item_loader': loaders['item_loader'],
+        'shared_num_negatives': num_negatives,  # Track which training mode was used
+        'label_col': label_col,
     }
 
 def _create_item_feature_map(feature_map, fg_manager, dataset_config):
@@ -395,10 +397,29 @@ def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, fg_m
     preranking_config = pipeline_config['stages']['preranking']
     metrics = {}
     
-    # 1. Prepare Data Loaders (use shared if provided)
+    # 1. Prepare Data Loaders (use shared if provided, but check training mode compatibility)
     if shared_loaders is not None:
         paths = shared_loaders['paths']
-        train_gen, _ = shared_loaders['train_loader'].make_iterator()
+        stage_num_negatives = preranking_config.get('model_params', {}).get('num_negatives', 0)
+        shared_num_negatives = shared_loaders.get('shared_num_negatives', 0)
+        
+        # Check if stage needs different training mode than shared loaders
+        if stage_num_negatives != shared_num_negatives:
+            logger.info(f"[Preranking] Training mode differs from shared loaders "
+                       f"(stage: {stage_num_negatives}, shared: {shared_num_negatives}). Creating stage-specific train loader.")
+            loaders = _prepare_stage_data_loaders(
+                feature_map=preranking_stage.feature_map,
+                stage_config=preranking_config,
+                paths=paths,
+                create_train=True,
+                create_test=False,
+                num_negatives=stage_num_negatives,
+                label_col=shared_loaders.get('label_col', 'label'),
+                logger=logger
+            )
+            train_gen, _ = loaders['train_loader'].make_iterator()
+        else:
+            train_gen, _ = shared_loaders['train_loader'].make_iterator()
     else:
         paths = get_data_paths(dataset_config, pipeline_config, logger)
         # Ensure item pool exists when running standalone
@@ -449,10 +470,29 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_man
     reranking_config = pipeline_config['stages']['reranking']
     metrics = {}
     
-    # 1. Prepare Data Loaders (use shared if provided)
+    # 1. Prepare Data Loaders (use shared if provided, but check training mode compatibility)
     if shared_loaders is not None:
         paths = shared_loaders['paths']
-        train_gen, _ = shared_loaders['train_loader'].make_iterator()
+        stage_num_negatives = reranking_config.get('model_params', {}).get('num_negatives', 0)
+        shared_num_negatives = shared_loaders.get('shared_num_negatives', 0)
+        
+        # Check if stage needs different training mode than shared loaders
+        if stage_num_negatives != shared_num_negatives:
+            logger.info(f"[Reranking] Training mode differs from shared loaders "
+                       f"(stage: {stage_num_negatives}, shared: {shared_num_negatives}). Creating stage-specific train loader.")
+            loaders = _prepare_stage_data_loaders(
+                feature_map=reranking_stage.feature_map,
+                stage_config=reranking_config,
+                paths=paths,
+                create_train=True,
+                create_test=False,
+                num_negatives=stage_num_negatives,
+                label_col=shared_loaders.get('label_col', 'label'),
+                logger=logger
+            )
+            train_gen, _ = loaders['train_loader'].make_iterator()
+        else:
+            train_gen, _ = shared_loaders['train_loader'].make_iterator()
     else:
         paths = get_data_paths(dataset_config, pipeline_config, logger)
         # Ensure item pool exists when running standalone
