@@ -1,0 +1,46 @@
+# Exp 1: Baseline
+dataset_id: "TaobaoOpenMCC"
+dataset_config: "/home/people/dliu2/FuxiCTR/cloud_device_recsys/config/dataset_config.yaml"
+seed: 2024
+gpu: 0
+debug:
+  n_rows: null
+
+
+stages:
+  retrieval:
+    enabled: true
+    model: "DualTowerRetrieval"
+    features: ["FG1", "FG2"]
+    top_k: 1000
+
+    model_params:
+      metrics_k: [1000, 5000, 10000]
+      embedding_dim: 16
+      num_negatives: 20
+      loss_type: "bpr"
+      use_feature_encoder: 1
+      use_user_transformer: 1
+      user_transformer_layers: 1
+      use_item_transformer: 0
+      item_transformer_layers: 1
+      user_tower_layers: [512, 256, 128, 64]
+      item_tower_layers: [512, 256, 128, 64]
+      embedding_regularizer: 1.0e-5
+      net_regularizer: 1.0e-5
+      max_gradient_norm: 5.0
+      learning_rate: 0.0001
+      dropout: 0.1
+
+    training:
+      epochs: 10
+      batch_size: 4096
+      optimizer: "adam"
+      monitor: "Recall@1000"
+
+    metrics: ["Recall"]
+
+output:
+  root: "/scratch/dliu2/FuxiCTR/outputs"
+  save_intermediate: true
+  save_csv: true

@@ -236,7 +236,7 @@ def _create_item_feature_map(feature_map, fg_manager):
     item_fm.column_index = {k: v for k, v in item_fm.column_index.items() if k in item_feature_names}
     return item_fm
 
-def run_retrieval_stage(retrieval_stage, pipeline_config, dataset_config, fg_manager, logger=None):
+def run_retrieval_stage(retrieval_stage, pipeline_config, dataset_config, fg_manager, logger=None, run_test=True):
     if logger is None:
         logger = logging.getLogger('PipelineRunner')
     retrieval_config = pipeline_config['stages']['retrieval']
@@ -273,7 +273,7 @@ def run_retrieval_stage(retrieval_stage, pipeline_config, dataset_config, fg_man
         stage_config=retrieval_config,
         paths=paths,
         create_train=True,
-        create_test=True,
+        create_test=run_test,
         shuffle_train=True,
         create_item_loader=True,
         item_feature_map=item_fm,
@@ -284,7 +284,7 @@ def run_retrieval_stage(retrieval_stage, pipeline_config, dataset_config, fg_man
     train_loader = loaders['train_loader']
     valid_loader = loaders['valid_loader']
     item_loader = loaders['item_loader']
-    test_loader = loaders['test_loader']
+    test_loader = loaders['test_loader'] if run_test else None
 
     # 2. Train and build item index if needed
     if retrieval_stage.item_embeddings is None:
@@ -335,13 +335,18 @@ def run_retrieval_stage(retrieval_stage, pipeline_config, dataset_config, fg_man
     valid_output, valid_metrics = retrieval_stage.process(valid_loader.make_iterator(), compute_metrics=True)
     metrics.update({f"retrieval_valid_{k}": v for k, v in valid_metrics.items()})
     # 3. Evaluate on test set
-    logger.info("Evaluating on test set and generating candidate sets")
-    test_output, test_metrics = retrieval_stage.process(test_loader.make_iterator())
-    metrics.update({f"retrieval_test_{k}": v for k, v in test_metrics.items()})
+    test_output = None
+    if run_test:
+        logger.info("Evaluating on test set and generating candidate sets")
+        test_output, test_metrics = retrieval_stage.process(test_loader.make_iterator())
+        metrics.update({f"retrieval_test_{k}": v for k, v in test_metrics.items()})
+    else:
+        logger.info("Skipping retrieval test evaluation as requested.")
+    
     return metrics, valid_output, test_output
 
 def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, fg_manager=None, logger=None,
-                         prev_output_test=None, prev_output_valid=None):
+                         prev_output_test=None, prev_output_valid=None, run_test=True):
     if logger is None:
         logger = logging.getLogger('PipelineRunner')
 
@@ -393,14 +398,23 @@ def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, fg_m
 
     # 3. Pipeline Processing
     logger.info("[Preranking] Processing pipeline candidates...")
-    test_output, test_metrics = preranking_stage.process(prev_output_test, compute_metrics=True)
-    metrics.update({f"preranking_test_{k}": v for k, v in test_metrics.items()})
+    
+    test_output = None
+    if run_test:
+        if prev_output_test is None:
+            logger.warning("[Preranking] No previous test output provided, cannot run test evaluation.")
+        else:
+            test_output, test_metrics = preranking_stage.process(prev_output_test, compute_metrics=True)
+            metrics.update({f"preranking_test_{k}": v for k, v in test_metrics.items()})
+    else:
+        logger.info("Skipping preranking test evaluation as requested.")
+        
     valid_output, valid_metrics = preranking_stage.process(prev_output_valid, compute_metrics=True)
     metrics.update({f"preranking_valid_{k}": v for k, v in valid_metrics.items()})
     return metrics, valid_output, test_output
 
 def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_manager=None, logger=None,
-                        prev_output_valid=None, prev_output_test=None):
+                        prev_output_valid=None, prev_output_test=None, run_test=True):
     if logger is None:
         logger = logging.getLogger('PipelineRunner')
 
@@ -461,10 +475,17 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_man
     metrics.update({f"reranking_valid_{k}": v for k, v in valid_metrics.items()})
 
     # 3. Evaluate Reranking Model (List-wise if prev_output available)
-    logger.info("[Reranking] Evaluating on test set...")
-    test_metrics = reranking_stage.evaluate(prev_output_test)
-    logger.info(f"Test (Ranking): {test_metrics}")
-    metrics.update({f"reranking_test_{k}": v for k, v in test_metrics.items()})
+    if run_test:
+        if prev_output_test is None:
+             logger.warning("[Reranking] No previous test output provided, cannot run test evaluation.")
+        else:
+            logger.info("[Reranking] Evaluating on test set...")
+            test_metrics = reranking_stage.evaluate(prev_output_test)
+            logger.info(f"Test (Ranking): {test_metrics}")
+            metrics.update({f"reranking_test_{k}": v for k, v in test_metrics.items()})
+    else:
+        logger.info("Skipping reranking test evaluation as requested.")
+        
     return metrics
 
 def main():
@@ -593,7 +614,8 @@ def main():
         retrieval_stage = stages['retrieval']()
         # Run retrieval stage with its own data loaders
         r_metrics, r_valid, r_test = run_retrieval_stage(
-            retrieval_stage, pipeline_config, dataset_config, fg_manager, logger=logger
+            retrieval_stage, pipeline_config, dataset_config, fg_manager, logger=logger,
+            run_test=bool(args.run_retrieval_test)
         )
         all_metrics.update(r_metrics)
         with open(metrics_path, 'w') as f:
@@ -602,7 +624,8 @@ def main():
         # Save retrieval stage outputs if requested
         if args.save_stage_outputs:
             save_stage_output(r_valid, stage_output_dir, 'retrieval_valid', logger)
-            save_stage_output(r_test, stage_output_dir, 'retrieval_test', logger)
+            if r_test is not None:
+                save_stage_output(r_test, stage_output_dir, 'retrieval_test', logger)
             logger.info(f"Saved retrieval_valid and retrieval_test metrics to {metrics_path}")
 
         # Instantiate Preranking Stage lazily (after retrieval)
@@ -610,7 +633,8 @@ def main():
         # Run preranking stage with its own data loaders
         p_metrics, p_valid, p_test = run_preranking_stage(
             preranking_stage, pipeline_config, dataset_config, fg_manager=fg_manager,
-            logger=logger, prev_output_valid=r_valid, prev_output_test=r_test
+            logger=logger, prev_output_valid=r_valid, prev_output_test=r_test,
+            run_test=bool(args.run_preranking_test)
         )
         all_metrics.update(p_metrics)
         with open(metrics_path, 'w') as f:
@@ -619,7 +643,8 @@ def main():
         # Save preranking stage outputs if requested
         if args.save_stage_outputs:
             save_stage_output(p_valid, stage_output_dir, 'preranking_valid', logger)
-            save_stage_output(p_test, stage_output_dir, 'preranking_test', logger)
+            if p_test is not None:
+                save_stage_output(p_test, stage_output_dir, 'preranking_test', logger)
 
         # Instantiate Reranking Stage lazily (after preranking)
         reranking_stage = stages['reranking']()
@@ -627,7 +652,8 @@ def main():
         d_metrics = run_reranking_stage(
             reranking_stage, pipeline_config, dataset_config, fg_manager=fg_manager,
             logger=logger,
-            prev_output_valid=p_valid, prev_output_test=p_test
+            prev_output_valid=p_valid, prev_output_test=p_test,
+            run_test=bool(args.run_reranking_test)
         )
         all_metrics.update(d_metrics)
 
@@ -638,7 +664,8 @@ def main():
         # Instantiate Retrieval Stage lazily
         retrieval_stage = stages['retrieval']()
         r_metrics, r_valid, r_test = run_retrieval_stage(
-            retrieval_stage, pipeline_config, dataset_config, fg_manager, logger=logger
+            retrieval_stage, pipeline_config, dataset_config, fg_manager, logger=logger,
+            run_test=bool(args.run_retrieval_test)
         )
         all_metrics.update(r_metrics)
 
@@ -646,7 +673,8 @@ def main():
         if args.save_stage_outputs:
             stage_output_dir = os.path.join(run_output_dir, 'stage_outputs')
             save_stage_output(r_valid, stage_output_dir, 'retrieval_valid', logger)
-            save_stage_output(r_test, stage_output_dir, 'retrieval_test', logger)
+            if r_test is not None:
+                save_stage_output(r_test, stage_output_dir, 'retrieval_test', logger)
 
     elif args.mode == 'preranking':
         logger.info("Running preranking stage only")
@@ -666,14 +694,16 @@ def main():
         preranking_stage = stages['preranking']()
         p_metrics, p_valid, p_test = run_preranking_stage(
             preranking_stage, pipeline_config, dataset_config, fg_manager=fg_manager,
-            logger=logger, prev_output_valid=prev_output_valid, prev_output_test=prev_output_test
+            logger=logger, prev_output_valid=prev_output_valid, prev_output_test=prev_output_test,
+            run_test=bool(args.run_preranking_test)
         )
         all_metrics.update(p_metrics)
 
         # Save stage outputs if requested
         if args.save_stage_outputs:
             save_stage_output(p_valid, stage_output_dir, 'preranking_valid', logger)
-            save_stage_output(p_test, stage_output_dir, 'preranking_test', logger)
+            if p_test is not None:
+                save_stage_output(p_test, stage_output_dir, 'preranking_test', logger)
 
     elif args.mode == 'reranking':
         logger.info("Running reranking stage only")
@@ -694,7 +724,8 @@ def main():
         d_metrics = run_reranking_stage(
             reranking_stage, pipeline_config, dataset_config, fg_manager=fg_manager,
             logger=logger,
-            prev_output_valid=prev_output_valid, prev_output_test=prev_output_test
+            prev_output_valid=prev_output_valid, prev_output_test=prev_output_test,
+            run_test=bool(args.run_reranking_test)
         )
         all_metrics.update(d_metrics)
     else:

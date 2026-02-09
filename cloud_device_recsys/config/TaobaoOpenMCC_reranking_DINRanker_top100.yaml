@@ -1,0 +1,42 @@
+# Exp 1: Baseline
+dataset_id: "TaobaoOpenMCC"
+dataset_config: "./config/dataset_config.yaml"
+prev_output_path: "/scratch/dliu2/FuxiCTR/outputs/TaobaoOpenMCC_preranking_DINRanker_top100_neg/stage_outputs"
+seed: 2024
+gpu: 0
+debug:
+  n_rows: null
+
+candidates:
+  preranking:
+    source: "retrieval_candidates.parquet"
+    top_k: 100
+    output: "preranking_candidates.parquet"
+
+stages:
+  reranking:
+    enabled: true
+    model: "DINRanker"
+    features: ["FG1", "FG2", "FG3"]
+    top_k: 100
+    model_params:
+      num_negatives: 4
+      loss_type: "bpr"
+      use_diversity_loss: 0
+      use_feature_encoder: 1
+      metrics_k: [10, 50, 100]
+      monitor: "Recall@100"
+      embedding_dim: 4
+      hidden_layers: [128, 64]
+
+    training:
+      epochs: 10
+      batch_size: 2048
+      learning_rate: 0.001
+      optimizer: "adam"
+    metrics: ["nDCG", "Recall"]
+
+output:
+  root: "/scratch/dliu2/FuxiCTR/outputs"
+  save_intermediate: true
+  save_csv: true

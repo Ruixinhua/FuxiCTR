@@ -211,7 +211,7 @@ def prepare_debug_paths(paths: dict, dataset_config: dict, logger) -> dict:
         original_train = os.path.join(original_data_root, f'train.{data_format}')
         original_valid = os.path.join(original_data_root, f'valid.{data_format}')
         original_test = os.path.join(original_data_root, f'test.{data_format}')
-        original_item_pool = os.path.join(original_data_root, f"{paths['item_pool_file']}.parquet")
+        # original_item_pool = os.path.join(original_data_root, f"{paths['item_pool_file']}.parquet")
         
         # Create debug datasets and update paths
         paths['train_path'] = create_debug_dataset(original_train, debug_n_rows, os.path.join(debug_dir, 'train.parquet'), logger)
@@ -668,9 +668,17 @@ def parse_pipeline_args():
     parser.add_argument('--seed', type=int, default=2024,
                        help='Random seed')
     
+    # Validation control arguments
+    parser.add_argument('--run_retrieval_test', type=int, default=0,
+                       help='Whether to run retrieval test evaluation (1=yes, 0=no)')
+    parser.add_argument('--run_preranking_test', type=int, default=0,
+                       help='Whether to run preranking test evaluation (1=yes, 0=no)')
+    parser.add_argument('--run_reranking_test', type=int, default=0,
+                       help='Whether to run reranking test evaluation (1=yes, 0=no)')
+
     parser.add_argument('--n_rows', type=int, default=None,
                        help='Override debug n_rows (set to small number for quick testing)')
-    parser.add_argument('--save_stage_outputs', type=bool, default=True,
+    parser.add_argument('--save_stage_outputs', type=bool, default=False,
                        help='Save intermediate stage outputs (StageOutput) to disk for later reuse')
     return parser.parse_args()
 

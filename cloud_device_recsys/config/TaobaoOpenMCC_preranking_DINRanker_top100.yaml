@@ -1,16 +1,11 @@
 # Exp 1: Baseline
 dataset_id: "TaobaoOpenMCC"
-dataset_config: "./config/dataset_config.yaml"
+dataset_config: "/home/people/dliu2/FuxiCTR/cloud_device_recsys/config/dataset_config.yaml"
+prev_output_path: "/scratch/dliu2/FuxiCTR/outputs/TaobaoOpenMCCv0_retrieval_baseline_top1000_test/stage_outputs"
 seed: 2024
 gpu: 0
 debug:
   n_rows: null
-
-candidates:
-  preranking:
-    source: "retrieval_candidates.parquet"
-    top_k: 100
-    output: "preranking_candidates.parquet"
 
 stages:
   preranking:
@@ -18,15 +13,19 @@ stages:
     model: "DINRanker"
     features: ["FG1", "FG2"]
     top_k: 100
-    use_diversity: true
     model_params:
-      metrics_k: [10, 50, 100]
+      num_negatives: 4
+      loss_type: "bpr"
+      use_diversity_loss: 0
+      use_feature_encoder: 1
+      metrics_k: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 50, 100]
       monitor: "Recall@100"
       embedding_dim: 32
       hidden_layers: [128, 64]
+
     training:
       epochs: 10
-      batch_size: 2048
+      batch_size: 4096
       learning_rate: 0.001
       optimizer: "adam"
     metrics: ["nDCG", "Recall"]

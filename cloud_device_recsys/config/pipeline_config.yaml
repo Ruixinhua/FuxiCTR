@@ -30,7 +30,6 @@ stages:
     
     model_params:
       metrics_k: [1000, 5000, 10000]
-      monitor: "Recall@1000"
       embedding_dim: 64
       use_user_transformer: 1
       user_transformer_layers: 1
@@ -44,13 +43,14 @@ stages:
       net_regularizer: 1.0e-5        # L2
       max_gradient_norm: 5.0         # Gradient
       dropout: 0.1                   # Dropout for
+      learning_rate: 0.001
 
     training:
       epochs: 10
       batch_size: 4096
-      learning_rate: 0.001
       optimizer: "adam"
-      
+      monitor: "Recall@1000"
+
     metrics: ["Recall"]
 
   preranking:
@@ -58,23 +58,22 @@ stages:
     model: "DIN"
     features: ["FG1", "FG2"]
     top_k: 100
-    use_diversity: true
-    
+
     model_params:
       metrics_k: [10, 50, 100]
-      monitor: "Recall@100"
       embedding_dim: 32
       dnn_hidden_units: [128, 64]
       din_target_field: "cand_item_id"
       din_sequence_field: "ipv_item_id_seq"
-      
+      learning_rate: 0.001
+
     training:
       epochs: 10
       batch_size: 2048
-      learning_rate: 0.001
       optimizer: "adam"
-      
-    metrics: ["nDCG", "Recall"]
+      monitor: "Recall@100"
+
+    metrics: ["nDCG", "Recall", "MRR", "gAUC"]
 
 
   reranking:
@@ -85,24 +84,24 @@ stages:
     
     model_params:
       metrics_k: [5, 10, 50]
-      monitor: "Recall@100"
       embedding_dim: 4
       dnn_hidden_units: [64, 32]
       din_target_field: "cand_item_id"
       din_sequence_field: "ipv_item_id_seq"
       max_model_size_kb: 500  # Device model size constraint
-      
+      learning_rate: 0.001
+
     training:
       epochs: 10
       batch_size: 1024
-      learning_rate: 0.001
       optimizer: "adam"
+      monitor: "Recall@100"
       distillation:
         enabled: false
         teacher_model: null
         temperature: 3.0
         
-    metrics: ["nDCG", "Recall"]
+    metrics: ["nDCG", "Recall", "MRR", "gAUC"]
 
 # -----------------------------------------
 # Output Settings

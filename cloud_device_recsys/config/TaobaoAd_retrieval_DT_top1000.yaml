@@ -1,15 +1,10 @@
 # Exp 1: Baseline
-dataset_id: "TaobaoOpenMCC"
+dataset_id: "TaobaoAd"
 dataset_config: "./config/dataset_config.yaml"
 seed: 2024
 gpu: 0
 debug:
-  n_rows: null
-
-candidates:
-  retrieval:
-    source: "item_pool"
-    output: "retrieval_candidates.parquet"
+  n_rows: null  # Set to integer (e.g., 100000) for quick testing, null for full data
 
 stages:
   retrieval:
@@ -18,9 +13,11 @@ stages:
     features: ["FG1", "FG2"]
     top_k: 1000
     model_params:
+      num_negatives: 0
+      loss_type: "bpr"   # margin/bpr/softmax
       metrics_k: [1000, 5000, 10000]
-      monitor: "Recall@1000"
-      embedding_dim: 64
+      use_feature_encoder: 1
+      embedding_dim: 32
       use_user_transformer: 1
       user_transformer_layers: 1
       use_item_transformer: 0
@@ -31,11 +28,13 @@ stages:
       net_regularizer: 1.0e-5
       max_gradient_norm: 5.0
       dropout: 0.1
+      learning_rate: 0.001
+
     training:
       epochs: 10
       batch_size: 4096
-      learning_rate: 0.001
       optimizer: "adam"
+      monitor: "Recall@1000"
     metrics: ["Recall"]
 
 output:
