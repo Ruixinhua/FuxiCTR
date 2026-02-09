@@ -1,0 +1,45 @@
+# =============================================================================
+# Hyperparameter Search Configuration Example
+# =============================================================================
+# This file demonstrates how to define a hyperparameter search space.
+# 
+# Usage:
+#   python run_hyperparam_search.py \
+#       --search_config ./config/search_example.yaml \
+#       --base_config ./config/TaobaoOpenMCC_full_DT_DIN_DIN.yaml \
+#       --output_dir ./outputs/hp_search \
+#       --gpu 0
+
+# -----------------------------------------
+# Search Space Definition
+# -----------------------------------------
+# Format: stage_name.parameter_path: [list of values to try]
+# 
+# Parameter paths use dot notation to access nested config values.
+# For example, 'model_params.embedding_dim' accesses:
+#   stages:
+#     retrieval:
+#       model_params:
+#         embedding_dim: <value>
+
+search_space:
+  # Retrieval stage parameters
+  retrieval:
+    # Embedding dimension for user/item towers
+    model_params.embedding_dim: [16, 32, 64, 128]
+    # Number of negative samples per positive
+    model_params.num_negatives: [20, 50, 100]
+    # Learning rate
+    model_params.learning_rate: [0.001, 0.01, 0.0001]
+    model_params.loss_type: ["bpr", "softmax", "margin"]
+
+
+# -----------------------------------------
+# Fixed Overrides (Optional)
+# -----------------------------------------
+# These parameters are applied to all experiments but are not part of the search.
+# Useful for reducing training time during search.
+
+fixed_overrides:
+  retrieval:
+    training.epochs: 10
