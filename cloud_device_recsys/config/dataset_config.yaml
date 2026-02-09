@@ -8,15 +8,16 @@ TaobaoOpenMCC:
   # -----------------------------------------
   # Raw Data Settings (Server paths)
   # -----------------------------------------
-#  raw_data_root: "/scratch/dliu2/FuxiCTR/datasets/TaobaoOpenMCC/with_item_id"
-  raw_data_root: "/Users/dairui/PycharmProjects/FuxiCTR/datasets/raw_data/TaobaoOpenMCC/with_item_id"
+  raw_data_root: "/scratch/dliu2/FuxiCTR/datasets/TaobaoOpenMCC/with_item_id"
+#  raw_data_root: "/Users/dairui/PycharmProjects/FuxiCTR/datasets/raw_data/TaobaoOpenMCC/with_item_id"
   raw_data_format: "csv"
   raw_files: [train, valid, test]  # Auto-appends format extension
 
   # -----------------------------------------
   # Processed Data Settings (Server paths)
   # -----------------------------------------
-  processed_data_root: "/scratch/dliu2/FuxiCTR/data/TaobaoOpenMCC"
+#  processed_data_root: "/scratch/dliu2/FuxiCTR/data/TaobaoOpenMCC"
+  processed_data_root: "/scratch/dliu2/FuxiCTR/processed/TaobaoOpenMCC"
 #  processed_data_root: "/Users/dairui/PycharmProjects/FuxiCTR/data/TaobaoOpenMCC"
   processed_data_format: "parquet"
   # Default outputs: train.parquet, valid.parquet, test.parquet, feature_map.json, feature_vocab.json
@@ -63,7 +64,7 @@ TaobaoOpenMCC:
     - name: score
       type: numeric
       dtype: float
-      feature_group: FG1
+      feature_group: drop
 
     # FG2: User Behavioral Sequences (Cloud-personalized)
     - name: [exp_item_id_seq, exp_item_pos_seq, exp_item_pagenum_seq,

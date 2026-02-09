@@ -19,28 +19,6 @@ debug:
   n_rows: null  # Set to integer (e.g., 100000) for quick testing, null for full data
 
 # -----------------------------------------
-# Stage-Specific Candidates
-# Each stage uses candidates from previous stage (linked by impression_id)
-# -----------------------------------------
-candidates:
-  # Retrieval: scores all items in item_pool
-  retrieval:
-    source: "item_pool"  # Uses full item pool
-    output: "retrieval_candidates.parquet"
-    
-  # Pre-ranking: scores retrieval output
-  preranking:
-    source: "retrieval_candidates.parquet"
-    top_k: 100  # Use top-K from retrieval
-    output: "preranking_candidates.parquet"
-    
-  # Re-ranking: scores preranking output  
-  reranking:
-    source: "preranking_candidates.parquet"
-    top_k: 10  # Use top-K from preranking
-    output: "reranking_candidates.parquet"
-
-# -----------------------------------------
 # Pipeline Stages
 # -----------------------------------------
 stages:

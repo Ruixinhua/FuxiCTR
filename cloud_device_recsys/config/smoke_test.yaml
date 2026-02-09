@@ -18,27 +18,6 @@ gpu: 0
 debug:
   n_rows: 100  # Set to integer (e.g., 100000) for quick testing, null for full data
 
-# -----------------------------------------
-# Stage-Specific Candidates
-# Each stage uses candidates from previous stage (linked by impression_id)
-# -----------------------------------------
-candidates:
-  # Retrieval: scores all items in item_pool
-  retrieval:
-    source: "item_pool"  # Uses full item pool
-    output: "retrieval_candidates.parquet"
-    
-  # Pre-ranking: scores retrieval output
-  preranking:
-    source: "retrieval_candidates.parquet"
-    top_k: 1000  # Use top-K from retrieval
-    output: "preranking_candidates.parquet"
-    
-  # Re-ranking: scores preranking output  
-  reranking:
-    source: "preranking_candidates.parquet"
-    top_k: 100  # Use top-K from preranking
-    output: "reranking_candidates.parquet"
 
 # -----------------------------------------
 # Pipeline Stages
@@ -52,6 +31,7 @@ stages:
     
     model_params:
       metrics_k: [1000, 5000, 10000]
+      use_diversity_loss: 0
       monitor: "Recall@1000"
       embedding_dim: 64
       use_user_transformer: 1
@@ -84,13 +64,16 @@ stages:
     model_params:
       metrics_k: [10, 50, 100]
       monitor: "Recall@100"
-      use_diversity_loss: true
+      use_diversity_loss: 0
+      num_negatives: 4
       embedding_dim: 10
       dnn_hidden_units: [128, 64]
       din_target_field:
         - [cand_item_id, cand_item_pos, cand_item_pagenum, cand_item_sex, cand_item_price_level, cand_item_age_level, cand_item_bc_type]
+        - [cand_item_id, cand_item_pos, cand_item_pagenum, cand_item_sex, cand_item_price_level, cand_item_age_level, cand_item_bc_type]
       din_sequence_field:
         - [ipv_item_id_seq, ipv_item_pos_seq, ipv_item_pagenum_seq, ipv_item_sex_seq, ipv_item_price_level_seq, ipv_item_age_level_seq, ipv_item_bc_type_seq]
+        - [exp_item_id_seq, exp_item_pos_seq, exp_item_pagenum_seq, exp_item_sex_seq, exp_item_price_level_seq, exp_item_age_level_seq, exp_item_bc_type_seq]
       embedding_regularizer: 1.0e-5  # L2
       net_regularizer: 1.0e-5        # L2
       
@@ -112,7 +95,7 @@ stages:
     model_params:
       metrics_k: [5, 10, 50]
       monitor: "Recall@100"
-      embedding_dim: 16
+      embedding_dim: 4
       hidden_layers: [64, 32]
       max_model_size_kb: 500  # Device model size constraint
       
