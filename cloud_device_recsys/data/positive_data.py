@@ -142,7 +142,7 @@ def get_train_path_for_mode(
     
     if num_negatives <= 0:
         # Pointwise mode: use full dataset
-        logger.info("Training mode: Pointwise (using full dataset)")
+        logger.info(f"Training mode: Pointwise ({train_path})")
         return train_path
     else:
         # Pairwise mode: use positive-only dataset

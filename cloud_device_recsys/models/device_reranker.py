@@ -19,9 +19,10 @@ import os
 
 from fuxictr.pytorch.models import BaseModel
 from fuxictr.pytorch.layers import FeatureEmbeddingDict, MLP_Block
+from .losses import DiversityLossMixin
 
 
-class DeviceReranker(BaseModel):
+class DeviceReranker(DiversityLossMixin, BaseModel):
     """
     Lightweight on-device re-ranking model.
     
@@ -48,6 +49,9 @@ class DeviceReranker(BaseModel):
                  distillation_temperature=2.0,
                  embedding_regularizer=None,
                  net_regularizer=None,
+                 use_diversity_loss=False,
+                 diversity_lambda=0.7,
+                 diversity_theta=0.7,
                  **kwargs):
         """
         Initialize Device Re-ranker.
@@ -65,8 +69,21 @@ class DeviceReranker(BaseModel):
             support_distillation: Whether to enable distillation training
             distillation_alpha: Balance between hard and soft labels
             distillation_temperature: Temperature for soft labels
+            use_diversity_loss: Whether to use diversity loss
+            diversity_lambda: Weight of diversity loss
+            diversity_theta: Weight between prediction sum and diversity term
         """
-        super(DeviceReranker, self).__init__(
+        # Initialize DiversityLossMixin first
+        DiversityLossMixin.__init__(
+            self,
+            use_diversity_loss=use_diversity_loss,
+            diversity_lambda=diversity_lambda,
+            diversity_theta=diversity_theta,
+            **kwargs
+        )
+        
+        BaseModel.__init__(
+            self,
             feature_map,
             model_id=model_id,
             gpu=gpu,
@@ -120,6 +137,19 @@ class DeviceReranker(BaseModel):
         self.logger.info(f"Model size: {total_params:,} params ({trainable_params:,} trainable)")
         self.logger.info(f"Estimated size: {size_mb:.2f} MB")
     
+    def get_diversity_item_embeddings(self, feat_emb_dict):
+        """Override to provide item embeddings for diversity loss."""
+        # Use configured features if available
+        emb = super().get_diversity_item_embeddings(feat_emb_dict)
+        if emb is not None:
+            return emb
+            
+        # Fallback: try to finding 'cand_item_id'
+        if 'cand_item_id' in feat_emb_dict:
+            return feat_emb_dict['cand_item_id']
+            
+        return None
+
     def forward(self, inputs):
         """
         Forward pass.
@@ -145,6 +175,11 @@ class DeviceReranker(BaseModel):
             "y_pred": y_pred,
             "logits": logits
         }
+        
+        # Add embedding dict for diversity loss
+        if self.use_diversity_loss:
+            return_dict["feat_emb_dict"] = feat_emb_dict
+            
         return return_dict
     
     def set_teacher_model(self, teacher_model: BaseModel):
@@ -160,7 +195,7 @@ class DeviceReranker(BaseModel):
     
     def compute_loss(self, return_dict, y_true):
         """
-        Compute loss with optional knowledge distillation.
+        Compute loss with optional knowledge distillation and diversity.
         
         Args:
             return_dict: Output from forward pass
@@ -169,30 +204,48 @@ class DeviceReranker(BaseModel):
         Returns:
             Total loss
         """
+        # 1. Compute Base Loss (Hard Label + Distillation)
         if not self.support_distillation or self.teacher_model is None:
-            return super().compute_loss(return_dict, y_true)
+            base_loss = super().compute_loss(return_dict, y_true)
+        else:
+            # Hard label loss (standard BCE)
+            hard_loss = super().compute_loss(return_dict, y_true)
+            
+            # Soft label loss (distillation from teacher)
+            student_logits = return_dict["logits"]
+            
+            # Get teacher predictions (assumes teacher_logits passed or recomputed)
+            # In simple implementation we might not have teacher logits here 
+            # unless passed in return_dict or we run teacher here?
+            # Existing code: teacher_logits = return_dict.get("teacher_logits", student_logits)
+            # This implies teacher logits should have been put in return_dict 
+            # OR we accept student_logits as dummy (which computes 0 KL div).
+            # We keep existing logic.
+            teacher_logits = return_dict.get("teacher_logits", student_logits)
+            
+            # KL divergence for soft labels
+            soft_loss = F.kl_div(
+                F.log_softmax(student_logits / self.distillation_temperature, dim=-1),
+                F.softmax(teacher_logits / self.distillation_temperature, dim=-1),
+                reduction='batchmean'
+            ) * (self.distillation_temperature ** 2)
+            
+            # Combined loss
+            base_loss = (1 - self.distillation_alpha) * hard_loss + \
+                         self.distillation_alpha * soft_loss
         
-        # Hard label loss (standard BCE)
-        hard_loss = super().compute_loss(return_dict, y_true)
-        
-        # Soft label loss (distillation from teacher)
-        student_logits = return_dict["logits"]
-        
-        # Get teacher predictions (assuming same input format)
-        # Note: In practice, you'd need to pass the actual inputs
-        # This is simplified - teacher logits would be pre-computed
-        teacher_logits = return_dict.get("teacher_logits", student_logits)
-        
-        # KL divergence for soft labels
-        soft_loss = F.kl_div(
-            F.log_softmax(student_logits / self.distillation_temperature, dim=-1),
-            F.softmax(teacher_logits / self.distillation_temperature, dim=-1),
-            reduction='batchmean'
-        ) * (self.distillation_temperature ** 2)
-        
-        # Combined loss
-        total_loss = (1 - self.distillation_alpha) * hard_loss + \
-                     self.distillation_alpha * soft_loss
+        # 2. Add Diversity Regularization
+        diversity_loss = None
+        if self.use_diversity_loss and "feat_emb_dict" in return_dict:
+            diversity_loss = self.compute_diversity_regularization(
+                feat_emb_dict=return_dict["feat_emb_dict"],
+                y_pred=return_dict["y_pred"]
+            )
+            
+        total_loss = self.add_diversity_to_loss(
+            base_loss,
+            diversity_loss
+        )
         
         return total_loss
     
