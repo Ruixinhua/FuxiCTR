@@ -79,14 +79,15 @@ class RetrievalStage(BaseStage):
         self.best_weights_path = None
         self.metrics_k = model_params['metrics_k']
         self.monitor = model_params.get('monitor', 'Recall@1000')
+        self.chunk_size = model_params.get('chunk_size', 50000)
         # Negative sampling parameters
         self.num_negatives = model_params.get('num_negatives', 0)
         self.loss_type = model_params.get('loss_type', 'bpr')  # 'bpr', 'margin', 'softmax'
         self.margin = model_params.get('margin', 1.0)
         self.negative_sampler: Optional[NegativeSampler] = None
         # Item index for retrieval
-        self.item_embeddings: Optional[np.ndarray] = None
-        self.item_ids: Optional[List[Any]] = None
+        self.item_embeddings: Optional[torch.Tensor] = None
+        self.item_ids: Optional[torch.Tensor] = None
 
     def build_model(self) -> DualTowerRetrieval:
         """Build and initialize the retrieval model using unified registry"""
@@ -329,14 +330,11 @@ class RetrievalStage(BaseStage):
             for batch in tqdm(item_data, disable=True, file=sys.stdout):
                 # Get embeddings using model helper
                 embs = self.model.get_item_embedding(batch)
-                emb_list.append(embs.cpu().numpy())
-                id_list.append(dict(batch)[item_id_col].cpu().numpy().reshape(-1))
-        self.item_embeddings = np.vstack(emb_list)
-        self.item_ids = np.concatenate(id_list) if id_list else np.array([])
-        self.item_id_to_idx = {item_id: i for i, item_id in enumerate(self.item_ids)}
-        
-        # Keep a GPU tensor for accelerated scoring
-        self._item_emb_tensor = torch.from_numpy(self.item_embeddings).to(self.model.device)
+                emb_list.append(embs.cpu())
+                id_list.append(batch[item_id_col].cpu())
+        self.item_embeddings = torch.vstack(emb_list)
+        self.item_ids = torch.cat(id_list)
+        self.item_id_to_idx = {item_id.item(): i for i, item_id in enumerate(self.item_ids)}
         
         self.logger.info(f"Index Built: {self.item_embeddings.shape} items")
 
@@ -378,7 +376,7 @@ class RetrievalStage(BaseStage):
             self.build_item_index(item_data)
         
         if self.item_id_to_idx is None:
-            self.item_id_to_idx = {item_id: i for i, item_id in enumerate(self.item_ids)}
+            self.item_id_to_idx = {item_id.item(): i for i, item_id in enumerate(self.item_ids)}
         
         self.model.eval()
         metrics_k = self.metrics_k if metrics_k is None else metrics_k
@@ -387,8 +385,10 @@ class RetrievalStage(BaseStage):
         # Setup output
         output = StageOutput(stage_name=self.stage_name) if return_output else None
         
-        item_id_col = getattr(self.feature_map, 'dataset_config', {}).get('item_id_col', 'cand_item_id')
-        impression_id_col = getattr(self.feature_map, 'dataset_config', {}).get('impression_id_col', 'impression_id')
+        dataset_config = getattr(self.feature_map, 'dataset_config', {})
+        item_id_col = dataset_config.get('item_id_col', 'cand_item_id')
+        impression_id_col = dataset_config.get('impression_id_col', 'impression_id')
+        label_col = dataset_config.get('label_col', {}).get('name', 'label')
 
         # =====================================================================
         # Phase 1: Batch extract user embeddings and metadata
@@ -404,27 +404,25 @@ class RetrievalStage(BaseStage):
         self.logger.info("Extracting user embeddings and ground truth from input data...")
         with torch.no_grad():
             for batch_data in tqdm(input_data, desc="Extracting embeddings", disable=True, file=sys.stdout):
-                batch_dict = dict(batch_data)
-                
                 u_emb = self.model.get_user_embedding(batch_data)
-                current_request_ids = batch_dict.get(impression_id_col)
-                current_gt_item_ids = batch_dict.get(item_id_col)
+                current_request_ids = batch_data[impression_id_col]
+                current_gt_item_ids = batch_data[item_id_col]
                 
                 for i in range(len(u_emb)):
-                    req_id = current_request_ids[i].item() if isinstance(current_request_ids[i], torch.Tensor) else current_request_ids[i]
-                    gt_item = current_gt_item_ids[i].item() if isinstance(current_gt_item_ids[i], torch.Tensor) else current_gt_item_ids[i]
+                    req_id = current_request_ids[i].item()
+                    gt_item = current_gt_item_ids[i].item()
                     
                     if req_id not in request_info_temp:
                         emb_idx = len(request_ids_list)
                         request_ids_list.append(req_id)
-                        user_embs_list.append(u_emb[i].cpu().numpy())
+                        user_embs_list.append(u_emb[i].cpu())
                         
                         # Extract ALL user features (FG2 + FG3) for downstream stages
                         if return_output:
                             user_features = {}
                             all_user_features = self.feature_group_manager.get_user_features()  # FG2 + FG3
-                            for feat_name, feat_val in batch_dict.items():
-                                if feat_name in [item_id_col, impression_id_col, 'label']:
+                            for feat_name, feat_val in batch_data.items():
+                                if feat_name in [item_id_col, impression_id_col, label_col]:
                                     continue
                                 # Save all user features that are available (no filtering by FG2)
                                 if feat_name not in all_user_features:
@@ -450,8 +448,7 @@ class RetrievalStage(BaseStage):
             return output, {} if compute_metrics else None
         
         # Stack all user embeddings
-        user_embs = np.vstack(user_embs_list)
-        user_embs_tensor = torch.from_numpy(user_embs).to(self.model.device)
+        user_embs = torch.vstack(user_embs_list)
         num_requests = len(request_ids_list)
         num_items = len(self.item_ids)
         
@@ -471,7 +468,6 @@ class RetrievalStage(BaseStage):
         # =====================================================================
         # Phase 2: Batch scoring with chunked processing
         # =====================================================================
-        chunk_size = kwargs.get('chunk_size', 50000)
         
         # Determine fetch_k based on what we need
         max_positives = max(len(gt) for gt in ground_truths_list) if ground_truths_list else 0
@@ -485,19 +481,13 @@ class RetrievalStage(BaseStage):
         candidates_data = [] if return_output else None
         user_features_data = [] if return_output else None
         
-        # Prepare GPU item embeddings tensor (reuse if already built)
-        if not hasattr(self, '_item_emb_tensor') or self._item_emb_tensor is None:
-            self._item_emb_tensor = torch.from_numpy(self.item_embeddings).to(self.model.device)
-        item_emb_t = self._item_emb_tensor  # [num_items, D]
-        
-        for chunk_start in range(0, num_requests, chunk_size):
-            chunk_end = min(chunk_start + chunk_size, num_requests)
+        for chunk_start in range(0, num_requests, self.chunk_size):
+            chunk_end = min(chunk_start + self.chunk_size, num_requests)
             chunk_len = chunk_end - chunk_start
             
-            # GPU-accelerated matrix multiplication + top-K
             with torch.no_grad():
-                user_chunk_t = user_embs_tensor[chunk_start:chunk_end]  # [chunk, D]
-                scores_t = torch.matmul(user_chunk_t, item_emb_t.T)    # [chunk, num_items]
+                user_chunk_t = user_embs[chunk_start:chunk_end]  # [chunk, D]
+                scores_t = torch.matmul(user_chunk_t, self.item_embeddings.T)    # [chunk, num_items]
                 
                 topk_k = min(fetch_k, num_items)
                 topk_scores_t, topk_indices_t = torch.topk(scores_t, topk_k, dim=1, sorted=True)
