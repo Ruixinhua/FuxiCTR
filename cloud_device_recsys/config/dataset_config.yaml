@@ -17,8 +17,8 @@ TaobaoOpenMCC:
   # Processed Data Settings (Server paths)
   # -----------------------------------------
 #  processed_data_root: "/scratch/dliu2/FuxiCTR/data/TaobaoOpenMCC"
-  processed_data_root: "/scratch/dliu2/FuxiCTR/processed/TaobaoOpenMCC"
-#  processed_data_root: "/Users/dairui/PycharmProjects/FuxiCTR/data/TaobaoOpenMCC"
+#  processed_data_root: "/scratch/dliu2/FuxiCTR/processed/TaobaoOpenMCC"
+  processed_data_root: "/Users/dairui/PycharmProjects/FuxiCTR/processed/TaobaoOpenMCC"
   processed_data_format: "parquet"
   # Default outputs: train.parquet, valid.parquet, test.parquet, feature_map.json, feature_vocab.json
 

@@ -26,7 +26,7 @@ stages:
       use_feature_encoder: 1
       metrics_k: [10, 50, 100]
       embedding_dim: 4
-      hidden_layers: [128, 64]
+      hidden_units: [128, 64]
       embedding_regularizer: 1.0e-5
       net_regularizer: 1.0e-5
       max_gradient_norm: 5.0
