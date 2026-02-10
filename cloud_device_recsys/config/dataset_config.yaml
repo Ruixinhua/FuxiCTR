@@ -291,6 +291,7 @@ Ali_CCP:
     min_categr_count: 1
     positive_only_eval: true  # Filter valid/test to positive samples only
     generate_impression_id: true  # Auto-generate impression_id if missing
+    max_eval_test_rows: 50000
     
   # -----------------------------------------
   # Item Pool Configuration

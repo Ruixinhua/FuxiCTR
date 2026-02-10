@@ -272,7 +272,6 @@ class DataPreprocessor:
         self,
         ddf: pl.LazyFrame,
         split: str,
-        is_eval: bool = False
     ) -> pl.LazyFrame:
         """
         Apply custom preprocessing to a data split.
@@ -280,7 +279,6 @@ class DataPreprocessor:
         Args:
             ddf: Polars LazyFrame
             split: Split name (train, valid, test)
-            is_eval: Whether this is an evaluation split
             
         Returns:
             Preprocessed LazyFrame
@@ -290,13 +288,24 @@ class DataPreprocessor:
             impression_col = self.config.get('impression_id_col', 'impression_id')
             ddf = generate_impression_id(ddf, impression_col)
         
-        # Filter positive samples for eval splits
-        label_col = self.label_cols[0]['name']
-        if is_eval and self.preprocess_opts.get('positive_only_eval', True):
-            before_count = ddf.select(pl.count()).collect().item()
-            ddf = filter_positive_samples(ddf, label_col)
-            after_count = ddf.select(pl.count()).collect().item()
-            self.logger.info(f"[{split}] Filtered positive samples: {before_count} -> {after_count}")
+        if split in ['valid', 'test']:
+            # Filter positive samples for eval splits
+            if self.preprocess_opts.get('positive_only_eval', True):
+                before_count = ddf.select(pl.len()).collect().item()
+                label_col = self.label_cols[0]['name']
+                ddf = filter_positive_samples(ddf, label_col)
+                after_count = ddf.select(pl.len()).collect().item()
+                self.logger.info(f"[{split}] Filtered positive samples: {before_count} -> {after_count}")
+
+            # Truncate eval splits after positive filtering if configured
+            max_eval_test_rows = self.preprocess_opts.get('max_eval_test_rows', 0)
+            if max_eval_test_rows > 0:
+                before_count = ddf.select(pl.len()).collect().item()
+                ddf = ddf.limit(max_eval_test_rows)
+                after_count = ddf.select(pl.len()).collect().item()
+                self.logger.info(
+                    f"[{split}] Truncated: {before_count} -> {after_count}"
+                )
         
         return ddf
     
@@ -347,7 +356,7 @@ class DataPreprocessor:
                 data_format=data_format,
                 n_rows=self.n_rows
             )
-            train_ddf = self.preprocess_split(train_ddf, 'train', is_eval=False)
+            train_ddf = self.preprocess_split(train_ddf, 'train')
             all_ddfs.append(train_ddf)
             split_ddfs['train'] = train_ddf
         
@@ -360,7 +369,7 @@ class DataPreprocessor:
                 data_format=data_format,
                 n_rows=self.n_rows
             )
-            valid_ddf = self.preprocess_split(valid_ddf, 'valid', is_eval=True)
+            valid_ddf = self.preprocess_split(valid_ddf, 'valid')
             all_ddfs.append(valid_ddf)
             split_ddfs['valid'] = valid_ddf
         
@@ -373,7 +382,7 @@ class DataPreprocessor:
                 data_format=data_format,
                 n_rows=self.n_rows
             )
-            test_ddf = self.preprocess_split(test_ddf, 'test', is_eval=True)
+            test_ddf = self.preprocess_split(test_ddf, 'test')
             all_ddfs.append(test_ddf)
             split_ddfs['test'] = test_ddf
         
@@ -423,8 +432,7 @@ class DataPreprocessor:
             )
             
             # Apply custom preprocessing
-            is_eval = split_name in ['valid', 'test']
-            split_ddf = self.preprocess_split(split_ddf, split_name, is_eval=is_eval)
+            split_ddf = self.preprocess_split(split_ddf, split_name)
             
             # Apply FuxiCTR preprocessing
             split_ddf = feature_processor.preprocess(split_ddf)
