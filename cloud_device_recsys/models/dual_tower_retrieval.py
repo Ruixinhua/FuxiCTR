@@ -119,10 +119,10 @@ class DualTowerRetrieval(DiversityLossMixin, BaseModel):
         self.logger.info(f"User fields: {user_fields}, Item fields: {item_fields}")
         
         # Transformer for sequence encoding (optional)
-        self.use_user_transformer = kwargs.get("use_user_transformer", False)
+        self.user_transformer_layers = kwargs.get("user_transformer_layers", 1)
+        self.use_user_transformer = kwargs.get("use_user_transformer", False) and self.user_transformer_layers > 0
         if self.use_user_transformer:
             self.user_transformer_heads = kwargs.get("user_transformer_heads", 4)
-            self.user_transformer_layers = kwargs.get("user_transformer_layers", 1)
             self.user_transformer_dim = embedding_dim * max(1, user_fields)
             
             encoder_layer = nn.TransformerEncoderLayer(
@@ -136,10 +136,10 @@ class DualTowerRetrieval(DiversityLossMixin, BaseModel):
             self.logger.info(f"Initialized Transformer User Tower: heads={self.user_transformer_heads}, layers={self.user_transformer_layers}")
 
         # Transformer for Item Tower (Feature Interaction)
-        self.use_item_transformer = kwargs.get("use_item_transformer", False)
+        self.item_transformer_layers = kwargs.get("item_transformer_layers", 1)
+        self.use_item_transformer = kwargs.get("use_item_transformer", False) and self.item_transformer_layers > 0
         if self.use_item_transformer:
             self.item_transformer_heads = kwargs.get("item_transformer_heads", 4)
-            self.item_transformer_layers = kwargs.get("item_transformer_layers", 1)
             # Input to transformer is (B, F, D), so d_model = embedding_dim
             
             item_encoder_layer = nn.TransformerEncoderLayer(
