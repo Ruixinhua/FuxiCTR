@@ -219,8 +219,6 @@ class RetrievalStage(BaseStage):
         
         Optimized: batches all negative embeddings into a single call.
         """
-        import torch
-        
         self.model.train()
         train_loss = 0
         total_batches = 0

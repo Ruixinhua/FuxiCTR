@@ -64,7 +64,6 @@ def bpr_loss(
     else:
         return loss
 
-
 def margin_ranking_loss(
     pos_scores: torch.Tensor,
     neg_scores: torch.Tensor,
@@ -135,10 +134,6 @@ def softmax_cross_entropy_loss(
     loss = torch.nn.functional.cross_entropy(all_scores, targets, reduction=reduction)
     
     return loss
-
-
-
-
 
 def compute_diversity_loss(
     item_embeddings: torch.Tensor,
@@ -400,3 +395,233 @@ class DiversityLossMixin:
             )
             
         return total_loss
+
+
+def _find_embedding_dict_layer(model):
+    """
+    Find the FeatureEmbeddingDict layer in a model.
+    
+    Model_zoo models use FeatureEmbedding which wraps FeatureEmbeddingDict:
+        model.embedding_layer (FeatureEmbedding)
+            .embedding_layer (FeatureEmbeddingDict)
+    
+    Cloud_device_recsys models use FeatureEmbeddingDict directly:
+        model.embedding_layer (FeatureEmbeddingDict)
+    
+    Returns:
+        The FeatureEmbeddingDict instance, or None if not found
+    """
+    from fuxictr.pytorch.layers import FeatureEmbeddingDict, FeatureEmbedding
+    
+    if hasattr(model, 'embedding_layer'):
+        emb_layer = model.embedding_layer
+        # Case 1: model_zoo pattern — FeatureEmbedding wrapping FeatureEmbeddingDict
+        if isinstance(emb_layer, FeatureEmbedding) and hasattr(emb_layer, 'embedding_layer'):
+            inner = emb_layer.embedding_layer
+            if isinstance(inner, FeatureEmbeddingDict):
+                return inner
+        # Case 2: direct FeatureEmbeddingDict
+        if isinstance(emb_layer, FeatureEmbeddingDict):
+            return emb_layer
+    
+    # Case 3: search all submodules
+    for module in model.modules():
+        if isinstance(module, FeatureEmbeddingDict):
+            return module
+    
+    return None
+
+
+def _detect_item_features(model):
+    """
+    Auto-detect item feature names from feature_map.
+    
+    Detection priority:
+    1. feature_cols with feature_group == 'FG1' from dataset_config
+    2. dataset_config["item_id_col"] and its shared embeddings
+    3. Fallback: features with 'item' in the name
+    
+    Returns:
+        List of item feature names (only those present in feature_map.features)
+    """
+    feature_map = model.feature_map
+    available_features = set(feature_map.features.keys())
+    
+    # --- Strategy 1: Use feature_group FG1 from dataset_config ---
+    dataset_config = getattr(feature_map, 'dataset_config', None) or {}
+    feature_cols = dataset_config.get('feature_cols', [])
+    
+    if feature_cols:
+        fg1_features = []
+        for feat_def in feature_cols:
+            if feat_def.get('feature_group') != 'FG1':
+                continue
+            names = feat_def.get('name', [])
+            if isinstance(names, str):
+                names = [names]
+            for name in names:
+                if name in available_features:
+                    fg1_features.append(name)
+        
+        if fg1_features:
+            logger.info(f"Detected FG1 item features: {fg1_features}")
+            return fg1_features
+    
+    # --- Strategy 2: Use item_id_col from dataset_config ---
+    item_id_col = dataset_config.get("item_id_col")
+    if item_id_col and item_id_col in available_features:
+        item_features = [item_id_col]
+        # Also include features that share embedding with item_id
+        for name, spec in feature_map.features.items():
+            if spec.get('share_embedding') == item_id_col and name != item_id_col:
+                item_features.append(name)
+        logger.info(f"Detected item features from item_id_col: {item_features}")
+        return item_features
+    
+    # --- Strategy 3: Fallback heuristic ---
+    item_features = []
+    for name, spec in feature_map.features.items():
+        if 'item' in name.lower() and spec.get('type') in ('categorical', 'sequence'):
+            item_features.append(name)
+    
+    if item_features:
+        logger.info(f"Detected item features by name heuristic: {item_features}")
+    else:
+        logger.warning("No item features detected by any strategy")
+    
+    return item_features
+
+
+
+def wrap_model_with_diversity(
+    model,
+    use_diversity_loss: bool = True,
+    diversity_lambda: float = 0.7,
+    diversity_theta: float = 0.7,
+    diversity_item_features: Optional[List[str]] = None,
+):
+    """
+    Wrap any BaseModel to add diversity loss support.
+    
+    Works by overriding forward() and compute_loss() methods on the model
+    instance (monkey-patching), without changing the model class.
+    
+    This allows any model_zoo model (DNN, DeepFM, DCN, etc.) to use
+    diversity loss by simply adding configuration parameters.
+    
+    Args:
+        model: A BaseModel instance (from model_zoo or cloud_device_recsys)
+        use_diversity_loss: Whether to enable diversity loss
+        diversity_lambda: Weight of diversity loss in total loss
+        diversity_theta: Weight between prediction sum and diversity term
+        diversity_item_features: List of feature names for item embeddings.
+                                Auto-detected from feature_map if None.
+    
+    Returns:
+        The same model instance, with patched methods
+        
+    Example:
+        >>> model = DNN(feature_map, **params)
+        >>> model = wrap_model_with_diversity(model, diversity_lambda=0.5)
+    """
+    if not use_diversity_loss:
+        return model
+    
+    _logger = logging.getLogger("DiversityWrapper")
+    
+    # Find the FeatureEmbeddingDict layer
+    emb_dict_layer = _find_embedding_dict_layer(model)
+    if emb_dict_layer is None:
+        _logger.warning(
+            "Could not find FeatureEmbeddingDict in model. "
+            "Diversity loss will be disabled."
+        )
+        return model
+    
+    # Detect or validate item features
+    if diversity_item_features is None:
+        diversity_item_features = _detect_item_features(model)
+    
+    if not diversity_item_features:
+        _logger.warning(
+            "No item features found for diversity loss. "
+            "Please specify diversity_item_features explicitly."
+        )
+        return model
+    
+    _logger.info(
+        f"Wrapping model with diversity loss: "
+        f"lambda={diversity_lambda}, theta={diversity_theta}, "
+        f"item_features={diversity_item_features}"
+    )
+    
+    # Store diversity config on the model
+    model._diversity_enabled = True
+    model._diversity_lambda = diversity_lambda
+    model._diversity_theta = diversity_theta
+    model._diversity_item_features = diversity_item_features
+    model._diversity_emb_dict_layer = emb_dict_layer
+    model._diversity_item_embeddings = None  # populated during forward
+    
+    # Save original methods
+    original_forward = model.forward
+    original_compute_loss = model.compute_loss
+    
+    def patched_forward(inputs):
+        """Forward pass with item embedding extraction for diversity loss."""
+        # Call original forward
+        return_dict = original_forward(inputs)
+        
+        # Extract item embeddings via the FeatureEmbeddingDict layer
+        # We need to get the input features (X) and pass through the dict layer
+        try:
+            X = model.get_inputs(inputs)
+            feat_emb_dict = emb_dict_layer(X)
+            
+            # Collect item feature embeddings
+            item_embs = []
+            for feat_name in diversity_item_features:
+                if feat_name in feat_emb_dict:
+                    emb = feat_emb_dict[feat_name]
+                    # Handle sequence features: use mean pooling
+                    if emb.dim() == 3:
+                        emb = emb.mean(dim=1)
+                    item_embs.append(emb)
+            
+            if item_embs:
+                model._diversity_item_embeddings = torch.cat(item_embs, dim=-1)
+            else:
+                model._diversity_item_embeddings = None
+        except Exception as e:
+            _logger.debug(f"Failed to extract item embeddings: {e}")
+            model._diversity_item_embeddings = None
+        
+        return return_dict
+    
+    def patched_compute_loss(return_dict, y_true):
+        """Compute loss with diversity regularization."""
+        # Get base loss from original
+        base_loss = original_compute_loss(return_dict, y_true)
+        
+        # Add diversity regularization
+        item_embeddings = model._diversity_item_embeddings
+        if item_embeddings is not None:
+            y_pred = return_dict["y_pred"]
+            div_loss = compute_diversity_loss(
+                item_embeddings=item_embeddings,
+                y_pred=y_pred,
+                theta=diversity_theta,
+            )
+            total_loss = base_loss - diversity_lambda * div_loss
+            return total_loss
+        
+        return base_loss
+    
+    # Apply patches using types.MethodType to properly bind methods
+    import types
+    model.forward = types.MethodType(lambda self, inputs: patched_forward(inputs), model)
+    model.compute_loss = types.MethodType(
+        lambda self, return_dict, y_true: patched_compute_loss(return_dict, y_true), model
+    )
+    
+    return model

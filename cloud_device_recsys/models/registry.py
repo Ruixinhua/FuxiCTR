@@ -14,6 +14,7 @@ import logging
 from typing import Dict, Any, Type, Optional
 
 from fuxictr.features import FeatureMap
+from .losses import wrap_model_with_diversity
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +126,13 @@ def build_model(
     # Remove 'model' key if present (it's not a model parameter)
     params.pop('model', None)
     
+    # Extract diversity loss params before model construction
+    # (model_zoo models don't accept these in __init__)
+    use_diversity_loss = params.pop('use_diversity_loss', False)
+    diversity_lambda = params.pop('diversity_lambda', 0.7)
+    diversity_theta = params.pop('diversity_theta', 0.7)
+    diversity_item_features = params.pop('diversity_item_features', None)
+    
     # Add unique timestamp to model_id to prevent overwrites
     if add_timestamp:
         base_model_id = params.get("model_id", model_name)
@@ -133,6 +141,16 @@ def build_model(
     
     logger.info(f"Building model: {model_name}")
     model = model_cls(feature_map, **params)
+    
+    # Apply diversity loss wrapper if requested
+    if use_diversity_loss:
+        model = wrap_model_with_diversity(
+            model,
+            use_diversity_loss=True,
+            diversity_lambda=diversity_lambda,
+            diversity_theta=diversity_theta,
+            diversity_item_features=diversity_item_features,
+        )
     
     # Log parameter count if available
     if hasattr(model, 'count_parameters'):
