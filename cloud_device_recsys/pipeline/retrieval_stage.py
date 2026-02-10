@@ -79,6 +79,7 @@ class RetrievalStage(BaseStage):
         self.best_weights_path = None
         self.metrics_k = model_params['metrics_k']
         self.monitor = model_params.get('monitor', 'Recall@1000')
+        self.chunk_size = model_params.get('chunk_size', 50000)
         # Negative sampling parameters
         self.num_negatives = model_params.get('num_negatives', 0)
         self.loss_type = model_params.get('loss_type', 'bpr')  # 'bpr', 'margin', 'softmax'
@@ -471,7 +472,6 @@ class RetrievalStage(BaseStage):
         # =====================================================================
         # Phase 2: Batch scoring with chunked processing
         # =====================================================================
-        chunk_size = kwargs.get('chunk_size', 50000)
         
         # Determine fetch_k based on what we need
         max_positives = max(len(gt) for gt in ground_truths_list) if ground_truths_list else 0
@@ -490,8 +490,8 @@ class RetrievalStage(BaseStage):
             self._item_emb_tensor = torch.from_numpy(self.item_embeddings).to(self.model.device)
         item_emb_t = self._item_emb_tensor  # [num_items, D]
         
-        for chunk_start in range(0, num_requests, chunk_size):
-            chunk_end = min(chunk_start + chunk_size, num_requests)
+        for chunk_start in range(0, num_requests, self.chunk_size):
+            chunk_end = min(chunk_start + self.chunk_size, num_requests)
             chunk_len = chunk_end - chunk_start
             
             # GPU-accelerated matrix multiplication + top-K
