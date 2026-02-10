@@ -14,7 +14,7 @@ Optimized for high-throughput batch training.
 import logging
 import numpy as np
 import pandas as pd
-from typing import List, Set, Any, Dict, Optional
+from typing import List, Set, Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -57,19 +57,11 @@ class NegativeSampler:
             self.item_features_df = item_features_df
         
         # Pre-compute numpy arrays for fast sampling
-        self.all_item_ids = np.array(self.item_features_df.index.tolist())
-        self.num_items = len(self.all_item_ids)
-        
-        # Create item_id -> index mapping for O(1) lookup
-        self.item_id_to_idx = {item_id: idx for idx, item_id in enumerate(self.all_item_ids)}
-        
-        # Pre-compute feature arrays for fast batch lookup
-        self._feature_arrays: Dict[str, np.ndarray] = {}
-        for col in self.item_features_df.columns:
-            self._feature_arrays[col] = self.item_features_df[col].values
+        self.all_item_ids = self.item_features_df.index.to_numpy()
+        self.num_items = self.item_features_df.shape[0]
         
         logger.info(f"NegativeSampler initialized with {self.num_items} items, "
-                   f"{len(self._feature_arrays)} feature columns pre-cached")
+                   f"{self.item_features_df.shape[1]} feature columns pre-cached")
     
     def sample_negatives_batch_fast(
         self,
@@ -161,7 +153,7 @@ class NegativeSampler:
     def get_features_by_indices(
         self,
         indices: np.ndarray,
-    ) -> Dict[str, np.ndarray]:
+    ) -> pd.DataFrame:
         """
         Get features for items by their indices (fastest method).
         
@@ -169,14 +161,14 @@ class NegativeSampler:
             indices: Array of indices into all_item_ids
             
         Returns:
-            Dictionary mapping feature names to numpy arrays
+            pd.DataFrame with item features for the given indices
         """
-        return {col: arr[indices] for col, arr in self._feature_arrays.items()}
+        return self.item_features_df.iloc[indices]
     
     def get_features_by_ids(
         self,
         item_ids: np.ndarray,
-    ) -> Dict[str, np.ndarray]:
+    ) -> pd.DataFrame:
         """
         Get features for items by their IDs.
         
@@ -184,11 +176,9 @@ class NegativeSampler:
             item_ids: Array of item IDs
             
         Returns:
-            Dictionary mapping feature names to numpy arrays
+            pd.DataFrame with item features for the given IDs
         """
-        # Convert IDs to indices
-        indices = np.array([self.item_id_to_idx.get(item_id, 0) for item_id in item_ids])
-        return self.get_features_by_indices(indices)
+        return self.item_features_df.loc[item_ids]
     
     def sample_negatives(
         self,
@@ -225,34 +215,3 @@ class NegativeSampler:
             attempts += 1
         
         return sampled
-    
-    def get_item_features(
-        self,
-        item_ids: List[Any],
-    ) -> pd.DataFrame:
-        """
-        Get features for the specified item IDs (pandas version).
-        
-        Args:
-            item_ids: List of item IDs
-            
-        Returns:
-            DataFrame with item features
-        """
-        return self.item_features_df.loc[item_ids]
-    
-    def get_item_features_as_dict(
-        self,
-        item_ids: List[Any],
-    ) -> Dict[str, np.ndarray]:
-        """
-        Get features for item IDs as a dictionary of numpy arrays.
-        
-        Args:
-            item_ids: List of item IDs
-            
-        Returns:
-            Dictionary mapping feature names to numpy arrays
-        """
-        return self.get_features_by_ids(np.array(item_ids))
-
