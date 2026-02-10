@@ -19,14 +19,17 @@ stages:
       use_diversity_loss: 0
       use_feature_encoder: 1
       metrics_k: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 50, 100]
-      monitor: "Recall@100"
       embedding_dim: 32
       hidden_layers: [128, 64]
+      embedding_regularizer: 1.0e-5
+      net_regularizer: 1.0e-5
+      max_gradient_norm: 5.0
+      learning_rate: 0.001
 
     training:
+      monitor: "Recall@100"
       epochs: 10
       batch_size: 4096
-      learning_rate: 0.001
       optimizer: "adam"
     metrics: ["nDCG", "Recall"]
 
