@@ -39,7 +39,9 @@ import itertools
 import hashlib
 import pandas as pd
 from datetime import datetime
+from collections import deque
 from typing import Dict, List, Any, Tuple
+import time
 
 
 def parse_args():
@@ -57,7 +59,7 @@ def parse_args():
                         help='Dataset ID to use (overrides base config)')
     parser.add_argument('--output_dir', type=str, default='./outputs/hp_search',
                         help='Output directory for search results')
-    parser.add_argument('--gpu', type=int, default=-1,
+    parser.add_argument('--gpu', nargs='+', type=int, default=[-1],
                         help='GPU device ID (-1 for CPU)')
     parser.add_argument('--mode', type=str, default='full',
                         choices=['full', 'retrieval', 'preranking', 'reranking'],
@@ -240,29 +242,17 @@ def params_to_flat_dict(params: Dict[str, Dict[str, Any]], prefix: str = '') -> 
     return result
 
 
-def run_experiment(
+def build_run_pipeline_cmd(
     config_name: str,
     config_dir: str,
     experiment_id: str,
     args: argparse.Namespace,
-    script_dir: str
-) -> Tuple[bool, Dict[str, Any]]:
-    """
-    Run a single experiment by invoking run_pipeline.py.
-    
-    Args:
-        config_name: Name of the config file (without .yaml extension)
-        config_dir: Directory containing the config file
-        experiment_id: Unique experiment identifier
-        args: Parsed command line arguments
-        script_dir: Directory containing run_pipeline.py
-    
-    Returns:
-        (success: bool, metrics: dict)
-    """
+    script_dir: str,
+    gpu_id: int
+) -> List[str]:
+    """Build the run_pipeline.py command for an experiment."""
     run_pipeline_path = os.path.join(script_dir, 'run_pipeline.py')
-    
-    # Build command
+
     cmd = [
         sys.executable,
         run_pipeline_path,
@@ -271,45 +261,30 @@ def run_experiment(
         '--mode', args.mode,
         '--output_dir', args.output_dir,
         '--experiment_id', experiment_id,
-        '--gpu', str(args.gpu),
+        '--gpu', str(gpu_id),
         '--seed', str(args.seed),
     ]
-    
+
     if args.dataset_id:
         cmd.extend(['--dataset_id', args.dataset_id])
-    
+
     if args.n_rows:
         cmd.extend(['--n_rows', str(args.n_rows)])
-    
+
     if args.prev_output_path:
         cmd.extend(['--prev_output_path', args.prev_output_path])
-    
-    print(f"\n{'='*60}")
-    print(f"Running experiment: {experiment_id}")
-    print(f"Command: {' '.join(cmd)}")
-    print(f"{'='*60}\n")
-    
-    try:
-        subprocess.run(
-            cmd,
-            cwd=script_dir,
-            capture_output=False,
-            text=True
-        )
-        
-        # Check for metrics file
-        metrics_path = os.path.join(args.output_dir, experiment_id, 'metrics.json')
-        if os.path.exists(metrics_path):
-            with open(metrics_path, 'r') as f:
-                metrics = json.load(f)
-            return True, metrics
-        else:
-            print(f"Warning: metrics.json not found at {metrics_path}")
-            return False, {}
-            
-    except Exception as e:
-        print(f"Error running experiment: {e}")
-        return False, {}
+
+    return cmd
+
+
+def load_metrics(output_dir: str, experiment_id: str) -> Dict[str, Any]:
+    """Load metrics.json if present."""
+    metrics_path = os.path.join(output_dir, experiment_id, 'metrics.json')
+    if os.path.exists(metrics_path):
+        with open(metrics_path, 'r') as f:
+            return json.load(f)
+    print(f"Warning: metrics.json not found at {metrics_path}")
+    return {}
 
 
 def save_results(
@@ -415,55 +390,97 @@ def main():
         existing_results = existing_df.to_dict('records')
         print(f"\nResuming: Found {len(completed_experiments)} completed experiments")
     
-    # Run experiments
+    # Run experiments concurrently across provided GPUs
     results = existing_results.copy()
-    
+    free_gpus = list(args.gpu)
+
+    pending = deque()
     for i, params in enumerate(param_combinations):
         experiment_id = generate_experiment_id(params)
-        
-        # Skip if already completed
         if experiment_id in completed_experiments:
             print(f"\n[{i+1}/{len(param_combinations)}] Skipping {experiment_id} (already completed)")
             continue
-        
-        print(f"\n[{i+1}/{len(param_combinations)}] Starting {experiment_id}")
-        
-        # Apply params to config
+        pending.append((i, params, experiment_id))
+
+    running = {}
+
+    def launch_experiment(gpu_id: int):
+        i, params, experiment_id = pending.popleft()
+        print(f"\n[{i+1}/{len(param_combinations)}] Starting {experiment_id} on GPU {gpu_id}")
+
         modified_config = apply_params_to_config(base_config, params, fixed_overrides)
-        
-        # Save temp config to the original config_dir (where dataset_config.yaml is)
-        # Use 'hp_temp_' prefix to identify temp configs
+
         config_name = f'{temp_config_prefix}{experiment_id}'
         temp_config_path = os.path.join(args.config_dir, f'{config_name}.yaml')
         save_yaml(modified_config, temp_config_path)
-        
-        # Run experiment
-        success, metrics = run_experiment(
+
+        cmd = build_run_pipeline_cmd(
             config_name=config_name,
-            config_dir=args.config_dir,  # Use original config_dir
+            config_dir=args.config_dir,
             experiment_id=experiment_id,
             args=args,
-            script_dir=script_dir
+            script_dir=script_dir,
+            gpu_id=gpu_id
         )
-        
-        # Clean up temp config file
-        try:
-            os.remove(temp_config_path)
-        except OSError:
-            pass
-        
-        # Record result
-        result = {
-            'experiment_id': experiment_id,
+
+        print(f"Command: {' '.join(cmd)}")
+
+        process = subprocess.Popen(
+            cmd,
+            cwd=script_dir,
+            text=True
+        )
+
+        running[process.pid] = {
+            'process': process,
+            'gpu_id': gpu_id,
             'params': params,
-            'metrics': metrics,
-            'status': 'success' if success else 'failed',
-            'timestamp': datetime.now().isoformat(),
+            'experiment_id': experiment_id,
+            'temp_config_path': temp_config_path,
         }
-        results.append(result)
-        
-        # Save intermediate results
-        save_results(results, results_path)
+
+    while pending or running:
+        while pending and free_gpus:
+            launch_experiment(free_gpus.pop(0))
+
+        finished_pids = []
+        for pid, info in list(running.items()):
+            if info['process'].poll() is not None:
+                finished_pids.append(pid)
+
+        if not finished_pids:
+            time.sleep(2)
+            continue
+
+        for pid in finished_pids:
+            info = running.pop(pid)
+            gpu_id = info['gpu_id']
+            process = info['process']
+            experiment_id = info['experiment_id']
+            params = info['params']
+            temp_config_path = info['temp_config_path']
+
+            return_code = process.returncode
+            metrics = load_metrics(args.output_dir, experiment_id)
+            success = (return_code == 0) and bool(metrics)
+
+            try:
+                os.remove(temp_config_path)
+            except OSError:
+                pass
+
+            result = {
+                'experiment_id': experiment_id,
+                'params': params,
+                'metrics': metrics,
+                'status': 'success' if success else 'failed',
+                'timestamp': datetime.now().isoformat(),
+            }
+            results.append(result)
+
+            save_results(results, results_path)
+
+            free_gpus.append(gpu_id)
     
     # Final summary
     print(f"\n{'='*60}")
