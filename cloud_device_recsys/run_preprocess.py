@@ -48,19 +48,27 @@ def setup_logging(output_dir: str) -> logging.Logger:
     """Setup logging to file and console."""
     os.makedirs(output_dir, exist_ok=True)
     log_file = os.path.join(
-        output_dir, 
+        output_dir,
         f"preprocess_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     )
-    
-    logging.basicConfig(
-        level=logging.INFO,
-        format='[%(asctime)s] %(levelname)s - %(name)s: %(message)s',
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler()
-        ]
+
+    logger = logging.getLogger('FuxiCTR-Preprocess')
+    logger.setLevel(logging.INFO)
+
+    formatter = logging.Formatter(
+        '[%(asctime)s] %(levelname)s - %(name)s: %(message)s'
     )
-    return logging.getLogger('FuxiCTR-Preprocess')
+
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setFormatter(formatter)
+
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setFormatter(formatter)
+
+    logger.addHandler(file_handler)
+    logger.addHandler(stream_handler)
+    logger.info(f"Logging initialized. Saving to {log_file}")
+    return logger
 
 
 # =============================================================================
