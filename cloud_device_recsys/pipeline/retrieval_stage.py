@@ -335,6 +335,9 @@ class RetrievalStage(BaseStage):
         self.item_ids = np.concatenate(id_list) if id_list else np.array([])
         self.item_id_to_idx = {item_id: i for i, item_id in enumerate(self.item_ids)}
         
+        # Keep a GPU tensor for accelerated scoring
+        self._item_emb_tensor = torch.from_numpy(self.item_embeddings).to(self.model.device)
+        
         self.logger.info(f"Index Built: {self.item_embeddings.shape} items")
 
     def _retrieve_and_score(
@@ -448,6 +451,7 @@ class RetrievalStage(BaseStage):
         
         # Stack all user embeddings
         user_embs = np.vstack(user_embs_list)
+        user_embs_tensor = torch.from_numpy(user_embs).to(self.model.device)
         num_requests = len(request_ids_list)
         num_items = len(self.item_ids)
         
@@ -467,7 +471,7 @@ class RetrievalStage(BaseStage):
         # =====================================================================
         # Phase 2: Batch scoring with chunked processing
         # =====================================================================
-        chunk_size = kwargs.get('chunk_size', 5000)
+        chunk_size = kwargs.get('chunk_size', 50000)
         
         # Determine fetch_k based on what we need
         max_positives = max(len(gt) for gt in ground_truths_list) if ground_truths_list else 0
@@ -481,51 +485,79 @@ class RetrievalStage(BaseStage):
         candidates_data = [] if return_output else None
         user_features_data = [] if return_output else None
         
+        # Prepare GPU item embeddings tensor (reuse if already built)
+        if not hasattr(self, '_item_emb_tensor') or self._item_emb_tensor is None:
+            self._item_emb_tensor = torch.from_numpy(self.item_embeddings).to(self.model.device)
+        item_emb_t = self._item_emb_tensor  # [num_items, D]
+        
         for chunk_start in range(0, num_requests, chunk_size):
             chunk_end = min(chunk_start + chunk_size, num_requests)
-            user_chunk = user_embs[chunk_start:chunk_end]
             chunk_len = chunk_end - chunk_start
             
-            # Batch matrix multiplication
-            scores = np.dot(user_chunk, self.item_embeddings.T)
+            # GPU-accelerated matrix multiplication + top-K
+            with torch.no_grad():
+                user_chunk_t = user_embs_tensor[chunk_start:chunk_end]  # [chunk, D]
+                scores_t = torch.matmul(user_chunk_t, item_emb_t.T)    # [chunk, num_items]
+                
+                topk_k = min(fetch_k, num_items)
+                topk_scores_t, topk_indices_t = torch.topk(scores_t, topk_k, dim=1, sorted=True)
+                # sorted=True ensures topk_indices[:, :k] gives true top-k for any k <= topk_k
             
-            # Efficient top-K selection using np.argpartition
-            if fetch_k < num_items:
-                partition_k = min(fetch_k, num_items - 1)
-                topk_indices = np.argpartition(-scores, partition_k, axis=1)[:, :fetch_k]
-            else:
-                topk_indices = np.tile(np.arange(num_items), (chunk_len, 1))
-            
-            # ---- Evaluate-only fast path: skip sorting, vectorized Recall@K ----
+            # ---- Evaluate-only fast path: GPU-vectorized Recall@K ----
             if compute_metrics and not return_output:
-                # No need to sort — Recall@K only checks set membership
-                # Pre-compute scores for sub-partitioning (only if any k < fetch_k)
-                topk_scores_for_partition = None
+                # Separate single-GT and multi-GT users for vectorized processing
+                chunk_gt_idxs = gt_idx_list[chunk_start:chunk_end]
+                gt_lens = np.array([len(g) for g in chunk_gt_idxs])
+                
+                single_mask = gt_lens == 1
+                multi_mask = gt_lens > 1
+                
+                # Pre-build single-GT index tensor on GPU (most common case)
+                if single_mask.any():
+                    single_gt = torch.tensor(
+                        [chunk_gt_idxs[i][0] for i in range(chunk_len) if single_mask[i]],
+                        dtype=torch.long, device=topk_indices_t.device
+                    )  # [num_single]
+                    single_topk = topk_indices_t[torch.from_numpy(single_mask)]  # [num_single, topk_k]
+                
+                # Pre-build multi-GT padded tensor on GPU (rare case)
+                if multi_mask.any():
+                    multi_indices = np.where(multi_mask)[0]
+                    max_gt_len = gt_lens[multi_mask].max()
+                    # Pad with -1 (impossible index)
+                    multi_gt_padded = torch.full(
+                        (len(multi_indices), max_gt_len), -1,
+                        dtype=torch.long, device=topk_indices_t.device
+                    )
+                    for j, idx in enumerate(multi_indices):
+                        g = chunk_gt_idxs[idx]
+                        multi_gt_padded[j, :len(g)] = torch.from_numpy(g)
+                    multi_topk = topk_indices_t[torch.from_numpy(multi_mask)]  # [num_multi, topk_k]
+                
                 for k in metrics_k:
-                    k_eff = min(k, topk_indices.shape[1])
-                    if k_eff == topk_indices.shape[1]:
-                        # All items in topk_indices are within top-K, use them directly
-                        chunk_topk = topk_indices
-                    else:
-                        # Need to select only the true top-k_eff from the partitioned results
-                        if topk_scores_for_partition is None:
-                            topk_scores_for_partition = np.take_along_axis(scores, topk_indices, axis=1)
-                        sub_order = np.argpartition(-topk_scores_for_partition, k_eff, axis=1)[:, :k_eff]
-                        chunk_topk = np.take_along_axis(topk_indices, sub_order, axis=1)
+                    k_eff = min(k, topk_indices_t.shape[1])
+                    hits = 0
                     
-                    # Vectorized hit detection per user
-                    for i in range(chunk_len):
-                        global_idx = chunk_start + i
-                        gt_idxs = gt_idx_list[global_idx]
-                        if len(gt_idxs) > 0 and np.isin(gt_idxs, chunk_topk[i]).any():
-                            total_recall[k] += 1
+                    # Single-GT: fully vectorized on GPU
+                    if single_mask.any():
+                        # [num_single, k_eff] == [num_single, 1] → broadcast
+                        hits += (single_topk[:, :k_eff] == single_gt.unsqueeze(1)).any(dim=1).sum().item()
+                    
+                    # Multi-GT: vectorized on GPU with padded tensor
+                    if multi_mask.any():
+                        # [num_multi, k_eff, 1] == [num_multi, 1, max_gt] → broadcast
+                        hits += (multi_topk[:, :k_eff].unsqueeze(2) == multi_gt_padded.unsqueeze(1)).any(dim=2).any(dim=1).sum().item()
+                    
+                    total_recall[k] += hits
                 continue  # Skip the per-user output-building loop below
             
-            # ---- Full path: sort top-K and build output ----
-            topk_scores_full = np.take_along_axis(scores, topk_indices, axis=1)
-            sorted_order = np.argsort(-topk_scores_full, axis=1)
-            topk_indices_sorted = np.take_along_axis(topk_indices, sorted_order, axis=1)
-            topk_scores_sorted = np.take_along_axis(topk_scores_full, sorted_order, axis=1)
+            # ---- Full path: transfer to CPU and build output ----
+            topk_indices = topk_indices_t.cpu().numpy()   # [chunk, topk_k]
+            topk_scores = topk_scores_t.cpu().numpy()     # [chunk, topk_k]
+            
+            # For true positive scores, need full score matrix
+            if return_output:
+                scores_np = scores_t.cpu().numpy()  # [chunk, num_items]
             
             # Process each user in chunk
             for i in range(chunk_len):
@@ -533,8 +565,8 @@ class RetrievalStage(BaseStage):
                 req_id = request_ids_list[global_idx]
                 true_positives = ground_truths_list[global_idx]
                 
-                user_topk_indices = topk_indices_sorted[i]
-                user_topk_scores = topk_scores_sorted[i]
+                user_topk_indices = topk_indices[i]
+                user_topk_scores = topk_scores[i]
                 
                 # Compute metrics if requested (full path with output)
                 if compute_metrics:
@@ -562,7 +594,7 @@ class RetrievalStage(BaseStage):
                             tp_score = 0.0
                             if tp_item_id in self.item_id_to_idx:
                                 tp_idx = self.item_id_to_idx[tp_item_id]
-                                tp_score = scores[i, tp_idx]
+                                tp_score = scores_np[i, tp_idx]
                             candidates_data.append({
                                 'request_id': req_id,
                                 'item_id': tp_item_id,
