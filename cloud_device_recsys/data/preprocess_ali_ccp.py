@@ -4,8 +4,7 @@ import time
 import json
 
 import numpy as np
-import pandas as pd
-from sklearn.model_selection import train_test_split
+import polars as pl
 from tqdm import tqdm
 
 random.seed(2022)
@@ -60,11 +59,8 @@ def preprocess_data(mode='train'):
                 if field in sparse_columns:
                     if remap_id:
                         alias = seq_to_fea.get(field, field)
-                        if feat in vocabulary[alias]:
-                            vocabulary[alias][feat] += 1
-                        else:
-                            vocabulary[alias][feat] = 1
-                        _append_feat(feat_dict, field, str(vocabulary[alias][feat]))
+                        mapped_id = vocabulary[alias].setdefault(feat, len(vocabulary[alias]))
+                        _append_feat(feat_dict, field, str(mapped_id))
                     else:
                         _append_feat(feat_dict, field, feat)
                 if field in dense_columns:
@@ -87,11 +83,8 @@ def preprocess_data(mode='train'):
                     if field in sparse_columns:
                         if remap_id:
                             alias = seq_to_fea.get(field, field)
-                            if feat in vocabulary[alias]:
-                                vocabulary[alias][feat] += 1
-                            else:
-                                vocabulary[alias][feat] = 1
-                            _append_feat(feat_dict, field, str(vocabulary[alias][feat]))
+                            mapped_id = vocabulary[alias].setdefault(feat, len(vocabulary[alias]))
+                            _append_feat(feat_dict, field, str(mapped_id))
                         else:
                             _append_feat(feat_dict, field, feat)
                     if field in dense_columns:
@@ -118,57 +111,82 @@ def preprocess_data(mode='train'):
                 fw.write(','.join(new_line) + '\n')
 
 
-def reduce_mem(df):
+def reduce_mem(df: pl.DataFrame) -> pl.DataFrame:
     starttime = time.time()
-    numerics = ['int16', 'int32', 'int64', 'float16', 'float32', 'float64']
-    start_mem = df.memory_usage().sum() / 1024**2
-    for col in tqdm(df.columns):
-        col_type = df[col].dtypes
-        if col_type in numerics:
-            c_min = df[col].min()
-            c_max = df[col].max()
-            if pd.isnull(c_min) or pd.isnull(c_max):
-                continue
-            if str(col_type)[:3] == 'int':
-                if c_min > np.iinfo(np.int8).min and c_max < np.iinfo(np.int8).max:
-                    df[col] = df[col].astype(np.int8)
-                elif c_min > np.iinfo(np.int16).min and c_max < np.iinfo(np.int16).max:
-                    df[col] = df[col].astype(np.int16)
-                elif c_min > np.iinfo(np.int32).min and c_max < np.iinfo(np.int32).max:
-                    df[col] = df[col].astype(np.int32)
-                elif c_min > np.iinfo(np.int64).min and c_max < np.iinfo(np.int64).max:
-                    df[col] = df[col].astype(np.int64)
+    start_mem = df.estimated_size() / 1024**2
+    cast_exprs = []
+    for col_name, col_type in df.schema.items():
+        if col_type not in {
+            pl.Int16,
+            pl.Int32,
+            pl.Int64,
+            pl.Float16,
+            pl.Float32,
+            pl.Float64,
+            pl.UInt16,
+            pl.UInt32,
+            pl.UInt64,
+        }:
+            continue
+        col = df.get_column(col_name)
+        c_min = col.min()
+        c_max = col.max()
+        if c_min is None or c_max is None:
+            continue
+        if col_type.is_integer():
+            if c_min > np.iinfo(np.int8).min and c_max < np.iinfo(np.int8).max:
+                cast_exprs.append(pl.col(col_name).cast(pl.Int8))
+            elif c_min > np.iinfo(np.int16).min and c_max < np.iinfo(np.int16).max:
+                cast_exprs.append(pl.col(col_name).cast(pl.Int16))
+            elif c_min > np.iinfo(np.int32).min and c_max < np.iinfo(np.int32).max:
+                cast_exprs.append(pl.col(col_name).cast(pl.Int32))
             else:
-                if c_min > np.finfo(np.float16).min and c_max < np.finfo(np.float16).max:
-                    df[col] = df[col].astype(np.float16)
-                elif c_min > np.finfo(np.float32).min and c_max < np.finfo(np.float32).max:
-                    df[col] = df[col].astype(np.float32)
-                else:
-                    df[col] = df[col].astype(np.float64)
-    end_mem = df.memory_usage().sum() / 1024**2
-    print('-- Mem. usage decreased to {:5.2f} Mb ({:.1f}% reduction),time spend:{:2.2f} min'.format(end_mem, 100 * (start_mem - end_mem) / start_mem, (time.time() - starttime) / 60))
+                cast_exprs.append(pl.col(col_name).cast(pl.Int64))
+        elif col_type.is_float():
+            if c_min > np.finfo(np.float16).min and c_max < np.finfo(np.float16).max:
+                cast_exprs.append(pl.col(col_name).cast(pl.Float16))
+            elif c_min > np.finfo(np.float32).min and c_max < np.finfo(np.float32).max:
+                cast_exprs.append(pl.col(col_name).cast(pl.Float32))
+            else:
+                cast_exprs.append(pl.col(col_name).cast(pl.Float64))
+
+    if cast_exprs:
+        df = df.with_columns(cast_exprs)
+    end_mem = df.estimated_size() / 1024**2
+    reduction = 0.0 if start_mem == 0 else 100 * (start_mem - end_mem) / start_mem
+    print('-- Mem. usage decreased to {:5.2f} Mb ({:.1f}% reduction),time spend:{:2.2f} min'.format(end_mem, reduction, (time.time() - starttime) / 60))
     gc.collect()
     return df
+
+
+def split_frame(df: pl.DataFrame, test_size: float = 0.5, seed: int = 2022):
+    if not 0 < test_size < 1:
+        raise ValueError("test_size must be between 0 and 1")
+    rng = np.random.default_rng(seed)
+    indices = np.arange(df.height)
+    rng.shuffle(indices)
+    split_idx = int(df.height * (1 - test_size))
+    left_idx = indices[:split_idx]
+    right_idx = indices[split_idx:]
+    return df[left_idx], df[right_idx]
 
 
 if __name__ == "__main__":
     preprocess_data(mode='train')
     preprocess_data(mode='test')
-    train_data = reduce_mem(pd.read_csv(f"{write_features_path}.train"))
-    test_data = reduce_mem(pd.read_csv(f"{write_features_path}.test"))
-    val_data, test_data = train_test_split(test_data, test_size=0.5, random_state=2022)
-    val_data = val_data.reset_index(drop=True)
-    test_data = test_data.reset_index(drop=True)
-    len_train_data = train_data.shape[0]
-    len_val_data = val_data.shape[0]
-    len_test_data = test_data.shape[0]
+    train_data = reduce_mem(pl.scan_csv(f"{write_features_path}.train").collect())
+    test_data = reduce_mem(pl.scan_csv(f"{write_features_path}.test").collect())
+    val_data, test_data = split_frame(test_data, test_size=0.5, seed=2022)
+    len_train_data = train_data.height
+    len_val_data = val_data.height
+    len_test_data = test_data.height
     print(f"train_data : {len_train_data}, val_data: {len_val_data}, test_data:{len_test_data}")
     print("start save all ")
 
     if remap_id:
         with open('vocabulary.json', 'w') as f:
             json.dump(vocabulary, f)
-    train_data.to_csv(save_path + "train.csv", index=False)
-    val_data.reset_index(drop=True).to_csv(save_path + "valid.csv", index=False)
-    test_data.reset_index(drop=True).to_csv(save_path + "test.csv", index=False)
+    train_data.write_csv(save_path + "train.csv")
+    val_data.write_csv(save_path + "valid.csv")
+    test_data.write_csv(save_path + "test.csv")
     print("complete")
