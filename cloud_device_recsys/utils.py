@@ -64,6 +64,7 @@ def filter_feature_map(feature_map, fg_manager, allowed_feature_groups, use_feat
     new_fm.use_features = use_features
     # Re-set column indices after filtering
     new_fm.set_column_index()
+    new_fm.num_fields = len(new_fm.features)
     return new_fm
 
 
@@ -171,10 +172,13 @@ def get_data_paths(dataset_config: dict, pipeline_config: dict, logger):
     valid_path = os.path.join(processed_data_root, f'valid.{data_format}')
     test_path = os.path.join(processed_data_root, f'test.{data_format}')
     
-    # Item pool path
+    # Item pool path (test/valid items only - for evaluation/index building)
     item_pool_config = dataset_config.get('item_pool', {})
     item_pool_file = item_pool_config.get('file', 'cand_item_list')
     item_pool_path = os.path.join(dataset_config.get('processed_data_root', data_dir), f'{item_pool_file}.parquet')
+    
+    # Full item pool path (train+valid+test items - for negative sampling)
+    full_item_pool_path = os.path.join(dataset_config.get('processed_data_root', data_dir), 'cand_items_all.parquet')
     
     return {
         'data_dir': data_dir,
@@ -186,6 +190,7 @@ def get_data_paths(dataset_config: dict, pipeline_config: dict, logger):
         'valid_path': valid_path,
         'test_path': test_path,
         'item_pool_path': item_pool_path,
+        'full_item_pool_path': full_item_pool_path,
         'item_pool_file': item_pool_file,
     }
 

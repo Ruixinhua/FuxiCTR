@@ -44,7 +44,7 @@ from cloud_device_recsys.utils import (
     save_stage_output, load_stage_outputs_from_dir,
     enrich_stage_output_user_features
 )
-from cloud_device_recsys.data.item_pool import ensure_item_pool
+from cloud_device_recsys.data.item_pool import ensure_item_pool, ensure_full_item_pool
 from cloud_device_recsys.data.positive_data import get_train_path_for_mode
 from cloud_device_recsys.config.config_parser import ConfigParser
 import pandas as pd
@@ -295,19 +295,23 @@ def run_retrieval_stage(retrieval_stage, pipeline_config, dataset_config, fg_man
         retrieval_stage.build_model()
 
         # Load item features for negative sampling if enabled
+        # Use FULL item pool (train+valid+test) for more representative negative sampling
         item_features_df = None
         num_negatives = retrieval_stage.num_negatives if hasattr(retrieval_stage, 'num_negatives') else 0
         if num_negatives > 0:
-            item_pool_path = paths.get('item_pool_path')
-            if item_pool_path and os.path.exists(item_pool_path):
-                logger.info(f"Loading item features for negative sampling from {item_pool_path}")
-                if item_pool_path.endswith('.parquet'):
-                    item_features_df = pd.read_parquet(item_pool_path)
-                else:
-                    item_features_df = pd.read_csv(item_pool_path)
-                logger.info(f"Loaded {len(item_features_df)} items for negative sampling")
+            # Generate full item pool from train+valid+test if not exists
+            full_pool_path = ensure_full_item_pool(
+                data_paths=paths,
+                dataset_config=dataset_config,
+                feature_group_manager=fg_manager,
+                logger=logger
+            )
+            if full_pool_path and os.path.exists(full_pool_path):
+                logger.info(f"Loading FULL item pool for negative sampling from {full_pool_path}")
+                item_features_df = pd.read_parquet(full_pool_path)
+                logger.info(f"Loaded {len(item_features_df)} items for negative sampling (full pool)")
             else:
-                logger.warning(f"Item pool not found at {item_pool_path}. Negative sampling will be disabled.")
+                logger.warning("Full item pool not found. Negative sampling will be disabled.")
 
         retrieval_stage.train(
             train_data=train_gen,
@@ -357,7 +361,7 @@ def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, fg_m
     paths = get_data_paths(dataset_config, pipeline_config, logger)
     paths = prepare_debug_paths(paths, dataset_config, logger)
 
-    # Ensure item pool exists
+    # Ensure item pool exists (test/valid only - for evaluation)
     if fg_manager is not None:
         ensure_item_pool(
             data_paths={'item_pool_path': paths['item_pool_path'], 'valid_path': paths['valid_path'],
@@ -368,23 +372,36 @@ def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, fg_m
         )
 
     # Create data loaders for preranking stage
+    num_negatives = preranking_config.get('model_params', {}).get('num_negatives', 0)
     loaders = _prepare_stage_data_loaders(
         feature_map=preranking_stage.feature_map,
         stage_config=preranking_config,
         paths=paths,
         create_train=True,
         create_test=False,
-        num_negatives=preranking_config.get('model_params', {}).get('num_negatives', 0),
+        num_negatives=num_negatives,
         label_col=dataset_config.get('label_col', {}).get('name', 'label'),
         logger=logger
     )
     train_gen, _ = loaders['train_loader'].make_iterator()
 
-    # Load Item Pool for Evaluation/Processing
-    if os.path.exists(paths['item_pool_path']):
-        preranking_stage.load_item_features(paths['item_pool_path'])
+    # Load item pool for training (negative sampling) vs evaluation
+    if num_negatives > 0 and fg_manager is not None:
+        # Use FULL item pool (train+valid+test) for negative sampling during training
+        full_pool_path = ensure_full_item_pool(
+            data_paths=paths,
+            dataset_config=dataset_config,
+            feature_group_manager=fg_manager,
+            logger=logger
+        )
+        preranking_stage.load_item_features(full_pool_path)
+        logger.info(f"[Preranking] Loaded FULL item pool ({len(preranking_stage.item_features_df)} items) for negative sampling")
     else:
-        logger.warning(f"Item pool not found at {paths['item_pool_path']}. Evaluation will lack negative features.")
+        # Pointwise mode: load test/valid-only pool directly for evaluation
+        if os.path.exists(paths['item_pool_path']):
+            preranking_stage.load_item_features(paths['item_pool_path'])
+        else:
+            logger.warning(f"Item pool not found at {paths['item_pool_path']}. Evaluation will lack negative features.")
 
     # 2. Train Preranking Model
     logger.info("[Preranking] Training model...")
@@ -395,6 +412,11 @@ def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, fg_m
         epochs=preranking_config['training'].get('epochs', 5),
         batch_size=preranking_config['training'].get('batch_size', 4096),
     )
+
+    # After training, switch to test/valid-only item pool for evaluation/processing
+    if num_negatives > 0 and os.path.exists(paths['item_pool_path']):
+        preranking_stage.load_item_features(paths['item_pool_path'])
+        logger.info(f"[Preranking] Switched to eval item pool ({len(preranking_stage.item_features_df)} items) for processing")
 
     # 3. Pipeline Processing
     logger.info("[Preranking] Processing pipeline candidates...")
@@ -425,7 +447,7 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_man
     paths = get_data_paths(dataset_config, pipeline_config, logger)
     paths = prepare_debug_paths(paths, dataset_config, logger)
 
-    # Ensure item pool exists
+    # Ensure item pool exists (test/valid only - for evaluation)
     if fg_manager is not None:
         ensure_item_pool(
             data_paths={'item_pool_path': paths['item_pool_path'], 'valid_path': paths['valid_path'],
@@ -436,21 +458,34 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_man
         )
 
     # Create data loaders for reranking stage
+    num_negatives = reranking_config.get('model_params', {}).get('num_negatives', 0)
     loaders = _prepare_stage_data_loaders(
         feature_map=reranking_stage.feature_map,
         stage_config=reranking_config,
         paths=paths,
         create_train=True,
         create_test=False,
-        num_negatives=reranking_config.get('model_params', {}).get('num_negatives', 0),
+        num_negatives=num_negatives,
         label_col=dataset_config.get('label_col', {}).get('name', 'label'),
         logger=logger
     )
     train_gen, _ = loaders['train_loader'].make_iterator()
 
-    # Load Item Pool for Evaluation/Processing
-    if os.path.exists(paths['item_pool_path']):
-        reranking_stage.load_item_features(paths['item_pool_path'])
+    # Load item pool for training (negative sampling) vs evaluation
+    if num_negatives > 0 and fg_manager is not None:
+        # Use FULL item pool (train+valid+test) for negative sampling during training
+        full_pool_path = ensure_full_item_pool(
+            data_paths=paths,
+            dataset_config=dataset_config,
+            feature_group_manager=fg_manager,
+            logger=logger
+        )
+        reranking_stage.load_item_features(full_pool_path)
+        logger.info(f"[Reranking] Loaded FULL item pool ({len(reranking_stage.item_features_df)} items) for negative sampling")
+    else:
+        # Pointwise mode: load test/valid-only pool directly for evaluation
+        if os.path.exists(paths['item_pool_path']):
+            reranking_stage.load_item_features(paths['item_pool_path'])
 
     # Enrich stage outputs with missing FG3 user features (backward compatibility)
     if fg_manager is not None:
@@ -471,6 +506,11 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_man
         epochs=reranking_config['training'].get('epochs', 5),
         batch_size=reranking_config['training'].get('batch_size', 4096)
     )
+
+    # After training, switch to test/valid-only item pool for evaluation/processing
+    if num_negatives > 0 and os.path.exists(paths['item_pool_path']):
+        reranking_stage.load_item_features(paths['item_pool_path'])
+        logger.info(f"[Reranking] Switched to eval item pool ({len(reranking_stage.item_features_df)} items) for processing")
     valid_metrics = reranking_stage.evaluate(prev_output_valid)
     metrics.update({f"reranking_valid_{k}": v for k, v in valid_metrics.items()})
 

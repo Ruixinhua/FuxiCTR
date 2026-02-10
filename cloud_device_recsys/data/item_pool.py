@@ -180,6 +180,96 @@ def ensure_item_pool(
     return item_pool_path
 
 
+def ensure_full_item_pool(
+    data_paths: dict,
+    dataset_config: dict,
+    feature_group_manager,
+    logger: logging.Logger = None,
+    force_regenerate: bool = False
+) -> str:
+    """
+    Ensure a full item pool (train + valid + test) exists for negative sampling.
+    
+    Unlike ensure_item_pool() which only uses valid/test items (for evaluation),
+    this function includes training data items to provide a much larger and more
+    representative negative sampling pool.
+    
+    Args:
+        data_paths: Dict with keys 'train_path', 'valid_path', 'test_path', 'full_item_pool_path'
+        dataset_config: Dataset configuration dict
+        feature_group_manager: FeatureGroupManager to get FG1 (item) features
+        logger: Optional logger instance
+        force_regenerate: If True, regenerate even if file exists
+        
+    Returns:
+        Path to the full item pool file
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+    
+    full_item_pool_path = data_paths.get('full_item_pool_path')
+    
+    if full_item_pool_path is None:
+        raise ValueError("full_item_pool_path not found in data_paths")
+    
+    # Check if full item pool exists and skip regeneration if not forced
+    if os.path.exists(full_item_pool_path) and not force_regenerate:
+        logger.info(f"Full item pool already exists at {full_item_pool_path}")
+        return full_item_pool_path
+    
+    # Get item ID column and feature columns
+    item_id_col = dataset_config.get('item_id_col', 'cand_item_id')
+    
+    # Get FG1 (item) features from feature group manager
+    from ..config.feature_groups import FeatureGroup
+    item_feature_cols = []
+    for feat_name, group in feature_group_manager.feature_assignments.items():
+        if group == FeatureGroup.FG1 and feat_name != item_id_col:
+            item_feature_cols.append(feat_name)
+    
+    # Also add any explicitly configured item features
+    explicit_item_features = dataset_config.get('item_features', [])
+    for feat in explicit_item_features:
+        if feat not in item_feature_cols and feat != item_id_col:
+            item_feature_cols.append(feat)
+    
+    logger.info(f"Generating full item pool (train+valid+test) with features: {item_feature_cols}")
+    
+    # Collect input paths: train (or train_positive) + valid + test
+    input_paths = []
+    
+    # Prefer train_positive if it exists (for pairwise mode), else use full train
+    # from .positive_data import get_positive_train_path
+    # train_path = data_paths.get('train_path')
+    # if train_path:
+    #     train_positive_path = get_positive_train_path(train_path)
+    #     if os.path.exists(train_positive_path):
+    #         input_paths.append(train_positive_path)
+    #         logger.info(f"Using train_positive for full item pool: {train_positive_path}")
+    #     elif os.path.exists(train_path):
+    #         input_paths.append(train_path)
+    #         logger.info(f"Using full train for full item pool: {train_path}")
+    
+    for key in ['valid_path', 'test_path', 'train_path']:
+        path = data_paths.get(key)
+        if path and os.path.exists(path):
+            input_paths.append(path)
+    
+    if not input_paths:
+        raise ValueError("No valid data paths found for full item pool generation")
+    
+    # Generate full item pool
+    extract_item_corpus(
+        input_paths=input_paths,
+        output_path=full_item_pool_path,
+        item_id_col=item_id_col,
+        item_feature_cols=item_feature_cols,
+        logger=logger
+    )
+    
+    return full_item_pool_path
+
+
 def validate_item_pool_coverage(
     item_pool_path: str,
     data_path: str,
