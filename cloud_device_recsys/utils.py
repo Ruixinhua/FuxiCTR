@@ -694,7 +694,7 @@ def process_and_rank_candidates(
     metrics_k: List[int] = None,
     top_k: int = 100,
     logger: logging.Logger = None,
-    inference_batch_size: int = 50000,
+    inference_batch_size: int = 100000,
     **kwargs
 ) -> Tuple[Optional[StageOutput], Dict[str, float]]:
     """
@@ -880,35 +880,83 @@ def process_and_rank_candidates(
     # Check for optional FP16 inference
     use_fp16 = kwargs.get('use_fp16', True) and device.type == 'cuda'
     logger.info(f"Using {use_fp16} fp16 precision.")
+    import time
     
-    for chunk_start in range(0, num_valid, inference_batch_size):
-        chunk_end = min(chunk_start + inference_batch_size, num_valid)
-        # Optimization 3: Build user features lazily per chunk (reduces peak memory)
-        chunk_req_indices = request_idx_for_valid[chunk_start:chunk_end]
-        batch_dict = {}
+    # ========== OPTIMIZATION: Vectorized user feature broadcasting ==========
+    # Key insight: 29M candidates share only 29K unique requests' user features.
+    # Instead of building 29M-row arrays, we build 29K-row arrays (one per request)
+    # and use numpy advanced indexing to broadcast user features to candidates.
+    t_precompute_start = time.time()
+    
+    num_requests = len(request_metadata)
+    
+    # Build compact user feature arrays indexed by request_idx (only 29K rows)
+    request_user_features = {}  # {feat_name: np.ndarray of shape (num_requests, ...)}
+    request_user_ids = None
+    
+    if user_feature_names and num_requests > 0:
+        # Build user_id array indexed by request (29K rows, not 29M)
+        request_user_ids = np.array([request_metadata[req_idx][1] for req_idx in range(num_requests)])
         
+        # Build each user feature array indexed by request
         for feat_name in user_feature_names:
             is_seq = user_feat_is_sequence.get(feat_name, False)
             if is_seq:
+                # Sequence features: need np.stack
                 user_vals = [request_metadata[req_idx][2].get(feat_name, np.zeros(1)) 
-                             for req_idx in chunk_req_indices]
-                batch_dict[feat_name] = np.stack(user_vals)
+                             for req_idx in range(num_requests)]
+                request_user_features[feat_name] = np.stack(user_vals)
             else:
+                # Scalar features: simple array
                 user_vals = [request_metadata[req_idx][2].get(feat_name, 0) 
-                             for req_idx in chunk_req_indices]
+                             for req_idx in range(num_requests)]
                 arr = np.array(user_vals)
                 if arr.dtype == np.object_:
                     try:
                         arr = arr.astype(np.float32)
                     except (ValueError, TypeError):
                         arr = arr.astype(np.int64)
-                batch_dict[feat_name] = arr
+                request_user_features[feat_name] = arr
+    
+    precompute_time = time.time() - t_precompute_start
+    logger.info(f"Pre-computed {len(request_user_features)} user feature arrays for {num_requests} requests in {precompute_time:.2f}s")
+    
+    # Fine-grained timing for bottleneck analysis
+    timing_stats = {
+        'user_feature_prep': 0.0,
+        'item_feature_extract': 0.0,
+        'tensor_conversion': 0.0,
+        'model_forward': 0.0,
+        'result_transfer': 0.0,
+    }
+    inference_all_start = time.time()
+    num_batches = 0
+    
+    for chunk_start in range(0, num_valid, inference_batch_size):
+        chunk_end = min(chunk_start + inference_batch_size, num_valid)
+        num_batches += 1
+        
+        # ===== TIMING: User feature preparation (NOW VECTORIZED BROADCASTING) =====
+        t_user_start = time.time()
+        batch_dict = {}
+        
+        # Get request indices for this chunk of candidates
+        chunk_req_indices = request_idx_for_valid[chunk_start:chunk_end]
+        
+        # Fast numpy advanced indexing: broadcast user features from requests to candidates
+        for feat_name in user_feature_names:
+            batch_dict[feat_name] = request_user_features[feat_name][chunk_req_indices]
         
         # Add user_id to batch (needed by reranking models)
-        user_ids = [request_metadata[req_idx][1] for req_idx in chunk_req_indices]
-        batch_dict['user_id'] = np.array(user_ids)
+        if request_user_ids is not None:
+            batch_dict['user_id'] = request_user_ids[chunk_req_indices]
+        else:
+            user_ids = [request_metadata[req_idx][1] for req_idx in chunk_req_indices]
+            batch_dict['user_id'] = np.array(user_ids)
+        timing_stats['user_feature_prep'] += time.time() - t_user_start
         
-        # Item features for this chunk (use pre-computed type info)
+        # ===== TIMING: Item feature extraction =====
+        t_item_start = time.time()
         chunk_item_features = item_features_lookup.iloc[chunk_start:chunk_end]
         for col in item_feature_cols:
             col_type, target_dtype = col_type_info[col]
@@ -933,8 +981,10 @@ def process_and_rank_candidates(
         # Add item_id column if needed
         if item_id_col not in batch_dict and item_id_col in feature_map.features:
             batch_dict[item_id_col] = valid_item_ids[chunk_start:chunk_end]
+        timing_stats['item_feature_extract'] += time.time() - t_item_start
         
-        # Optimization 4: Optimized tensor conversion (use from_numpy for contiguous arrays)
+        # ===== TIMING: Tensor conversion =====
+        t_tensor_start = time.time()
         tensor_batch = {}
         for k, v in batch_dict.items():
             if k not in feature_map.features:
@@ -959,23 +1009,39 @@ def process_and_rank_candidates(
                     v = np.array([x if x is not None else 0.0 for x in v.flat]).reshape(v.shape)
                 v_typed = v.astype(np.float32) if v.dtype != np.float32 else v
                 tensor_batch[k] = torch.from_numpy(v_typed).to(device, non_blocking=True)
+        timing_stats['tensor_conversion'] += time.time() - t_tensor_start
         
-        # Model inference with optional FP16
+        # ===== TIMING: Model forward pass =====
+        t_forward_start = time.time()
         with torch.no_grad():
             if use_fp16:
                 with torch.autocast(device_type='cuda', dtype=torch.float16):
                     pred_dict = model(tensor_batch)
             else:
                 pred_dict = model(tensor_batch)
-            # Optimization 5: Use non_blocking for async transfer
-            chunk_scores = pred_dict['y_pred'].detach().cpu().numpy().flatten()
+        timing_stats['model_forward'] += time.time() - t_forward_start
+        
+        # ===== TIMING: Result transfer to CPU =====
+        t_transfer_start = time.time()
+        chunk_scores = pred_dict['y_pred'].detach().cpu().numpy().flatten()
+        timing_stats['result_transfer'] += time.time() - t_transfer_start
         
         all_scores[chunk_start:chunk_end] = chunk_scores
         
         # Clean up to free memory
         del batch_dict, tensor_batch
-        
-    logger.info("Finish model inference for all valid candidates.")
+    
+    total_inference_time = time.time() - inference_all_start
+    
+    # Log detailed timing breakdown
+    logger.info(f"===== Inference Timing Breakdown ({num_batches} batches, batch_size={inference_batch_size}) =====")
+    logger.info(f"  User feature prep:    {timing_stats['user_feature_prep']:8.2f}s ({100*timing_stats['user_feature_prep']/total_inference_time:5.1f}%)")
+    logger.info(f"  Item feature extract: {timing_stats['item_feature_extract']:8.2f}s ({100*timing_stats['item_feature_extract']/total_inference_time:5.1f}%)")
+    logger.info(f"  Tensor conversion:    {timing_stats['tensor_conversion']:8.2f}s ({100*timing_stats['tensor_conversion']/total_inference_time:5.1f}%)")
+    logger.info(f"  Model forward:        {timing_stats['model_forward']:8.2f}s ({100*timing_stats['model_forward']/total_inference_time:5.1f}%)")
+    logger.info(f"  Result transfer:      {timing_stats['result_transfer']:8.2f}s ({100*timing_stats['result_transfer']/total_inference_time:5.1f}%)")
+    logger.info(f"  Total inference time: {total_inference_time:8.2f}s")
+    logger.info(f"Finish model inference for all valid candidates.")
     # ========== Phase 5: Scatter results back to requests (OPTIMIZED - DataFrame output) ==========
     # Create mapping from valid indices back to original global indices
     global_to_valid_idx = np.full(total_candidates, -1, dtype=np.int64)
