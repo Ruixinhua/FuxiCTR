@@ -882,44 +882,136 @@ def process_and_rank_candidates(
     logger.info(f"Using {use_fp16} fp16 precision.")
     import time
     
-    # ========== OPTIMIZATION: Vectorized user feature broadcasting ==========
-    # Key insight: 29M candidates share only 29K unique requests' user features.
-    # Instead of building 29M-row arrays, we build 29K-row arrays (one per request)
-    # and use numpy advanced indexing to broadcast user features to candidates.
+    # ========== OPTIMIZATION: Pre-convert ALL features to tensor-ready dtypes ==========
+    # This eliminates per-batch dtype detection, None handling, and dtype casting.
+    # In the loop, we only do numpy slicing + torch.from_numpy + .to(device).
     t_precompute_start = time.time()
     
     num_requests = len(request_metadata)
     
-    # Build compact user feature arrays indexed by request_idx (only 29K rows)
-    request_user_features = {}  # {feat_name: np.ndarray of shape (num_requests, ...)}
+    # --- Step 1: Determine target numpy dtype for each feature ---
+    # feature_map tells us sequence/categorical -> int64, numeric -> float32
+    feature_target_dtype = {}  # {feat_name: np.int64 or np.float32}
+    for feat_name, feat_spec in feature_map.features.items():
+        ftype = feat_spec['type']
+        if ftype in ('sequence', 'categorical'):
+            feature_target_dtype[feat_name] = np.int64
+        else:
+            feature_target_dtype[feat_name] = np.float32
+    
+    # --- Step 2: Pre-convert user features (29K rows, indexed by request) ---
+    request_user_features = {}  # {feat_name: np.ndarray with correct dtype}
     request_user_ids = None
     
     if user_feature_names and num_requests > 0:
-        # Build user_id array indexed by request (29K rows, not 29M)
         request_user_ids = np.array([request_metadata[req_idx][1] for req_idx in range(num_requests)])
         
-        # Build each user feature array indexed by request
         for feat_name in user_feature_names:
             is_seq = user_feat_is_sequence.get(feat_name, False)
+            target_dtype = feature_target_dtype.get(feat_name, np.float32)
+            
             if is_seq:
-                # Sequence features: need np.stack
                 user_vals = [request_metadata[req_idx][2].get(feat_name, np.zeros(1)) 
                              for req_idx in range(num_requests)]
-                request_user_features[feat_name] = np.stack(user_vals)
+                arr = np.stack(user_vals)
             else:
-                # Scalar features: simple array
                 user_vals = [request_metadata[req_idx][2].get(feat_name, 0) 
                              for req_idx in range(num_requests)]
                 arr = np.array(user_vals)
-                if arr.dtype == np.object_:
-                    try:
-                        arr = arr.astype(np.float32)
-                    except (ValueError, TypeError):
-                        arr = arr.astype(np.int64)
-                request_user_features[feat_name] = arr
+            
+            # Pre-convert to target dtype (handles object arrays, None values, etc.)
+            if arr.dtype == np.object_:
+                fill_val = 0 if target_dtype == np.int64 else 0.0
+                arr = np.array([x if x is not None else fill_val for x in arr.flat]).reshape(arr.shape)
+            if arr.dtype != target_dtype:
+                try:
+                    arr = arr.astype(target_dtype)
+                except (ValueError, TypeError):
+                    arr = arr.astype(np.int64) if target_dtype == np.int64 else arr.astype(np.float32)
+            
+            # Ensure contiguous for torch.from_numpy
+            if not arr.flags['C_CONTIGUOUS']:
+                arr = np.ascontiguousarray(arr)
+            request_user_features[feat_name] = arr
+    
+    # --- Step 3: Pre-convert item features (29M rows, from DataFrame to numpy arrays) ---
+    # Convert DataFrame columns to pre-typed numpy arrays ONCE
+    item_feature_arrays = {}  # {col: np.ndarray with correct dtype}
+    item_feature_names_in_model = []  # track which columns are in feature_map
+    
+    for col in item_feature_cols:
+        if col not in feature_map.features:
+            continue
+        item_feature_names_in_model.append(col)
+        target_dtype = feature_target_dtype.get(col, np.float32)
+        col_type, _ = col_type_info[col]
+        col_values = item_features_lookup[col].values
+        
+        if col_type == 'sequence':
+            try:
+                arr = np.stack(col_values)
+            except ValueError:
+                arr = np.array([np.array(x) for x in col_values])
+        elif col_type == 'scalar':
+            # 'scalar' = object array that's not a sequence.
+            # Old code: col_values.astype(float32) first, then tensor conv to target dtype.
+            # Must preserve this float32 intermediate step for numerical equivalence.
+            if not isinstance(col_values, np.ndarray):
+                col_values = np.array(col_values)
+            if col_values.dtype == np.object_:
+                col_values = np.array([x if x is not None else 0.0 for x in col_values.flat]).reshape(col_values.shape)
+            try:
+                arr = col_values.astype(np.float32)  # float32 first (matching old behavior)
+            except (ValueError, TypeError):
+                try:
+                    arr = col_values.astype(np.int64)
+                except (ValueError, TypeError):
+                    arr = np.array([int(x) if x is not None else 0 for x in col_values], dtype=np.int64)
+        else:  # 'direct'
+            arr = col_values
+        
+        # Final conversion to target dtype
+        if not isinstance(arr, np.ndarray):
+            arr = np.array(arr)
+        if arr.dtype == np.object_:
+            fill_val = 0.0
+            arr = np.array([x if x is not None else fill_val for x in arr.flat]).reshape(arr.shape)
+        if arr.dtype != target_dtype:
+            try:
+                arr = arr.astype(target_dtype)
+            except (ValueError, TypeError):
+                arr = arr.astype(np.int64) if target_dtype == np.int64 else arr.astype(np.float32)
+        
+        if not arr.flags['C_CONTIGUOUS']:
+            arr = np.ascontiguousarray(arr)
+        item_feature_arrays[col] = arr
+    
+    # Pre-convert item_id if needed
+    if item_id_col not in item_feature_arrays and item_id_col in feature_map.features:
+        target_dtype = feature_target_dtype.get(item_id_col, np.int64)
+        item_id_arr = valid_item_ids.astype(target_dtype) if valid_item_ids.dtype != target_dtype else valid_item_ids
+        if not item_id_arr.flags['C_CONTIGUOUS']:
+            item_id_arr = np.ascontiguousarray(item_id_arr)
+        item_feature_arrays[item_id_col] = item_id_arr
+        item_feature_names_in_model.append(item_id_col)
+    
+    # Pre-convert user_id
+    if request_user_ids is not None and 'user_id' in feature_map.features:
+        target_dtype = feature_target_dtype.get('user_id', np.int64)
+        if request_user_ids.dtype != target_dtype:
+            try:
+                request_user_ids = request_user_ids.astype(target_dtype)
+            except (ValueError, TypeError):
+                pass
+        if not request_user_ids.flags['C_CONTIGUOUS']:
+            request_user_ids = np.ascontiguousarray(request_user_ids)
+    
+    # Determine which user features are in the model's feature_map
+    user_feature_names_in_model = [f for f in user_feature_names if f in feature_map.features]
     
     precompute_time = time.time() - t_precompute_start
-    logger.info(f"Pre-computed {len(request_user_features)} user feature arrays for {num_requests} requests in {precompute_time:.2f}s")
+    logger.info(f"Pre-converted {len(request_user_features)} user + {len(item_feature_arrays)} item feature arrays "
+                f"to tensor-ready dtypes in {precompute_time:.2f}s")
     
     # Fine-grained timing for bottleneck analysis
     timing_stats = {
@@ -936,79 +1028,34 @@ def process_and_rank_candidates(
         chunk_end = min(chunk_start + inference_batch_size, num_valid)
         num_batches += 1
         
-        # ===== TIMING: User feature preparation (NOW VECTORIZED BROADCASTING) =====
+        # ===== TIMING: User feature preparation (numpy advanced indexing) =====
         t_user_start = time.time()
-        batch_dict = {}
-        
-        # Get request indices for this chunk of candidates
         chunk_req_indices = request_idx_for_valid[chunk_start:chunk_end]
-        
-        # Fast numpy advanced indexing: broadcast user features from requests to candidates
-        for feat_name in user_feature_names:
-            batch_dict[feat_name] = request_user_features[feat_name][chunk_req_indices]
-        
-        # Add user_id to batch (needed by reranking models)
-        if request_user_ids is not None:
-            batch_dict['user_id'] = request_user_ids[chunk_req_indices]
-        else:
-            user_ids = [request_metadata[req_idx][1] for req_idx in chunk_req_indices]
-            batch_dict['user_id'] = np.array(user_ids)
         timing_stats['user_feature_prep'] += time.time() - t_user_start
         
-        # ===== TIMING: Item feature extraction =====
-        t_item_start = time.time()
-        chunk_item_features = item_features_lookup.iloc[chunk_start:chunk_end]
-        for col in item_feature_cols:
-            col_type, target_dtype = col_type_info[col]
-            col_values = chunk_item_features[col].values
-            
-            if col_type == 'sequence':
-                try:
-                    batch_dict[col] = np.stack(col_values)
-                except ValueError:
-                    batch_dict[col] = np.array([np.array(x) for x in col_values])
-            elif col_type == 'scalar':
-                try:
-                    batch_dict[col] = col_values.astype(np.float32)
-                except (ValueError, TypeError):
-                    try:
-                        batch_dict[col] = col_values.astype(np.int64)
-                    except (ValueError, TypeError):
-                        batch_dict[col] = np.array([int(x) if x is not None else 0 for x in col_values], dtype=np.int64)
-            else:  # 'direct'
-                batch_dict[col] = col_values
-        
-        # Add item_id column if needed
-        if item_id_col not in batch_dict and item_id_col in feature_map.features:
-            batch_dict[item_id_col] = valid_item_ids[chunk_start:chunk_end]
-        timing_stats['item_feature_extract'] += time.time() - t_item_start
-        
-        # ===== TIMING: Tensor conversion =====
+        # ===== TIMING: Tensor conversion (NOW JUST slice + from_numpy + to_device) =====
         t_tensor_start = time.time()
         tensor_batch = {}
-        for k, v in batch_dict.items():
-            if k not in feature_map.features:
-                continue
-            ftype = feature_map.features[k]['type']
-            
-            # Ensure array is contiguous and use from_numpy to avoid copy
-            if not isinstance(v, np.ndarray):
-                v = np.array(v)
-            if not v.flags['C_CONTIGUOUS']:
-                v = np.ascontiguousarray(v)
-            
-            if ftype == 'sequence' or ftype == 'categorical':
-                # Handle None values in object arrays before conversion
-                if v.dtype == np.object_:
-                    v = np.array([x if x is not None else 0 for x in v.flat]).reshape(v.shape)
-                v_typed = v.astype(np.int64) if v.dtype != np.int64 else v
-                tensor_batch[k] = torch.from_numpy(v_typed).to(device, non_blocking=True)
-            else:
-                # Handle None values in object arrays before conversion
-                if v.dtype == np.object_:
-                    v = np.array([x if x is not None else 0.0 for x in v.flat]).reshape(v.shape)
-                v_typed = v.astype(np.float32) if v.dtype != np.float32 else v
-                tensor_batch[k] = torch.from_numpy(v_typed).to(device, non_blocking=True)
+        
+        # User features: numpy advanced indexing → torch tensor
+        for feat_name in user_feature_names_in_model:
+            chunk_arr = request_user_features[feat_name][chunk_req_indices]
+            # chunk_arr is already correct dtype and contiguous after indexing creates a copy
+            tensor_batch[feat_name] = torch.from_numpy(np.ascontiguousarray(chunk_arr)).to(device, non_blocking=True)
+        
+        # User ID
+        if request_user_ids is not None and 'user_id' in feature_map.features:
+            chunk_uid = request_user_ids[chunk_req_indices]
+            tensor_batch['user_id'] = torch.from_numpy(np.ascontiguousarray(chunk_uid)).to(device, non_blocking=True)
+        
+        # Item features: simple slicing → torch tensor
+        for col in item_feature_names_in_model:
+            chunk_arr = item_feature_arrays[col][chunk_start:chunk_end]
+            # Slicing may return a view; ensure contiguous for from_numpy
+            if not chunk_arr.flags['C_CONTIGUOUS']:
+                chunk_arr = np.ascontiguousarray(chunk_arr)
+            tensor_batch[col] = torch.from_numpy(chunk_arr).to(device, non_blocking=True)
+        
         timing_stats['tensor_conversion'] += time.time() - t_tensor_start
         
         # ===== TIMING: Model forward pass =====
@@ -1029,19 +1076,20 @@ def process_and_rank_candidates(
         all_scores[chunk_start:chunk_end] = chunk_scores
         
         # Clean up to free memory
-        del batch_dict, tensor_batch
+        del tensor_batch
     
     total_inference_time = time.time() - inference_all_start
     
     # Log detailed timing breakdown
     logger.info(f"===== Inference Timing Breakdown ({num_batches} batches, batch_size={inference_batch_size}) =====")
+    logger.info(f"  Pre-conversion:       {precompute_time:8.2f}s (one-time, outside loop)")
     logger.info(f"  User feature prep:    {timing_stats['user_feature_prep']:8.2f}s ({100*timing_stats['user_feature_prep']/total_inference_time:5.1f}%)")
-    logger.info(f"  Item feature extract: {timing_stats['item_feature_extract']:8.2f}s ({100*timing_stats['item_feature_extract']/total_inference_time:5.1f}%)")
     logger.info(f"  Tensor conversion:    {timing_stats['tensor_conversion']:8.2f}s ({100*timing_stats['tensor_conversion']/total_inference_time:5.1f}%)")
     logger.info(f"  Model forward:        {timing_stats['model_forward']:8.2f}s ({100*timing_stats['model_forward']/total_inference_time:5.1f}%)")
     logger.info(f"  Result transfer:      {timing_stats['result_transfer']:8.2f}s ({100*timing_stats['result_transfer']/total_inference_time:5.1f}%)")
-    logger.info(f"  Total inference time: {total_inference_time:8.2f}s")
-    logger.info(f"Finish model inference for all valid candidates.")
+    logger.info(f"  Loop total:           {total_inference_time:8.2f}s")
+    logger.info(f"  Overall total:        {precompute_time + total_inference_time:8.2f}s")
+    logger.info("Finish model inference for all valid candidates.")
     # ========== Phase 5: Scatter results back to requests (OPTIMIZED - DataFrame output) ==========
     # Create mapping from valid indices back to original global indices
     global_to_valid_idx = np.full(total_candidates, -1, dtype=np.int64)

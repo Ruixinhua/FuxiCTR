@@ -455,6 +455,13 @@ class RetrievalStage(BaseStage):
         for req_id in request_ids_list:
             ground_truths_list.append(request_info_temp[req_id]['ground_truth'])
         
+        # Pre-compute ground truth indices for vectorized metric computation
+        if compute_metrics:
+            gt_idx_list = []
+            for gt_set in ground_truths_list:
+                idxs = np.array([self.item_id_to_idx[gid] for gid in gt_set if gid in self.item_id_to_idx], dtype=np.int64)
+                gt_idx_list.append(idxs)
+        
         self.logger.info(f"Scoring {num_requests} unique requests against {num_items} items...")
         
         # =====================================================================
@@ -489,11 +496,36 @@ class RetrievalStage(BaseStage):
             else:
                 topk_indices = np.tile(np.arange(num_items), (chunk_len, 1))
             
-            # Get scores for top-K indices and sort them
-            topk_scores = np.take_along_axis(scores, topk_indices, axis=1)
-            sorted_order = np.argsort(-topk_scores, axis=1)
+            # ---- Evaluate-only fast path: skip sorting, vectorized Recall@K ----
+            if compute_metrics and not return_output:
+                # No need to sort — Recall@K only checks set membership
+                # Pre-compute scores for sub-partitioning (only if any k < fetch_k)
+                topk_scores_for_partition = None
+                for k in metrics_k:
+                    k_eff = min(k, topk_indices.shape[1])
+                    if k_eff == topk_indices.shape[1]:
+                        # All items in topk_indices are within top-K, use them directly
+                        chunk_topk = topk_indices
+                    else:
+                        # Need to select only the true top-k_eff from the partitioned results
+                        if topk_scores_for_partition is None:
+                            topk_scores_for_partition = np.take_along_axis(scores, topk_indices, axis=1)
+                        sub_order = np.argpartition(-topk_scores_for_partition, k_eff, axis=1)[:, :k_eff]
+                        chunk_topk = np.take_along_axis(topk_indices, sub_order, axis=1)
+                    
+                    # Vectorized hit detection per user
+                    for i in range(chunk_len):
+                        global_idx = chunk_start + i
+                        gt_idxs = gt_idx_list[global_idx]
+                        if len(gt_idxs) > 0 and np.isin(gt_idxs, chunk_topk[i]).any():
+                            total_recall[k] += 1
+                continue  # Skip the per-user output-building loop below
+            
+            # ---- Full path: sort top-K and build output ----
+            topk_scores_full = np.take_along_axis(scores, topk_indices, axis=1)
+            sorted_order = np.argsort(-topk_scores_full, axis=1)
             topk_indices_sorted = np.take_along_axis(topk_indices, sorted_order, axis=1)
-            topk_scores_sorted = np.take_along_axis(topk_scores, sorted_order, axis=1)
+            topk_scores_sorted = np.take_along_axis(topk_scores_full, sorted_order, axis=1)
             
             # Process each user in chunk
             for i in range(chunk_len):
@@ -504,17 +536,14 @@ class RetrievalStage(BaseStage):
                 user_topk_indices = topk_indices_sorted[i]
                 user_topk_scores = topk_scores_sorted[i]
                 
-                # Compute metrics if requested
+                # Compute metrics if requested (full path with output)
                 if compute_metrics:
-                    # Convert ground truth to indices for this user
-                    gt_indices_set = {self.item_id_to_idx.get(gt_id, -1) for gt_id in true_positives}
-                    gt_indices_set.discard(-1)  # Remove invalid indices
-                    
-                    for k in metrics_k:
-                        k_eff = min(k, len(user_topk_indices))
-                        preds_k = set(user_topk_indices[:k_eff].tolist())
-                        if preds_k & gt_indices_set:  # Intersection check
-                            total_recall[k] += 1
+                    gt_idxs = gt_idx_list[global_idx]
+                    if len(gt_idxs) > 0:
+                        for k in metrics_k:
+                            k_eff = min(k, len(user_topk_indices))
+                            if np.isin(gt_idxs, user_topk_indices[:k_eff]).any():
+                                total_recall[k] += 1
                 
                 # Build candidate data if returning output (DataFrame-first)
                 if return_output:
