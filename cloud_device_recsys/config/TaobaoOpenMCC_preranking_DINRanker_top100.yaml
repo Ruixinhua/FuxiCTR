@@ -1,7 +1,6 @@
 # Exp 1: Baseline
 dataset_id: "TaobaoOpenMCC"
 dataset_config: "/home/people/dliu2/FuxiCTR/cloud_device_recsys/config/dataset_config.yaml"
-prev_output_path: "/scratch/dliu2/FuxiCTR/outputs/TaobaoOpenMCCv0_retrieval_baseline_top1000_test/stage_outputs"
 seed: 2024
 gpu: 0
 debug:
@@ -17,10 +16,11 @@ stages:
       num_negatives: 4
       loss_type: "bpr"
       use_diversity_loss: 0
-      use_feature_encoder: 1
+      use_feature_encoder: 0
       metrics_k: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 50, 100]
-      embedding_dim: 32
-      hidden_units: [128, 64]
+      embedding_dim: 16
+      attention_hidden_units: [512, 256, 128, 64]
+      hidden_units: [256, 128, 64]
       embedding_regularizer: 1.0e-5
       net_regularizer: 1.0e-5
       max_gradient_norm: 5.0

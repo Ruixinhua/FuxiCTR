@@ -23,7 +23,7 @@ stages:
       use_user_transformer: 1
       user_transformer_layers: 1
       use_item_transformer: 0
-      item_transformer_layers: 1
+      item_transformer_layers: 0
       user_tower_layers: [512, 256, 128, 64]
       item_tower_layers: [512, 256, 128, 64]
       embedding_regularizer: 1.0e-5
