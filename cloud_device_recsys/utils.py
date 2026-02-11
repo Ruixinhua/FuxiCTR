@@ -602,11 +602,11 @@ def enrich_stage_output_user_features(
     
     try:
         if data_path.endswith('.parquet'):
-            # Only load required columns for efficiency
-            required_cols = [impression_id_col] + list(missing_features)
-            source_df = pd.read_parquet(data_path, columns=required_cols)
+            source_df = pd.read_parquet(data_path)
+            if impression_id_col not in source_df.columns:
+                source_df[impression_id_col] = source_df.index  # Assume index is impression_id if column missing
         else:
-            source_df = pd.read_csv(data_path, usecols=lambda c: c in [impression_id_col] + list(missing_features))
+            source_df = pd.read_csv(data_path)
         
         # Check which columns actually exist in source
         available_missing = [f for f in missing_features if f in source_df.columns]
@@ -883,7 +883,7 @@ def process_and_rank_candidates(
             user_feat_is_sequence[feat_name] = isinstance(sample_val, np.ndarray) and sample_val.ndim > 0
     
     # Check for optional FP16 inference
-    use_fp16 = kwargs.get('use_fp16', True) and device.type == 'cuda'
+    use_fp16 = kwargs.get('use_fp16', False) and device.type == 'cuda'
     logger.info(f"Using {use_fp16} fp16 precision.")
     import time
     

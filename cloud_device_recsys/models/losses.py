@@ -493,6 +493,88 @@ def _detect_item_features(model):
 
 
 
+def compute_diversity_for_pairwise(model, inputs, y_pred):
+    """
+    Compute diversity loss for pairwise training loops.
+    
+    Works with both wrapper-based models (from wrap_model_with_diversity)
+    and Mixin-based models (DiversityLossMixin).
+    
+    This is designed for custom training loops (negative sampling) that
+    bypass model.compute_loss() and compute pairwise loss directly.
+    
+    Args:
+        model: The model instance
+        inputs: The positive example batch (for embedding extraction)
+        y_pred: Positive prediction scores [B, 1]
+    
+    Returns:
+        Diversity loss delta to ADD to the base loss (typically negative).
+        Returns 0.0 (as tensor) if diversity is disabled or unavailable.
+    """
+    import torch
+    
+    # --- Path 1: Wrapper-based model ---
+    if getattr(model, '_diversity_enabled', False):
+        emb_dict_layer = getattr(model, '_diversity_emb_dict_layer', None)
+        item_features = getattr(model, '_diversity_item_features', [])
+        
+        if emb_dict_layer is not None and item_features:
+            try:
+                X = model.get_inputs(inputs)
+                feat_emb_dict = emb_dict_layer(X)
+                
+                item_embs = []
+                for feat_name in item_features:
+                    if feat_name in feat_emb_dict:
+                        emb = feat_emb_dict[feat_name]
+                        if emb.dim() == 3:
+                            emb = emb.mean(dim=1)
+                        item_embs.append(emb)
+                
+                if item_embs:
+                    item_embeddings = torch.cat(item_embs, dim=-1)
+                    div_loss = compute_diversity_loss(
+                        item_embeddings=item_embeddings,
+                        y_pred=y_pred,
+                        theta=model._diversity_theta,
+                    )
+                    return -model._diversity_lambda * div_loss
+            except Exception as e:
+                logger.debug(f"Failed to compute diversity in pairwise: {e}")
+        
+        return torch.tensor(0.0, device=y_pred.device)
+    
+    # --- Path 2: Mixin-based model ---
+    if hasattr(model, '_use_diversity_loss') and model._use_diversity_loss:
+        # Need feat_emb_dict from the model's last forward pass
+        feat_emb_dict = getattr(model, '_last_feat_emb_dict', None)
+        
+        # If not cached, try to get from forward output
+        if feat_emb_dict is None:
+            # Try to extract via the model's embedding layer  
+            try:
+                X = model.get_inputs(inputs)
+                if hasattr(model, 'embedding_layer'):
+                    emb_layer = model.embedding_layer
+                    if hasattr(emb_layer, 'dict_forward'):
+                        feat_emb_dict = emb_layer.dict_forward(X)
+                    elif hasattr(emb_layer, 'embedding_layer') and hasattr(emb_layer.embedding_layer, '__call__'):
+                        feat_emb_dict = emb_layer.embedding_layer(X)
+            except Exception:
+                pass
+        
+        if feat_emb_dict is not None:
+            div_loss = model.compute_diversity_regularization(feat_emb_dict, y_pred)
+            if div_loss is not None:
+                return model.add_diversity_to_loss(torch.tensor(0.0, device=y_pred.device), div_loss) 
+        
+        return torch.tensor(0.0, device=y_pred.device)
+    
+    # No diversity loss configured
+    return torch.tensor(0.0, device=y_pred.device)
+
+
 def wrap_model_with_diversity(
     model,
     use_diversity_loss: bool = True,

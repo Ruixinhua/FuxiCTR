@@ -18,7 +18,7 @@ from ..pipeline.stage_output import StageOutput
 from ..config.feature_groups import FeatureGroupManager, FeatureGroup
 from ..models import build_model as registry_build_model
 from ..models import DINRanker  # For type hints
-from ..models.losses import bpr_loss, margin_ranking_loss, softmax_cross_entropy_loss
+from ..models.losses import bpr_loss, margin_ranking_loss, softmax_cross_entropy_loss, compute_diversity_for_pairwise
 from ..data.negative_sampler import NegativeSampler
 from ..utils import filter_feature_map
 
@@ -39,8 +39,6 @@ class PrerankingStage(BaseStage):
                  model_params: Dict[str, Any],
                  output_dir: str = "./outputs/preranking",
                  top_k: int = 100,
-                 use_diversity_loss: bool = False,
-                 diversity_weight: float = 0.1,
                  **kwargs):
         """
         Initialize pre-ranking stage.
@@ -52,7 +50,6 @@ class PrerankingStage(BaseStage):
             output_dir: Output directory
             top_k: Number of candidates to pass to next stage
             use_diversity: Whether to apply diversity in selection
-            diversity_weight: Weight for diversity consideration
         """
         super().__init__(
             stage_name="preranking",
@@ -68,11 +65,10 @@ class PrerankingStage(BaseStage):
                                               use_feature_encoder=model_params.get("use_feature_encoder", False))
         self.feature_map.default_emb_dim = model_params['embedding_dim']
         self.top_k = top_k
-        self.use_diversity_loss = model_params['use_diversity_loss']
+        self.use_diversity_loss = model_params.get('use_diversity_loss', False)
         if self.use_diversity_loss:
             self.logger.info(
                 f"Computing diversity loss theta: {model_params.get('diversity_theta', 0.7)} lambda: {model_params.get('diversity_lambda', 0.7)}")
-        self.diversity_weight = diversity_weight
         self.model_params = model_params
         self.metrics_k = model_params['metrics_k']
         self.monitor = model_params.get('monitor', 'Recall@100')
@@ -330,19 +326,10 @@ class PrerankingStage(BaseStage):
         else:
             raise ValueError(f"Unknown loss_type: {self.loss_type}")
             
-        # Add diversity loss if enabled (only on positive samples for recommendation diversity)
+        # Add diversity loss if enabled (works for both wrapper and mixin models)
         if self.use_diversity_loss:
-            # Get embeddings from positive output (must use pos_output, not _last_feat_emb_dict
-            # which gets overwritten by negative forward pass)
-            pos_feat_emb_dict = pos_output.get('feat_emb_dict')
-                
-            if pos_feat_emb_dict is not None:
-                div_loss = self.model.compute_diversity_regularization(
-                    pos_feat_emb_dict, pos_scores
-                )
-                if div_loss is not None:
-                    self.logger.debug(f"Diversity loss: {div_loss.item():.6f}")
-                    loss = self.model.add_diversity_to_loss(loss, div_loss)
+            diversity_delta = compute_diversity_for_pairwise(self.model, batch_data, pos_scores)
+            loss = loss + diversity_delta
         
         # Add regularization
         if hasattr(self.model, 'regularization_loss'):

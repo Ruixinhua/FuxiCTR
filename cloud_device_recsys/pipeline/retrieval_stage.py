@@ -22,7 +22,7 @@ from ..pipeline.stage_output import StageOutput
 from ..config.feature_groups import FeatureGroupManager
 from ..models import build_model as registry_build_model
 from ..models import DualTowerRetrieval  # For type hints
-from ..models.losses import bpr_loss, margin_ranking_loss, softmax_cross_entropy_loss
+from ..models.losses import bpr_loss, margin_ranking_loss, softmax_cross_entropy_loss, compute_diversity_for_pairwise
 from ..data.negative_sampler import NegativeSampler
 from ..utils import filter_feature_map
 
@@ -84,6 +84,7 @@ class RetrievalStage(BaseStage):
         self.num_negatives = model_params.get('num_negatives', 0)
         self.loss_type = model_params.get('loss_type', 'bpr')  # 'bpr', 'margin', 'softmax'
         self.margin = model_params.get('margin', 1.0)
+        self.use_diversity_loss = model_params.get('use_diversity_loss', False)
         self.negative_sampler: Optional[NegativeSampler] = None
         # Item index for retrieval
         self.item_embeddings: Optional[torch.Tensor] = None
@@ -298,6 +299,11 @@ class RetrievalStage(BaseStage):
                 loss = softmax_cross_entropy_loss(pos_scores, neg_scores)
             else:
                 raise ValueError(f"Unknown loss_type: {self.loss_type}")
+            
+            # Add diversity loss if enabled (works for both wrapper and mixin models)
+            if self.use_diversity_loss:
+                diversity_delta = compute_diversity_for_pairwise(self.model, batch_data, pos_scores)
+                loss = loss + diversity_delta
             
             # Add regularization
             if hasattr(self.model, 'regularization_loss'):
@@ -600,7 +606,7 @@ class RetrievalStage(BaseStage):
                         if num_added >= self.top_k:
                             break
                         item_idx = user_topk_indices[j]
-                        item_id = self.item_ids[item_idx]
+                        item_id = self.item_ids[item_idx].item()
                         if item_id not in added_item_ids:
                             candidates_data.append({
                                 'request_id': req_id,
