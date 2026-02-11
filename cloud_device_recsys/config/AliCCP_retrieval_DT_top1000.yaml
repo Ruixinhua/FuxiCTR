@@ -1,0 +1,43 @@
+# Exp 1: Baseline
+dataset_id: "Ali_CCP"
+dataset_config: "config/dataset_config.yaml"
+seed: 2024
+gpu: 0
+debug:
+  n_rows: null  # Set to integer (e.g., 100000) for quick testing, null for full data
+
+stages:
+  retrieval:
+    enabled: true
+    model: "DualTowerRetrieval"
+    features: ["FG1", "FG2"]
+    top_k: 1000
+    model_params:
+      num_negatives: 20
+      loss_type: "bpr"   # margin/bpr/softmax
+      metrics_k: [1000, 5000, 10000]
+      use_feature_encoder: 0
+      embedding_dim: 32
+      use_user_transformer: 1
+      user_transformer_layers: 1
+      use_item_transformer: 0
+      item_transformer_layers: 1
+      user_tower_layers: [512, 256, 128, 64]
+      item_tower_layers: [512, 256, 128, 64]
+      embedding_regularizer: 1.0e-5
+      net_regularizer: 1.0e-5
+      max_gradient_norm: 5.0
+      dropout: 0.1
+      learning_rate: 0.001
+
+    training:
+      epochs: 10
+      batch_size: 4096
+      optimizer: "adam"
+      monitor: "Recall@1000"
+    metrics: ["Recall"]
+
+output:
+  root: "outputs"
+  save_intermediate: true
+  save_csv: true
