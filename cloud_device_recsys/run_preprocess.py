@@ -109,6 +109,36 @@ def filter_positive_samples(ddf: pl.LazyFrame, label_col: str) -> pl.LazyFrame:
     return ddf.filter(pl.col(label_col) == 1)
 
 
+def filter_rare_items(
+    ddf: pl.LazyFrame,
+    item_id_col: str,
+    min_count: int
+) -> pl.LazyFrame:
+    """
+    Drop samples whose item_id appears fewer than min_count times.
+
+    Args:
+        ddf: Polars LazyFrame
+        item_id_col: Column name for item ID
+        min_count: Minimum count threshold
+
+    Returns:
+        Filtered LazyFrame
+    """
+    if min_count <= 1:
+        return ddf
+
+    counts = ddf.group_by(item_id_col).agg(pl.len().alias("item_cnt"))
+    return (
+        ddf.join(
+            counts.filter(pl.col("item_cnt") >= min_count),
+            on=item_id_col,
+            how="inner"
+        )
+        .drop("item_cnt")
+    )
+
+
 # =============================================================================
 # Configuration Helpers
 # =============================================================================
@@ -297,16 +327,17 @@ class DataPreprocessor:
                 after_count = ddf.select(pl.len()).collect().item()
                 self.logger.info(f"[{split}] Filtered positive samples: {before_count} -> {after_count}")
 
-            # Truncate eval splits after positive filtering if configured
-            max_eval_test_rows = self.preprocess_opts.get('max_eval_test_rows', 0)
-            if max_eval_test_rows > 0:
+            min_item_count = self.preprocess_opts.get('min_item_count_eval', 1)
+            if min_item_count > 1:
+                item_id_col = self.config.get('item_id_col', 'item_id')
                 before_count = ddf.select(pl.len()).collect().item()
-                ddf = ddf.limit(max_eval_test_rows)
+                ddf = filter_rare_items(ddf, item_id_col, min_item_count)
                 after_count = ddf.select(pl.len()).collect().item()
                 self.logger.info(
-                    f"[{split}] Truncated: {before_count} -> {after_count}"
+                    f"[{split}] Filtered rare items (<{min_item_count}): "
+                    f"{before_count} -> {after_count}"
                 )
-        
+
         return ddf
     
     def run(self, force_rebuild: bool = False) -> None:
