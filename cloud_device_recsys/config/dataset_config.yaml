@@ -254,7 +254,7 @@ Ali_CCP:
       dtype: int
       max_len: 30
       splitter: "^"
-      feature_group: FG1
+      feature_group: drop
       
     # FG2: User Behavioral Sequences (Cloud-personalized)
     - name: ['508', '509', '702']  # ID
@@ -266,7 +266,7 @@ Ali_CCP:
       dtype: float
       feature_group: FG2
 
-    - name: ['109_14', '110_14', '127_14', '150_14']
+    - name: ['109_14', '110_14', '127_14']
       type: sequence
       dtype: int
       max_len: 30
@@ -276,6 +276,14 @@ Ali_CCP:
         '109_14': '206'
         '110_14': '207'
         '127_14': '216'
+
+    - name: '150_14'
+      type: sequence
+      dtype: int
+      max_len: 30
+      splitter: "^"
+      feature_group: drop
+      share_embedding_map:
         '150_14': '210'
 
     # FG3: Device-only Privacy Features

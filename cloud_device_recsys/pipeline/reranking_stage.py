@@ -297,16 +297,19 @@ class RerankingStage(BaseStage):
         neg_ids_flat = neg_item_ids.reshape(-1)
         
         # Get features for all negatives at once using the optimized method
-        neg_features_dict = self.negative_sampler.get_item_features_as_dict(neg_ids_flat.tolist())
+        neg_features = self.negative_sampler.get_features_by_ids(neg_ids_flat)
         
         # Build batched negative dict: repeat user features, use negative item features
         neg_batch_dict = {}
         for key, val in batch_dict.items():
             if key == item_id_col:
                 neg_batch_dict[key] = torch.tensor(neg_ids_flat, device=self.model.device)
-            elif key in neg_features_dict:
+            elif key in neg_features:
                 # Use negative item feature
-                neg_batch_dict[key] = torch.tensor(neg_features_dict[key], device=self.model.device)
+                val = neg_features[key].to_numpy(copy=False)
+                if not np.isscalar(val[0]):
+                    val = np.vstack(val)  # Ensure 2D for multi-valued features
+                neg_batch_dict[key] = torch.tensor(val, device=self.model.device)
             else:
                 # Repeat user features along batch dimension: [B, ...] -> [B * num_neg, ...]
                 if hasattr(val, 'to'):
