@@ -71,13 +71,17 @@ class RerankingStage(BaseStage):
         self.model_params = model_params
         self.metrics_k = model_params['metrics_k']
         self.model: Optional[DeviceReranker] = None
-        self.monitor = model_params.get('monitor', 'nDCG@10')
+        self.monitor = model_params.get('monitor', 'Recall@1')
         self.best_weights_path = None
         # Negative sampling parameters
         self.num_negatives = model_params.get('num_negatives', 0)
         self.loss_type = model_params.get('loss_type', 'bpr')  # 'bpr', 'margin', 'softmax'
         self.margin = model_params.get('margin', 1.0)
         self.negative_sampler: Optional[NegativeSampler] = None
+
+        # Cloud score feature injection
+        self.use_cloud_score = model_params.get('use_cloud_score', False)
+        self.cloud_score_teacher = None  # Pre-ranking model reference
 
         # Item features storage for lookups
         self.item_features_df = None
@@ -97,8 +101,31 @@ class RerankingStage(BaseStage):
             self.logger.error(f"Failed to load item features: {e}")
             raise
     
+    def set_cloud_score_teacher(self, teacher_model):
+        """Set pre-ranking model to generate cloud scores during training.
+        
+        The teacher model (pre-ranking, FG1+FG2 only) provides cloud_score
+        as a numeric feature for the reranking model. This does NOT violate
+        privacy: the teacher only uses cloud-available features.
+        """
+        self.cloud_score_teacher = teacher_model
+        self.cloud_score_teacher.eval()
+        for param in self.cloud_score_teacher.parameters():
+            param.requires_grad = False
+        self.logger.info("Cloud score teacher model set (frozen, eval mode)")
+
     def build_model(self) -> DeviceReranker:
         """Build and initialize the re-ranking model using unified registry"""
+        # Register cloud_score as numeric feature BEFORE model construction
+        if self.use_cloud_score and 'cloud_score' not in self.feature_map.features:
+            self.feature_map.features['cloud_score'] = {
+                'type': 'numeric',
+                'source': '',
+            }
+            self.feature_map.num_fields = self.feature_map.get_num_fields()
+            self.feature_map.set_column_index()
+            self.logger.info("Registered 'cloud_score' as numeric feature in feature_map")
+
         # Ensure output directories exist
         model_dir = os.path.join(self.output_dir, self.feature_map.dataset_id)
         os.makedirs(model_dir, exist_ok=True)
@@ -206,7 +233,18 @@ class RerankingStage(BaseStage):
                     if use_negative_sampling:
                         loss = self._train_step_with_negatives(batch_data, item_id_col, torch)
                     else:
-                        loss = self.model.train_step(batch_data)
+                        # Inject cloud_score for standard training (non-negative-sampling)
+                        if self.use_cloud_score and self.cloud_score_teacher is not None:
+                            batch_dict = dict(batch_data)
+                            with torch.no_grad():
+                                teacher_out = self.cloud_score_teacher.forward(batch_dict)
+                                # Logit transform: spread compressed sigmoid scores
+                                batch_dict['cloud_score'] = torch.logit(
+                                    teacher_out['y_pred'].detach().squeeze(-1), eps=1e-7
+                                )
+                            loss = self.model.train_step(batch_dict)
+                        else:
+                            loss = self.model.train_step(batch_data)
                     total_loss += loss.item()
                     steps += 1
                 
@@ -288,8 +326,17 @@ class RerankingStage(BaseStage):
             pos_item_ids, self.num_negatives
         )
         
-        # Get positive predictions
-        pos_output = self.model.forward(batch_data)
+        # === Cloud Score Injection for positive examples ===
+        if self.use_cloud_score and self.cloud_score_teacher is not None:
+            with torch.no_grad():
+                teacher_pos_out = self.cloud_score_teacher.forward(batch_dict)
+                # Logit transform: spread compressed sigmoid scores
+                batch_dict['cloud_score'] = torch.logit(
+                    teacher_pos_out['y_pred'].detach().squeeze(-1), eps=1e-7
+                )
+        
+        # Get positive predictions (batch_dict now includes cloud_score if enabled)
+        pos_output = self.model.forward(batch_dict)
         pos_scores = pos_output['y_pred']  # [B, 1]
         
         # === Optimized: Batch all negatives into single forward pass ===
@@ -304,6 +351,8 @@ class RerankingStage(BaseStage):
         for key, val in batch_dict.items():
             if key == item_id_col:
                 neg_batch_dict[key] = torch.tensor(neg_ids_flat, device=self.model.device)
+            elif key == 'cloud_score':
+                continue  # Will compute via teacher below
             elif key in neg_features:
                 # Use negative item feature
                 val = neg_features[key].to_numpy(copy=False)
@@ -318,6 +367,15 @@ class RerankingStage(BaseStage):
                     neg_batch_dict[key] = val.repeat_interleave(self.num_negatives, dim=0)
                 else:
                     neg_batch_dict[key] = val
+        
+        # === Cloud Score Injection for negative examples ===
+        if self.use_cloud_score and self.cloud_score_teacher is not None:
+            with torch.no_grad():
+                teacher_neg_out = self.cloud_score_teacher.forward(neg_batch_dict)
+                # Logit transform: spread compressed sigmoid scores
+                neg_batch_dict['cloud_score'] = torch.logit(
+                    teacher_neg_out['y_pred'].detach().squeeze(-1), eps=1e-7
+                )
         
         # Single forward pass for all negatives
         neg_output = self.model.forward(neg_batch_dict)
@@ -397,6 +455,7 @@ class RerankingStage(BaseStage):
             top_k=kwargs.get('top_k', self.top_k),
             logger=self.logger,
             metrics_k=self.metrics_k,
+            inject_cloud_score=self.use_cloud_score,
             **kwargs
         )
 
@@ -430,6 +489,7 @@ class RerankingStage(BaseStage):
             compute_metrics=True,
             metrics_k=metrics_k or self.metrics_k,
             logger=self.logger,
+            inject_cloud_score=self.use_cloud_score,
             **kwargs
         )
         return metrics
