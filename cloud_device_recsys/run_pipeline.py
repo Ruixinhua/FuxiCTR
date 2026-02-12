@@ -724,7 +724,7 @@ def main():
         # Load previous stage outputs if provided (from retrieval stage)
         if args.prev_output_path:
             prev_output_valid, prev_output_test = load_stage_outputs_from_dir(
-                args.prev_output_path, 'retrieval', logger
+                args.prev_output_path, 'retrieval', logger, load_test=args.run_preranking_test
             )
         else:
             raise RuntimeError(
@@ -753,7 +753,7 @@ def main():
         # Load previous stage outputs if provided (from preranking stage)
         if args.prev_output_path:
             prev_output_valid, prev_output_test = load_stage_outputs_from_dir(
-                args.prev_output_path, 'preranking', logger
+                args.prev_output_path, 'preranking', logger, load_test=args.run_reranking_test
             )
         else:
             raise RuntimeError("Previous stage outputs not provided or failed to load. "
