@@ -241,6 +241,171 @@ def compute_item_similarity_matrix(
     return similarity_matrix
 
 
+def compute_diversity_loss_per_user(
+    model,
+    pos_inputs: dict,
+    neg_inputs: dict,
+    pos_scores: torch.Tensor,
+    neg_scores_flat: torch.Tensor,
+    num_negatives: int,
+    theta: float = 0.7,
+    lambda_: float = 0.01,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """
+    Compute per-user diversity loss treating each sample's pos+neg as an impression.
+    
+    Instead of computing a single huge similarity matrix across the entire batch,
+    this function reshapes the data into per-user groups of size (1 + num_negatives)
+    and computes diversity within each user's impression.
+    
+    Args:
+        model: The model instance (for extracting item embeddings)
+        pos_inputs: Positive example batch dict (batch_size B)
+        neg_inputs: Negative example batch dict (batch_size B * num_negatives)
+        pos_scores: Positive prediction scores [B, 1]
+        neg_scores_flat: Negative prediction scores [B * num_neg, 1]
+        num_negatives: Number of negatives per positive
+        theta: Weight between prediction sum and diversity term (default: 0.7)
+        lambda_: Weight of diversity loss in total loss (default: 0.01)
+        eps: Small epsilon for numerical stability (default: 1e-6)
+        
+    Returns:
+        Diversity loss delta to ADD to the base loss (negative value encourages diversity).
+    """
+    batch_size = pos_scores.size(0)
+    group_size = 1 + num_negatives  # items per user
+    
+    # --- Extract item embeddings ---
+    item_embeddings = _extract_item_embeddings_for_diversity(model, pos_inputs, neg_inputs, num_negatives)
+    
+    if item_embeddings is None:
+        return torch.tensor(0.0, device=pos_scores.device)
+    
+    # item_embeddings shape: [B * group_size, emb_dim]
+    emb_dim = item_embeddings.size(-1)
+    
+    # Reshape to per-user groups: [B, group_size, emb_dim]
+    item_embeddings_grouped = item_embeddings.view(batch_size, group_size, emb_dim)
+    
+    # Normalize embeddings for cosine similarity
+    item_emb_norm = torch.nn.functional.normalize(item_embeddings_grouped, p=2, dim=-1)
+    
+    # Per-user similarity matrices: [B, group_size, group_size]
+    sim_matrices = torch.bmm(item_emb_norm, item_emb_norm.transpose(-1, -2))
+    
+    # Map to [0, 1]: (1 + cos_sim) / 2
+    sim_matrices = (1 + sim_matrices) / 2
+    
+    # Add small identity for numerical stability
+    identity = torch.eye(group_size, device=sim_matrices.device) * eps
+    identity = identity.unsqueeze(0).expand(batch_size, -1, -1)
+    
+    # Per-user log-determinant: [B]
+    log_det = torch.logdet(sim_matrices + identity)
+    
+    # Handle NaN/Inf (replace with 0)
+    log_det = torch.where(
+        torch.isnan(log_det) | torch.isinf(log_det),
+        torch.zeros_like(log_det),
+        log_det
+    )
+    
+    # Per-user prediction sum
+    # pos_scores: [B, 1], neg_scores_flat: [B * num_neg, 1]
+    neg_scores_grouped = neg_scores_flat.view(batch_size, num_negatives)  # [B, num_neg]
+    all_scores = torch.cat([pos_scores, neg_scores_grouped], dim=1)  # [B, group_size]
+    r_ui_sum = all_scores.sum(dim=1)  # [B]
+    
+    # Per-user diversity loss: [B]
+    per_user_div = theta * r_ui_sum + (1 - theta) * log_det
+    
+    # Average across users, then apply as regularization (negative = encourage diversity)
+    diversity_loss = per_user_div.mean()
+    
+    return -lambda_ * diversity_loss
+
+
+def _extract_item_embeddings_for_diversity(model, pos_inputs, neg_inputs, num_negatives):
+    """
+    Extract and concatenate item embeddings from positive and negative inputs.
+    
+    Supports both wrapper-based and mixin-based models.
+    
+    Args:
+        model: The model instance
+        pos_inputs: Positive batch dict (B samples)
+        neg_inputs: Negative batch dict (B * num_neg samples)
+        num_negatives: Number of negatives per positive
+        
+    Returns:
+        Concatenated item embeddings [B * (1 + num_neg), emb_dim] or None
+    """
+    # Determine which layer and features to use
+    emb_dict_layer = None
+    item_features = []
+    
+    # Wrapper-based model
+    if getattr(model, '_diversity_enabled', False):
+        emb_dict_layer = getattr(model, '_diversity_emb_dict_layer', None)
+        item_features = getattr(model, '_diversity_item_features', [])
+    
+    # Mixin-based model
+    if not item_features and hasattr(model, '_use_diversity_loss'):
+        item_features = getattr(model, '_diversity_item_features', [])
+        if not item_features:
+            item_features = _detect_item_features(model)
+        emb_dict_layer = _find_embedding_dict_layer(model)
+    
+    if emb_dict_layer is None or not item_features:
+        return None
+    
+    try:
+        # Extract positive item embeddings
+        X_pos = model.get_inputs(pos_inputs)
+        feat_emb_pos = emb_dict_layer(X_pos)
+        
+        # Extract negative item embeddings
+        X_neg = model.get_inputs(neg_inputs)
+        feat_emb_neg = emb_dict_layer(X_neg)
+        
+        # Collect item feature embeddings
+        pos_embs = []
+        neg_embs = []
+        for feat_name in item_features:
+            if feat_name in feat_emb_pos:
+                emb_p = feat_emb_pos[feat_name]
+                emb_n = feat_emb_neg[feat_name]
+                if emb_p.dim() == 3:
+                    emb_p = emb_p.mean(dim=1)
+                if emb_n.dim() == 3:
+                    emb_n = emb_n.mean(dim=1)
+                pos_embs.append(emb_p)
+                neg_embs.append(emb_n)
+        
+        if not pos_embs:
+            return None
+        
+        pos_item_emb = torch.cat(pos_embs, dim=-1)  # [B, D]
+        neg_item_emb = torch.cat(neg_embs, dim=-1)  # [B * num_neg, D]
+        
+        batch_size = pos_item_emb.size(0)
+        emb_dim = pos_item_emb.size(-1)
+        
+        # Reshape neg: [B * num_neg, D] -> [B, num_neg, D]
+        neg_item_emb_grouped = neg_item_emb.view(batch_size, num_negatives, emb_dim)
+        
+        # Concat: [B, 1, D] + [B, num_neg, D] -> [B, 1+num_neg, D]
+        combined = torch.cat([pos_item_emb.unsqueeze(1), neg_item_emb_grouped], dim=1)
+        
+        # Flatten back: [B * (1 + num_neg), D]
+        return combined.view(-1, emb_dim)
+        
+    except Exception as e:
+        logger.debug(f"Failed to extract item embeddings for per-user diversity: {e}")
+        return None
+
+
 class DiversityLossMixin:
     """
     Mixin class to add diversity loss capability to any model.

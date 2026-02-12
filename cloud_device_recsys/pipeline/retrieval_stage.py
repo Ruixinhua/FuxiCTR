@@ -12,6 +12,7 @@ import os
 import sys
 import csv
 import numpy as np
+import pandas as pd
 import datetime
 from typing import Dict, List, Optional, Any
 import torch
@@ -89,6 +90,7 @@ class RetrievalStage(BaseStage):
         # Item index for retrieval
         self.item_embeddings: Optional[torch.Tensor] = None
         self.item_ids: Optional[torch.Tensor] = None
+        self.item_id_to_idx: Optional[Dict] = None
 
     def build_model(self) -> DualTowerRetrieval:
         """Build and initialize the retrieval model using unified registry"""

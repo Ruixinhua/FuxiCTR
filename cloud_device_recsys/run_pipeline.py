@@ -45,7 +45,7 @@ from cloud_device_recsys.utils import (
     enrich_stage_output_user_features
 )
 from cloud_device_recsys.data.item_pool import ensure_item_pool, ensure_full_item_pool
-from cloud_device_recsys.data.positive_data import get_train_path_for_mode
+from cloud_device_recsys.data.positive_data import get_train_path_for_mode, ensure_positive_train_data
 from cloud_device_recsys.config.config_parser import ConfigParser
 import pandas as pd
 
@@ -171,11 +171,11 @@ def _prepare_stage_data_loaders(feature_map, stage_config: dict, paths: dict,
             logger=logger
         )
 
-        train_fm = copy.deepcopy(feature_map)
-        if "impression_id" in train_fm.labels:
-            train_fm.labels.remove("impression_id")
+        # train_fm = copy.deepcopy(feature_map)
+        # if "impression_id" in train_fm.labels:
+        #     train_fm.labels.remove("impression_id")
         result['train_loader'] = RankDataLoader(
-            feature_map=train_fm,
+            feature_map=feature_map,
             stage='train',
             train_data=train_path,
             batch_size=batch_size,
@@ -350,7 +350,7 @@ def run_retrieval_stage(retrieval_stage, pipeline_config, dataset_config, fg_man
     return metrics, valid_output, test_output
 
 def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, fg_manager=None, logger=None,
-                         prev_output_test=None, prev_output_valid=None, run_test=True):
+                         prev_output_test=None, prev_output_valid=None, run_test=True, **kwargs):
     if logger is None:
         logger = logging.getLogger('PipelineRunner')
 
@@ -436,7 +436,8 @@ def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, fg_m
     return metrics, valid_output, test_output
 
 def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_manager=None, logger=None,
-                        prev_output_valid=None, prev_output_test=None, run_test=True):
+                        prev_output_valid=None, prev_output_test=None, run_test=True,
+                        preranking_model=None, stages=None):
     if logger is None:
         logger = logging.getLogger('PipelineRunner')
 
@@ -458,9 +459,13 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_man
         )
 
     # Create data loaders for reranking stage
+    # Use deepcopy of feature_map so DataLoader doesn't see cloud_score
+    # (cloud_score is registered in build_model() but doesn't exist in parquet)
+    import copy
+    loader_feature_map = copy.deepcopy(reranking_stage.feature_map)
     num_negatives = reranking_config.get('model_params', {}).get('num_negatives', 0)
     loaders = _prepare_stage_data_loaders(
-        feature_map=reranking_stage.feature_map,
+        feature_map=loader_feature_map,
         stage_config=reranking_config,
         paths=paths,
         create_train=True,
@@ -499,6 +504,39 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_man
 
     # 2. Train Reranking Model
     logger.info("[Reranking] Training model...")
+    
+    # Set cloud score teacher if enabled
+    use_cloud_score = reranking_config.get('model_params', {}).get('use_cloud_score', False)
+    if use_cloud_score and preranking_model is not None:
+        reranking_stage.set_cloud_score_teacher(preranking_model)
+    elif use_cloud_score and preranking_model is None:
+        # Attempt to build and load preranking model from saved weights
+        logger.info("[Reranking] use_cloud_score=True, attempting to load preranking model from saved weights...")
+        try:
+            preranking_config = pipeline_config['stages'].get('preranking', {})
+            if preranking_config and stages is not None and 'preranking' in stages:
+                preranking_stage_obj = stages['preranking']()
+                preranking_stage_obj.build_model()
+                # Find best weights in preranking output dir
+                import glob
+                preranking_model_dir = os.path.join(
+                    preranking_stage_obj.output_dir,
+                    preranking_stage_obj.feature_map.dataset_id
+                )
+                weight_files = glob.glob(os.path.join(preranking_model_dir, '*.model'))
+                if weight_files:
+                    # Use the most recent weight file
+                    best_weights = max(weight_files, key=os.path.getmtime)
+                    preranking_stage_obj.model.load_weights(best_weights)
+                    reranking_stage.set_cloud_score_teacher(preranking_stage_obj.model)
+                    logger.info(f"[Reranking] Loaded preranking teacher from {best_weights}")
+                else:
+                    logger.warning("[Reranking] No preranking model weights found. Cloud score disabled for training.")
+            else:
+                logger.warning("[Reranking] No preranking config found. Cloud score disabled for training.")
+        except Exception as e:
+            logger.warning(f"[Reranking] Failed to load preranking model: {e}. Cloud score disabled for training.")
+    
     reranking_stage.build_model()
     reranking_stage.train(
         train_data=train_gen,
@@ -674,7 +712,7 @@ def main():
         p_metrics, p_valid, p_test = run_preranking_stage(
             preranking_stage, pipeline_config, dataset_config, fg_manager=fg_manager,
             logger=logger, prev_output_valid=r_valid, prev_output_test=r_test,
-            run_test=bool(args.run_preranking_test)
+            run_test=bool(args.run_preranking_test),
         )
         all_metrics.update(p_metrics)
         with open(metrics_path, 'w') as f:
@@ -693,7 +731,9 @@ def main():
             reranking_stage, pipeline_config, dataset_config, fg_manager=fg_manager,
             logger=logger,
             prev_output_valid=p_valid, prev_output_test=p_test,
-            run_test=bool(args.run_reranking_test)
+            run_test=bool(args.run_reranking_test),
+            preranking_model=preranking_stage.model,
+            stages=stages
         )
         all_metrics.update(d_metrics)
 
@@ -765,7 +805,8 @@ def main():
             reranking_stage, pipeline_config, dataset_config, fg_manager=fg_manager,
             logger=logger,
             prev_output_valid=prev_output_valid, prev_output_test=prev_output_test,
-            run_test=bool(args.run_reranking_test)
+            run_test=bool(args.run_reranking_test),
+            stages=stages
         )
         all_metrics.update(d_metrics)
     else:

@@ -344,7 +344,8 @@ def batch_to_tensors(
 def compute_ranking_metrics(
     scores: np.ndarray,
     labels: np.ndarray,
-    metrics_k: List[int] = None
+    metrics_k: List[int] = None,
+    pre_sorted: bool = False
 ) -> Dict[str, float]:
     """
     Compute ranking metrics for a single query/user.
@@ -359,6 +360,10 @@ def compute_ranking_metrics(
         scores: Predicted scores for each item (1D array/list)
         labels: Ground truth labels (1 for relevant, 0 otherwise, 1D array/list)
         metrics_k: List of K values for Recall@K and nDCG@K metrics
+        pre_sorted: If True, scores and labels are already sorted by descending score
+                    (e.g., with random tie-breaking from process_and_rank_candidates).
+                    The function will skip re-sorting and use the input order as-is.
+                    If False (default), uses pessimistic tie-breaking (positives ranked last among ties).
         
     Returns:
         Dict of metric names to values
@@ -366,14 +371,16 @@ def compute_ranking_metrics(
     scores = np.asarray(scores, dtype=np.float64)
     labels = np.asarray(labels)
     
-    # Sort by score descending with PESSIMISTIC tie-breaking:
-    # When scores are tied, positive items (label=1) are ranked LAST among ties.
-    # This is achieved by using a secondary sort key: +labels (so label=0 comes before label=1)
-    # We use lexsort which sorts by the LAST key first (in ascending order).
-    # lexsort((labels, -scores)) means: primary sort by -scores DESC, secondary by labels ASC
-    # Since label=0 < label=1 in ascending order, negatives come first among ties.
-    sorted_indices = np.lexsort((labels, -scores))
-    sorted_labels = labels[sorted_indices]
+    if pre_sorted:
+        # Trust the input ordering — scores/labels are already sorted by descending score.
+        # This is consistent with the candidate ranking in process_and_rank_candidates,
+        # where ties are randomly ordered (stable sort preserves original input order).
+        sorted_labels = labels
+    else:
+        # Sort by score descending with PESSIMISTIC tie-breaking:
+        # When scores are tied, positive items (label=1) are ranked LAST among ties.
+        sorted_indices = np.lexsort((labels, -scores))
+        sorted_labels = labels[sorted_indices]
     
     true_relevant_count = np.sum(sorted_labels)
     if true_relevant_count == 0:
@@ -700,6 +707,7 @@ def process_and_rank_candidates(
     top_k: int = 100,
     logger: logging.Logger = None,
     inference_batch_size: int = 100000,
+    inject_cloud_score: bool = False,
     **kwargs
 ) -> Tuple[Optional[StageOutput], Dict[str, float]]:
     """
@@ -786,6 +794,12 @@ def process_and_rank_candidates(
     all_item_ids = candidates_df['item_id'].values
     all_labels = candidates_df['label'].fillna(0).astype(int).values
     
+    # Extract cloud scores from previous stage (if available)
+    all_cloud_scores = None
+    if inject_cloud_score and 'score' in candidates_df.columns:
+        all_cloud_scores = candidates_df['score'].values
+        logger.info(f"Cloud score injection enabled: extracting scores from {len(all_cloud_scores)} candidates")
+    
     # Use np.unique to count occurrences of each request_id
     # Since we sorted, unique_request_ids will be sorted
     unique_request_ids, request_counts = np.unique(request_ids_arr, return_counts=True)
@@ -855,6 +869,19 @@ def process_and_rank_candidates(
     request_idx_for_valid = np.searchsorted(request_offsets[1:], valid_global_indices, side='right')
     user_feature_names = list(request_metadata[0][2].keys()) if request_metadata and request_metadata[0][2] else []
     logger.info("Finish preparing user feature metadata for valid candidates.")
+
+    # Pre-convert cloud_score for valid items
+    cloud_score_array = None
+    if inject_cloud_score and all_cloud_scores is not None:
+        cloud_score_array = all_cloud_scores[valid_mask].astype(np.float32)
+        # Logit transform: spread compressed sigmoid scores (consistent with training)
+        eps = 1e-7
+        cloud_score_array = np.clip(cloud_score_array, eps, 1.0 - eps)
+        cloud_score_array = np.log(cloud_score_array / (1.0 - cloud_score_array))
+        if not cloud_score_array.flags['C_CONTIGUOUS']:
+            cloud_score_array = np.ascontiguousarray(cloud_score_array)
+        logger.info(f"Injecting cloud_score feature ({len(cloud_score_array)} items, "
+                    f"logit range: [{cloud_score_array.min():.2f}, {cloud_score_array.max():.2f}])")
     # ========== Phase 4: Chunked model inference (OPTIMIZED) ==========
     all_scores = np.zeros(num_valid, dtype=np.float32)
     
@@ -1061,6 +1088,13 @@ def process_and_rank_candidates(
                 chunk_arr = np.ascontiguousarray(chunk_arr)
             tensor_batch[col] = torch.from_numpy(chunk_arr).to(device, non_blocking=True)
         
+        # Cloud score injection
+        if inject_cloud_score and cloud_score_array is not None:
+            chunk_cloud = cloud_score_array[chunk_start:chunk_end]
+            if not chunk_cloud.flags['C_CONTIGUOUS']:
+                chunk_cloud = np.ascontiguousarray(chunk_cloud)
+            tensor_batch['cloud_score'] = torch.from_numpy(chunk_cloud).to(device, non_blocking=True)
+        
         timing_stats['tensor_conversion'] += time.time() - t_tensor_start
         
         # ===== TIMING: Model forward pass =====
@@ -1161,20 +1195,25 @@ def process_and_rank_candidates(
             num_positive = int(np.sum(req_labels))
             num_negative = num_candidates - num_positive
             valid_queries += 1
+            # Pre-sort by descending score with RANDOM tie-breaking:
+            # 1. Randomly permute indices so tied scores get random ordering
+            # 2. Stable sort by descending score preserves the random order within ties
+            random_perm = np.random.permutation(len(req_scores))
+            sorted_order = random_perm[np.argsort(-req_scores[random_perm], kind='stable')]
+            sorted_scores = req_scores[sorted_order]
+            sorted_labels = req_labels[sorted_order]
+            query_metrics = compute_ranking_metrics(sorted_scores, sorted_labels, metrics_k, pre_sorted=True)
             # Detailed debugging for first 3 queries
             if num_queries < 3:
                 pos_scores = req_scores[req_labels == 1]
                 neg_scores = req_scores[req_labels == 0]
-                # Pessimistic rank: all negatives with score >= positive come first
-                pos_rank_pessimistic = int(np.sum(neg_scores >= pos_scores[0])) + 1
+                # Order in the sorted list
+                pos_rank_index = np.where(sorted_labels == 1)[0][0] + 1
                 logger.info(f"[DEBUG] Query {req_id}: {num_candidates} cands ({num_positive} pos, {num_negative} neg)")
                 logger.info(f"[DEBUG]   Positive score: {pos_scores[0]:.6f}")
                 logger.info(f"[DEBUG]   Negative scores: min={neg_scores.min():.6f}, max={neg_scores.max():.6f}, mean={neg_scores.mean():.6f}")
-                logger.info(f"[DEBUG]   Positive rank (pessimistic): {pos_rank_pessimistic} (1=best)")
+                logger.info(f"[DEBUG]   Positive rank (In sorted list): {pos_rank_index} (1=best)")
                 logger.info(f"[DEBUG]   # negatives >= pos: {np.sum(neg_scores >= pos_scores[0])}, # negatives < pos: {np.sum(neg_scores < pos_scores[0])}")
-            
-            query_metrics = compute_ranking_metrics(req_scores, req_labels, metrics_k)
-            
             # Log individual query metrics for first 3 queries
             if num_queries < 3 and query_metrics:
                 logger.info(f"[DEBUG]   Query metrics: MRR={query_metrics.get('MRR', 0):.4f}, gAUC={query_metrics.get('gAUC', 0):.4f}")

@@ -11,6 +11,7 @@ This module wraps the preranking model as a pipeline stage.
 import os
 import csv
 import numpy as np
+import torch
 from typing import Dict, List, Optional, Any, Tuple
 
 from ..pipeline.base_stage import BaseStage, StageType
@@ -18,7 +19,7 @@ from ..pipeline.stage_output import StageOutput
 from ..config.feature_groups import FeatureGroupManager, FeatureGroup
 from ..models import build_model as registry_build_model
 from ..models import DINRanker  # For type hints
-from ..models.losses import bpr_loss, margin_ranking_loss, softmax_cross_entropy_loss, compute_diversity_for_pairwise
+from ..models.losses import bpr_loss, margin_ranking_loss, softmax_cross_entropy_loss, compute_diversity_loss_per_user
 from ..data.negative_sampler import NegativeSampler
 from ..utils import filter_feature_map
 
@@ -69,18 +70,26 @@ class PrerankingStage(BaseStage):
         if self.use_diversity_loss:
             self.logger.info(
                 f"Computing diversity loss theta: {model_params.get('diversity_theta', 0.7)} lambda: {model_params.get('diversity_lambda', 0.7)}")
+        # Delayed diversity loss parameters
+        self.diversity_start_epoch = model_params.get('diversity_start_epoch', -1)
+        self.diversity_epochs = model_params.get('diversity_epochs', 5)
+        self.diversity_warmup_epochs = model_params.get('diversity_warmup_epochs', 0)
         self.model_params = model_params
         self.metrics_k = model_params['metrics_k']
         self.monitor = model_params.get('monitor', 'Recall@100')
+        self.patience = model_params.get('patience', 2)
         self.model: Optional[DINRanker] = None
         self.best_weights_path = None
         # Negative sampling parameters
         self.num_negatives = model_params.get('num_negatives', 0)
+        self.diversity_num_negatives = model_params.get('diversity_num_negatives', self.num_negatives)
         self.loss_type = model_params.get('loss_type', 'bpr')  # 'bpr', 'margin', 'softmax'
         self.margin = model_params.get('margin', 1.0)
         self.negative_sampler: Optional[NegativeSampler] = None
         # Item features storage for lookups during evaluation/processing
         self.item_features_df = None
+        # MMR inference reranking parameters
+        self.mmr_lambda = model_params.get('mmr_lambda', 0.5)
     
     def load_item_features(self, item_pool_path: str):
         """Load item features from parquet file for inference lookup"""
@@ -115,12 +124,143 @@ class PrerankingStage(BaseStage):
         self.logger.info(f"Built {model_name} model, saving to {model_dir}")
         return self.model
     
+    def _set_diversity_enabled(self, enabled: bool):
+        """
+        Toggle diversity loss on the model at runtime.
+        
+        Supports both wrapper-based models (model._diversity_enabled) and
+        mixin-based models (model._use_diversity_loss).
+        """
+        if self.model is None:
+            return
+        # Wrapper-based model (from wrap_model_with_diversity)
+        if hasattr(self.model, '_diversity_enabled'):
+            self.model._diversity_enabled = enabled
+        # Mixin-based model (DiversityLossMixin)
+        if hasattr(self.model, '_use_diversity_loss'):
+            self.model._use_diversity_loss = enabled
+        self.logger.info(f"Diversity loss {'enabled' if enabled else 'disabled'} on model")
+
+    def _set_diversity_lambda(self, lambda_value: float):
+        """
+        Set diversity lambda on the model at runtime.
+        """
+        if self.model is None:
+            return
+        if hasattr(self.model, '_diversity_lambda'):
+            self.model._diversity_lambda = lambda_value
+        if hasattr(self.model, '_diversity_logger'):
+             # Optional: log adjust if needed, but per-epoch log is better
+             pass
+
+    def _run_training_phase(self, phase_name, train_data, valid_data,
+                            epochs, patience, mode, use_negative_sampling,
+                            item_id_col, best_metric, metrics, 
+                            diversity_warmup_epochs=0, target_diversity_lambda=0.01,
+                            **kwargs):
+        """
+        Run a single training phase (used by both Phase 1 and Phase 2).
+        
+        Args:
+            phase_name: Name for logging (e.g., "Phase 1", "Phase 2")
+            train_data: Training data generator
+            valid_data: Validation data generator
+            epochs: Max epochs for this phase
+            patience: Early stopping patience
+            mode: 'max' or 'min' for monitor metric
+            use_negative_sampling: Whether to use negative sampling
+            item_id_col: Name of item ID column
+            best_metric: Starting best metric value
+            metrics: Metrics dict to update (mutated in-place)
+            diversity_warmup_epochs: Number of epochs to warmup diversity lambda
+            target_diversity_lambda: Final target value for diversity lambda
+            **kwargs: Additional training parameters
+            
+        Returns:
+            Updated best_metric value
+        """
+        stopping_steps = 0
+        
+        for epoch in range(epochs):
+            self.model._epoch_index = epoch
+            
+            # --- Diversity Warmup Logic ---
+            if diversity_warmup_epochs > 0 and self.use_diversity_loss:
+                if epoch < diversity_warmup_epochs:
+                    warmup_lambda = (epoch + 1) / diversity_warmup_epochs * target_diversity_lambda
+                    # Clamp to target
+                    current_lambda = min(warmup_lambda, target_diversity_lambda)
+                    self._set_diversity_lambda(current_lambda)
+                    self.logger.info(f"[{phase_name}] Diversity Warmup: lambda={current_lambda:.6f} (Epoch {epoch+1}/{diversity_warmup_epochs})")
+                else:
+                    # Ensure it is at target
+                    if getattr(self.model, '_diversity_lambda', 0) != target_diversity_lambda:
+                        self._set_diversity_lambda(target_diversity_lambda)
+                        self.logger.info(f"[{phase_name}] Diversity Warmup Complete: lambda={target_diversity_lambda}")
+
+            self.logger.info(f"*** [{phase_name}] Epoch {epoch + 1}/{epochs} ***")
+            
+            # Training Loop
+            self.model.train()
+            total_loss = 0.0
+            steps = 0
+            
+            for batch_data in train_data:
+                if use_negative_sampling and self.num_negatives > 0:
+                    loss = self._train_step_with_negatives(batch_data, item_id_col, torch)
+                else:
+                    loss = self.model.train_step(batch_data)
+                
+                total_loss += loss.item()
+                steps += 1
+            
+            avg_loss = total_loss / steps if steps > 0 else 0.0
+            if use_negative_sampling:
+                self.logger.info(f"[{phase_name}] Train Loss ({self.loss_type}): {avg_loss:.6f}")
+            else:
+                self.logger.info(f"[{phase_name}] Train Loss: {avg_loss:.6f}")
+            
+            # Validation (Ranking Metrics)
+            self.logger.info(f"[{phase_name}] Evaluating epoch {epoch + 1}...")
+            valid_metrics = self.evaluate(valid_data)
+            metrics.update(valid_metrics)
+            self.logger.info(f"[{phase_name}] Validation (Ranking): {valid_metrics}")
+            
+            # Monitor-based best model saving
+            curr_val = valid_metrics.get(self.monitor, 0.0)
+            is_best = (curr_val > best_metric) if mode == "max" else (curr_val < best_metric)
+            
+            if is_best:
+                best_metric = curr_val
+                stopping_steps = 0
+                self.model.save_weights(self.best_weights_path)
+                self.logger.info(f"[{phase_name}] New Best {self.monitor}={curr_val:.6f}! Model Saved.")
+            else:
+                stopping_steps += 1
+                self.logger.info(f"[{phase_name}] No improvement. Patience {stopping_steps}/{patience}")
+                
+                # Decay LR on plateau
+                if kwargs.get("reduce_lr_on_plateau", True):
+                    old_lr = self.model.optimizer.param_groups[0]['lr']
+                    new_lr = self.model.lr_decay(factor=kwargs.get("lr_decay_factor", 0.1))
+                    self.logger.info(f"[{phase_name}] Decay LR: {old_lr:.6f} -> {new_lr:.6f}")
+                
+                if stopping_steps >= patience:
+                    self.logger.info(f"[{phase_name}] Early Stopping.")
+                    break
+        
+        return best_metric
+
     def train(self,
               train_data: Any,
               valid_data: Optional[Any] = None,
               **kwargs) -> Dict[str, float]:
         """
         Train the pre-ranking model with custom loop and best model monitoring.
+        
+        Supports two-phase training when use_diversity_loss is enabled:
+        - Phase 1: Train without diversity loss until early stopping
+        - Phase 2: Load best weights, enable diversity loss, fine-tune
         
         Args:
             train_data: Training data generator (positive examples only for negative sampling)
@@ -135,24 +275,27 @@ class PrerankingStage(BaseStage):
         Returns:
             Training metrics
         """
-        import torch
-        
+
         if self.model is None:
             self.build_model()
         
         self.logger.info("Starting pre-ranking model training (Custom Loop)")
         self.best_weights_path = os.path.join(self.model.model_dir, self.model.model_id + ".model")
 
-        epochs = kwargs.get('epochs', 1)
-        patience = kwargs.get('patience', 2)
-        mode = kwargs.get('mode', 'max')
+        epochs = kwargs.pop('epochs', 1)
+        patience = kwargs.pop('patience', self.patience)
+        mode = kwargs.pop('mode', 'max')
+        initial_lr = kwargs.pop('learning_rate', self.model_params.get('learning_rate', 1e-3))
         metrics = {}
         
         # Initialize negative sampler if using negative sampling
         use_negative_sampling = self.num_negatives > 0 and self.item_features_df is not None
         if use_negative_sampling:
             item_id_col = getattr(self.feature_map, 'dataset_config', {}).get('item_id_col', 'cand_item_id')
-            self.negative_sampler = NegativeSampler(self.item_features_df, item_id_col=item_id_col)
+            self.negative_sampler = NegativeSampler(
+                self.item_features_df,
+                item_id_col=item_id_col,
+            )
             self.logger.info(f"Negative Sampling: {self.num_negatives} negatives per positive, loss_type={self.loss_type}")
         else:
             if self.num_negatives > 0 and self.item_features_df is None:
@@ -161,11 +304,10 @@ class PrerankingStage(BaseStage):
         # Ensure optimizer is initialized
         if not hasattr(self.model, 'optimizer') or self.model.optimizer is None:
              self.logger.info("Initializing optimizer...")
-             # FuxiCTR's compile handles optimizer/loss setup
              self.model.compile(
                  optimizer=kwargs.get("optimizer", self.model_params.get("optimizer", "adam")),
                  loss=self.model_params.get("loss", "binary_crossentropy"),
-                 lr=kwargs.get("learning_rate", 1e-3)
+                 lr=initial_lr
              )
              
         # Setup model for manual training (required by train_step)
@@ -175,67 +317,97 @@ class PrerankingStage(BaseStage):
         self.model._verbose = kwargs.get("verbose", 1)
         self.model._epoch_index = 0
 
-        self.logger.info(f"Start Training: epochs={epochs}, monitor={self.monitor}, patience={patience}")
-        
-        best_metric = -np.inf if mode == "max" else np.inf
-        stopping_steps = 0
-        
         item_id_col = getattr(self.feature_map, 'dataset_config', {}).get('item_id_col', 'cand_item_id')
+        best_metric = -np.inf if mode == "max" else np.inf
 
-        for epoch in range(epochs):
-            self.model._epoch_index = epoch
-            self.logger.info(f"*** Epoch {epoch + 1}/{epochs} ***")
+        # ======================================================================
+        # Determine training strategy
+        # ======================================================================
+        use_two_phase = self.use_diversity_loss  # Two-phase only when diversity is requested
+        
+        if use_two_phase:
+            # --- Phase 1: Train WITHOUT diversity loss ---
+            self._set_diversity_enabled(False)
+            # Also disable diversity in the stage-level flag for _train_step_with_negatives
+            phase1_use_diversity = self.use_diversity_loss
+            self.use_diversity_loss = False
+
+            if self.diversity_start_epoch != 0:
+                phase1_epochs = self.diversity_start_epoch if self.diversity_start_epoch > 0 else epochs
+                self.logger.info(
+                    f"=== Phase 1: Base Training (no diversity) ==="
+                    f" epochs={phase1_epochs}, monitor={self.monitor}, patience={patience}"
+                )
+                best_metric = self._run_training_phase(
+                    phase_name="Phase 1",
+                    train_data=train_data,
+                    valid_data=valid_data,
+                    epochs=phase1_epochs,
+                    patience=patience,
+                    mode=mode,
+                    use_negative_sampling=use_negative_sampling,
+                    item_id_col=item_id_col,
+                    best_metric=best_metric,
+                    metrics=metrics,
+                    **kwargs
+                )
+                # Restore best weights from Phase 1 as starting point for Phase 2
+                if os.path.exists(self.best_weights_path):
+                    self.model.load_weights(self.best_weights_path)
+                    self.logger.info(f"Phase 1 complete. Best {self.monitor}={best_metric:.6f}. Loaded best weights.")
+
+            # --- Phase 2: Fine-tune WITH diversity loss ---
+            self.use_diversity_loss = phase1_use_diversity  # Restore the flag
+            self._set_diversity_enabled(True)
             
-            # Training Loop
-            self.model.train()
-            total_loss = 0.0
-            steps = 0
+            # Reset learning rate to initial value for Phase 2
+            for param_group in self.model.optimizer.param_groups:
+                param_group['lr'] = initial_lr
+            self.logger.info(f"Reset learning rate to {initial_lr} for Phase 2")
             
-            for batch_data in train_data:
-                if use_negative_sampling:
-                    # Negative sampling training
-                    loss = self._train_step_with_negatives(batch_data, item_id_col, torch)
-                else:
-                    # Standard training
-                    loss = self.model.train_step(batch_data)
-                
-                total_loss += loss.item()
-                steps += 1
+            self.logger.info(
+                f"=== Phase 2: Diversity Fine-tuning ==="
+                f" epochs={self.diversity_epochs}, monitor={self.monitor}, patience={patience}, warmup={self.diversity_warmup_epochs}"
+            )
             
-            avg_loss = total_loss / steps if steps > 0 else 0.0
-            if use_negative_sampling:
-                self.logger.info(f"Train Loss ({self.loss_type}): {avg_loss:.6f}")
-            else:
-                self.logger.info(f"Train Loss: {avg_loss:.6f}")
+            # Verify target lambda
+            target_lambda = self.model_params.get('diversity_lambda', 0.7)
+            lr_decay_factor = kwargs.pop("lr_decay_factor", 0.5)
+            self.num_negatives = self.diversity_num_negatives  # Update num_negatives for Phase 2 if specified
+            best_metric = self._run_training_phase(
+                phase_name="Phase 2 (Diversity)",
+                train_data=train_data,
+                valid_data=valid_data,
+                epochs=self.diversity_epochs,
+                patience=patience,
+                mode=mode,
+                use_negative_sampling=use_negative_sampling,
+                item_id_col=item_id_col,
+                best_metric=best_metric,
+                metrics=metrics,
+                diversity_warmup_epochs=self.diversity_warmup_epochs,
+                target_diversity_lambda=target_lambda,
+                lr_decay_factor=lr_decay_factor,
+                **kwargs
+            )
+        else:
+            # --- Single-phase training (no diversity) ---
+            self.logger.info(f"Start Training: epochs={epochs}, monitor={self.monitor}, patience={patience}")
             
-            # Validation (Ranking Metrics)
-            self.logger.info(f"Evaluating epoch {epoch + 1}...")
-            valid_metrics = self.evaluate(valid_data)
-            metrics.update(valid_metrics)
-            self.logger.info(f"Validation (Ranking): {valid_metrics}")
-            
-            # Monitor-based best model saving
-            curr_val = valid_metrics.get(self.monitor, 0.0)
-            is_best = (curr_val > best_metric) if mode == "max" else (curr_val < best_metric)
-            
-            if is_best:
-                best_metric = curr_val
-                stopping_steps = 0
-                self.model.save_weights(self.best_weights_path)
-                self.logger.info(f"New Best {self.monitor}={curr_val:.6f}! Model Saved.")
-            else:
-                stopping_steps += 1
-                self.logger.info(f"No improvement. Patience {stopping_steps}/{patience}")
-                
-                # Decay LR on plateau
-                if kwargs.get("reduce_lr_on_plateau", True):
-                    old_lr = self.model.optimizer.param_groups[0]['lr']
-                    new_lr = self.model.lr_decay(factor=kwargs.get("lr_decay_factor", 0.1))
-                    self.logger.info(f"Decay LR: {old_lr:.6f} -> {new_lr:.6f}")
-                
-                if stopping_steps >= patience:
-                    self.logger.info("Early Stopping.")
-                    break
+            best_metric = self._run_training_phase(
+                phase_name="Training",
+                train_data=train_data,
+                valid_data=valid_data,
+                epochs=epochs,
+                patience=patience,
+                mode=mode,
+                use_negative_sampling=use_negative_sampling,
+                item_id_col=item_id_col,
+                best_metric=best_metric,
+                metrics=metrics,
+                **kwargs
+            )
+        self.logger.info(f"Training complete. Best {self.monitor}={best_metric:.6f}.")
 
         # Restore best weights
         if os.path.exists(self.best_weights_path):
@@ -272,8 +444,6 @@ class PrerankingStage(BaseStage):
         
         # Get positive item IDs
         pos_item_ids = batch_dict[item_id_col].cpu().numpy()
-        
-        # Sample negative items for each positive: [B, num_negatives]
         neg_item_ids = self.negative_sampler.sample_negatives_batch(
             pos_item_ids, self.num_negatives
         )
@@ -326,11 +496,22 @@ class PrerankingStage(BaseStage):
         else:
             raise ValueError(f"Unknown loss_type: {self.loss_type}")
             
-        # Add diversity loss if enabled (works for both wrapper and mixin models)
+        # Add per-user diversity loss if enabled
         if self.use_diversity_loss:
-            diversity_delta = compute_diversity_for_pairwise(self.model, batch_data, pos_scores)
+            diversity_theta = self.model_params.get('diversity_theta', 0.7)
+            diversity_lambda = getattr(self.model, '_diversity_lambda', self.model_params.get('diversity_lambda', 0.01))
+            diversity_delta = compute_diversity_loss_per_user(
+                model=self.model,
+                pos_inputs=batch_data,
+                neg_inputs=neg_batch_dict,
+                pos_scores=pos_scores,
+                neg_scores_flat=neg_scores_flat,
+                num_negatives=self.num_negatives,
+                theta=diversity_theta,
+                lambda_=diversity_lambda,
+            )
             loss = loss + diversity_delta
-        
+
         # Add regularization
         if hasattr(self.model, 'regularization_loss'):
             loss = loss + self.model.regularization_loss()
