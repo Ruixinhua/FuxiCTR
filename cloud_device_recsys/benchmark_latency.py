@@ -368,6 +368,10 @@ def parse_args():
                         help="Number of timed iterations")
     parser.add_argument("--model", type=str, default=None,
                         help="Model name override (default: from pipeline config)")
+    parser.add_argument("--preranking_embedding_dim", type=int, default=None,
+                        help="Embedding dim for cloud preranking & pure-cloud (default: from config)")
+    parser.add_argument("--reranking_embedding_dim", type=int, default=4,
+                        help="Embedding dim for on-device reranking (default: 4, smaller model)")
     return parser.parse_args()
 
 
@@ -430,16 +434,29 @@ def main():
     
     # Get model config
     preranking_config = pipeline_config.get("stages", {}).get("preranking", {})
-    model_params = preranking_config.get("model_params", {}).copy()
-    model_params["gpu"] = args.gpu
+    cloud_model_params = preranking_config.get("model_params", {}).copy()
+    cloud_model_params["gpu"] = args.gpu
     model_name = args.model or preranking_config.get("model", "DCNv3")
-    model_params["model"] = model_name
+    cloud_model_params["model"] = model_name
+    
+    # Override embedding dim if specified
+    if args.preranking_embedding_dim is not None:
+        cloud_model_params["embedding_dim"] = args.preranking_embedding_dim
+    
+    # Device reranking uses a smaller model (smaller embedding_dim)
+    device_model_params = cloud_model_params.copy()
+    device_model_params["embedding_dim"] = args.reranking_embedding_dim
+    
+    cloud_emb_dim = cloud_model_params.get("embedding_dim", 16)
+    device_emb_dim = device_model_params["embedding_dim"]
     
     output_dir = "/tmp/benchmark_latency"
     os.makedirs(output_dir, exist_ok=True)
     
     logger.info(f"Model: {model_name}")
     logger.info(f"Dataset: {args.dataset_id}")
+    logger.info(f"Cloud embedding_dim: {cloud_emb_dim}")
+    logger.info(f"Device embedding_dim: {device_emb_dim}")
     logger.info(f"Retrieval candidates: {args.retrieval_candidates}")
     logger.info(f"Preranking top-K: {args.preranking_top_k}")
     logger.info(f"Warmup: {args.warmup}, Repeats: {args.repeats}")
@@ -448,37 +465,37 @@ def main():
     # Build 3 models
     # ===================================================================
     
-    # 1. Cloud Preranking Model (FG1 + FG2)
-    logger.info("Building Cloud Preranking model (FG1 + FG2)...")
+    # 1. Cloud Preranking Model (FG1 + FG2) — embedding_dim from config
+    logger.info(f"Building Cloud Preranking model (FG1 + FG2, emb_dim={cloud_emb_dim})...")
     preranking_model, preranking_fm = build_stage_model(
         feature_map=feature_map,
         fg_manager=fg_manager,
         allowed_groups=[FeatureGroup.FG1, FeatureGroup.FG2],
-        model_params=model_params,
+        model_params=cloud_model_params,
         output_dir=os.path.join(output_dir, "preranking"),
         model_name=model_name,
     )
     logger.info(f"  Features: {len(preranking_fm.features)} ({sorted(preranking_fm.features.keys())})")
     
-    # 2. Device Reranking Model (FG1 + FG2 + FG3) — small candidate set
-    logger.info("Building Device Reranking model (FG1 + FG2 + FG3)...")
+    # 2. Device Reranking Model (FG1 + FG2 + FG3) — smaller embedding_dim for on-device
+    logger.info(f"Building Device Reranking model (FG1 + FG2 + FG3, emb_dim={device_emb_dim})...")
     reranking_model, reranking_fm = build_stage_model(
         feature_map=feature_map,
         fg_manager=fg_manager,
         allowed_groups=[FeatureGroup.FG1, FeatureGroup.FG2, FeatureGroup.FG3],
-        model_params=model_params,
+        model_params=device_model_params,
         output_dir=os.path.join(output_dir, "reranking"),
         model_name=model_name,
     )
     logger.info(f"  Features: {len(reranking_fm.features)} ({sorted(reranking_fm.features.keys())})")
     
-    # 3. Pure-Cloud Full Model (FG1 + FG2 + FG3) — large candidate set
-    logger.info("Building Pure-Cloud Full model (FG1 + FG2 + FG3)...")
+    # 3. Pure-Cloud Full Model (FG1 + FG2 + FG3) — same embedding_dim as cloud
+    logger.info(f"Building Pure-Cloud Full model (FG1 + FG2 + FG3, emb_dim={cloud_emb_dim})...")
     pure_cloud_model, pure_cloud_fm = build_stage_model(
         feature_map=feature_map,
         fg_manager=fg_manager,
         allowed_groups=[FeatureGroup.FG1, FeatureGroup.FG2, FeatureGroup.FG3],
-        model_params=model_params,
+        model_params=cloud_model_params,
         output_dir=os.path.join(output_dir, "pure_cloud"),
         model_name=model_name,
     )
