@@ -287,10 +287,14 @@ Ali_CCP:
         '150_14': '210'
 
     # FG3: Device-only Privacy Features
-    - name: ['101', '121', '122', '124', '125', '126', '127', '128', '129']
+    - name: ['121', '122', '124', '125', '126', '127', '128', '129']
       type: categorical
       dtype: int
       feature_group: FG3
+    - name: '101'
+      type: categorical
+      dtype: int
+      feature_group: drop
 
   # -----------------------------------------
   # Preprocessing Options

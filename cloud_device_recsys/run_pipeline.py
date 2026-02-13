@@ -20,6 +20,7 @@ Usage:
 
 """
 
+import glob
 import os
 import copy
 import sys
@@ -436,6 +437,7 @@ def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, fg_m
     return metrics, valid_output, test_output
 
 def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_manager=None, logger=None,
+                        prev_output_path=None,
                         prev_output_valid=None, prev_output_test=None, run_test=True,
                         preranking_model=None, stages=None):
     if logger is None:
@@ -518,18 +520,18 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_man
                 preranking_stage_obj = stages['preranking']()
                 preranking_stage_obj.build_model()
                 # Find best weights in preranking output dir
-                import glob
-                preranking_model_dir = os.path.join(
-                    preranking_stage_obj.output_dir,
-                    preranking_stage_obj.feature_map.dataset_id
-                )
-                weight_files = glob.glob(os.path.join(preranking_model_dir, '*.model'))
-                if weight_files:
-                    # Use the most recent weight file
-                    best_weights = max(weight_files, key=os.path.getmtime)
-                    preranking_stage_obj.model.load_weights(best_weights)
-                    reranking_stage.set_cloud_score_teacher(preranking_stage_obj.model)
-                    logger.info(f"[Reranking] Loaded preranking teacher from {best_weights}")
+                output_dirs = [preranking_stage_obj.output_dir]
+                if prev_output_path:
+                    output_dirs.append(os.path.join(os.path.dirname(os.path.abspath(prev_output_path)), 'preranking'))
+                for preranking_model_dir in output_dirs:
+                    weight_files = glob.glob(os.path.join(preranking_model_dir, preranking_stage_obj.feature_map.dataset_id, '*.model'))
+                    if weight_files:
+                        # Use the most recent weight file
+                        best_weights = max(weight_files, key=os.path.getmtime)
+                        preranking_stage_obj.model.load_weights(best_weights)
+                        reranking_stage.set_cloud_score_teacher(preranking_stage_obj.model)
+                        logger.info(f"[Reranking] Loaded preranking teacher from {best_weights}")
+                        break
                 else:
                     logger.warning("[Reranking] No preranking model weights found. Cloud score disabled for training.")
             else:
@@ -804,6 +806,7 @@ def main():
         d_metrics = run_reranking_stage(
             reranking_stage, pipeline_config, dataset_config, fg_manager=fg_manager,
             logger=logger,
+            prev_output_path=args.prev_output_path,
             prev_output_valid=prev_output_valid, prev_output_test=prev_output_test,
             run_test=bool(args.run_reranking_test),
             stages=stages
