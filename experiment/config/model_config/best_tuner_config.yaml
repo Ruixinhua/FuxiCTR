@@ -21,7 +21,7 @@ PNNCL_taobaoad_x1_taobaoad_x1_006_070_010_001_MTOnly_032_0f03eba6:
     mapping_feature_type: sparse
     metrics: [logloss, AUC]
     model: PNNCL
-    model_root: /scratch/dliu2/FuxiCTR/slurm_logs/logs/
+    model_root: logs/
     monitor: {AUC: 1, logloss: -1}
     monitor_mode: max
     net_dropout: 0
@@ -68,7 +68,7 @@ PNNCL_taobaoad_x1_006_070_010_001_MTOnly_031_fdd0c327:
     mapping_feature_type: sparse
     metrics: [logloss, AUC]
     model: PNNCL
-    model_root: /scratch/dliu2/FuxiCTR/slurm_logs/PNN_taobaoad_x1_MTOnly/
+    model_root: PNN_taobaoad_x1_MTOnly/
     monitor: {AUC: 1, logloss: -1}
     monitor_mode: max
     net_dropout: 0
@@ -115,7 +115,7 @@ PNNCL_taobaoad_x1_006_070_010_001_MTOnly_001_c25a4e9a:
     mapping_feature_type: sparse
     metrics: [logloss, AUC]
     model: PNNCL
-    model_root: /scratch/dliu2/FuxiCTR/slurm_logs/PNN_taobaoad_x1_MTOnly/
+    model_root: PNN_taobaoad_x1_MTOnly/
     monitor: {AUC: 1, logloss: -1}
     monitor_mode: max
     net_dropout: 0
@@ -165,7 +165,7 @@ PNNCL_taobaoad_x1_taobaoad_x1_006_070_010_001_CLOnly_kd_009_243d3898:
     mask_type: Personalisation
     metrics: [logloss, AUC]
     model: PNNCL
-    model_root: /scratch/dliu2/FuxiCTR/slurm_logs/logs/
+    model_root: logs/
     monitor: {AUC: 1, logloss: -1}
     monitor_mode: max
     net_dropout: 0
@@ -209,7 +209,7 @@ PNNCL_taobaoad_x1_taobaoad_x1_006_070_010_001_CLOnly_filed_003_9dfa0fcf:
     mask_type: Personalisation
     metrics: [logloss, AUC]
     model: PNNCL
-    model_root: /scratch/dliu2/FuxiCTR/slurm_logs/logs/
+    model_root: logs/
     monitor: {AUC: 1, logloss: -1}
     monitor_mode: max
     net_dropout: 0
@@ -252,7 +252,7 @@ PNNCL_taobaoad_x1_taobaoad_x1_006_070_010_001_CLOnly_filed_002_7475ceff:
     mask_type: Personalisation
     metrics: [logloss, AUC]
     model: PNNCL
-    model_root: /scratch/dliu2/FuxiCTR/slurm_logs/logs/
+    model_root: slurm_logs/logs/
     monitor: {AUC: 1, logloss: -1}
     monitor_mode: max
     net_dropout: 0
@@ -295,7 +295,7 @@ PNNCL_taobaoad_x1_taobaoad_x1_006_070_010_001_CLOnly_group_001_7475ceff:
     mask_type: Personalisation
     metrics: [logloss, AUC]
     model: PNNCL
-    model_root: /scratch/dliu2/FuxiCTR/slurm_logs/logs/
+    model_root: slurm_logs/logs/
     monitor: {AUC: 1, logloss: -1}
     monitor_mode: max
     net_dropout: 0
@@ -338,7 +338,7 @@ PNNCL_taobaoad_x1_006_070_010_001_CLOnly_group_001_c7b94d8c:
     mask_type: Personalisation
     metrics: [logloss, AUC]
     model: PNNCL
-    model_root: /scratch/dliu2/FuxiCTR/slurm_logs/PNNCL_CLOnly_group/
+    model_root: slurm_logs/PNNCL_CLOnly_group/
     monitor: {AUC: 1, logloss: -1}
     monitor_mode: max
     net_dropout: 0
@@ -422,7 +422,7 @@ PNNCL_taobaoad_x1_taobaoad_x1_006_070_010_001_CLOnly_kd_012_efb1b40f:
     mask_type: Personalisation
     metrics: [logloss, AUC]
     model: PNNCL
-    model_root: /scratch/dliu2/FuxiCTR/slurm_logs/logs/
+    model_root: slurm_logs/logs/
     monitor: {AUC: 1, logloss: -1}
     monitor_mode: max
     net_dropout: 0
@@ -466,7 +466,7 @@ PNNCL_taobaoad_x1_taobaoad_x1_006_070_010_001_CLOnly_kd_003_2fa3a146:
     mask_type: Personalisation
     metrics: [logloss, AUC]
     model: PNNCL
-    model_root: /scratch/dliu2/FuxiCTR/slurm_logs/logs/
+    model_root: slurm_logs/logs/
     monitor: {AUC: 1, logloss: -1}
     monitor_mode: max
     net_dropout: 0
@@ -557,7 +557,7 @@ PNNCL_taobaoad_x1_006_070_010_001_MTCL_006_8568a61d:
     mask_type: Personalisation
     metrics: [logloss, AUC]
     model: PNNCL
-    model_root: /scratch/dliu2/FuxiCTR/slurm_logs/PNNCL_taobaoad_x1_MTCL/
+    model_root: slurm_logs/PNNCL_taobaoad_x1_MTCL/
     monitor: {AUC: 1, logloss: -1}
     monitor_mode: max
     net_dropout: 0
@@ -915,7 +915,7 @@ PNNCL_criteo_private_ad_cvr_002_69a1df28_MTOnly_006_7a250b05:
     mapping_feature_type: sparse
     metrics: [logloss, AUC]
     model: PNNCL
-    model_root: /scratch/dliu2/FuxiCTR/slurm_logs/PNNCL_CriteoP_MTOnly/
+    model_root: slurm_logs/PNNCL_CriteoP_MTOnly/
     monitor: {AUC: 1, logloss: -1}
     monitor_mode: max
     net_dropout: 0.2
@@ -961,7 +961,7 @@ PNNCL_criteo_private_ad_cvr_002_69a1df28_MTOnly_001_0519e046:
     mapping_feature_type: sparse
     metrics: [logloss, AUC]
     model: PNNCL
-    model_root: /scratch/dliu2/FuxiCTR/slurm_logs/PNNCL_CriteoP_MTOnly/
+    model_root: slurm_logs/PNNCL_CriteoP_MTOnly/
     monitor: {AUC: 1, logloss: -1}
     monitor_mode: max
     net_dropout: 0.2

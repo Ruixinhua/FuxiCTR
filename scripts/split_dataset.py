@@ -165,10 +165,10 @@ def split_dataset_chunked(input_file, output_dir, num_parts=4, chunk_size=100000
 
 def main():
     # 待分割文件的路径
-    input_file = "/scratch/dliu2/FuxiCTR/data/mask_merge/taobaoad_x1_050_050_maskmerge/train.parquet"
+    input_file = "data/mask_merge/taobaoad_x1_050_050_maskmerge/train.parquet"
     
     # 输出目录（在相同目录下创建split子目录）
-    output_dir = "/scratch/dliu2/FuxiCTR/data/mask_merge/taobaoad_x1_050_050_maskmerge/train/"
+    output_dir = "data/mask_merge/taobaoad_x1_050_050_maskmerge/train/"
 
     chunk_size = 10000000 # 每次读取1000万行
     num_parts = 8      # 划分为8个子数据集

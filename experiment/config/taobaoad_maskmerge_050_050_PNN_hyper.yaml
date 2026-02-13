@@ -35,7 +35,7 @@ model_config:
     PNN_taobaoad_x1_050_050_maskmerge_hyper:
         model: PNN
         model_id: PNN_taobaoad_maskmerge_hyper
-        model_root: /scratch/dliu2/FuxiCTR/slurm_logs/PNN_taobaoad_maskmerge_hyper/
+        model_root: PNN_taobaoad_maskmerge_hyper/
         dataset_id: taobaoad_x1_050_050_maskmerge
         debug_mode: false
         metrics: [logloss, AUC]

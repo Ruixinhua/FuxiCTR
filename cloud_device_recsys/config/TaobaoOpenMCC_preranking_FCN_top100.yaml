@@ -35,6 +35,6 @@ stages:
     metrics: ["nDCG", "Recall"]
 
 output:
-  root: "/scratch/dliu2/FuxiCTR/outputs"
+  root: "outputs"
   save_intermediate: true
   save_csv: true

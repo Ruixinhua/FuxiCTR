@@ -43,13 +43,13 @@ avazu_x4_050_050_maskmerge:
     label_col: {dtype: float, name: click}
     feature_group_id: is_personalization
     min_categr_count: 2
-    test_data: /scratch/dliu2/FuxiCTR/datasets/Avazu/Avazu_x4/test.csv
-    train_data: /scratch/dliu2/FuxiCTR/datasets/Avazu/Avazu_x4/train.csv
-    valid_data: /scratch/dliu2/FuxiCTR/datasets/Avazu/Avazu_x4/valid.csv
+    test_data: datasets/Avazu/Avazu_x4/test.csv
+    train_data: datasets/Avazu/Avazu_x4/train.csv
+    valid_data: datasets/Avazu/Avazu_x4/valid.csv
 
 avazu_x4_080_010_per_all_mixed:
     data_format: parquet
-    data_root: /Users/dairui/PycharmProjects/FuxiCTR/data/Avazu
+    data_root: data/Avazu
     feature_cols:
     - {active: false, dtype: str, name: id, type: categorical}
     # 非个性化分类特征 Ad + context: 16+3=19
@@ -68,13 +68,13 @@ avazu_x4_080_010_per_all_mixed:
     label_col: {dtype: float, name: click}
     feature_group_id: is_personalization
     min_categr_count: 2
-    test_data: /scratch/dliu2/FuxiCTR/datasets/Avazu/Avazu_x4/test.csv
-    train_data: /scratch/dliu2/FuxiCTR/datasets/Avazu/Avazu_x4/train.csv
-    valid_data: /scratch/dliu2/FuxiCTR/datasets/Avazu/Avazu_x4/valid.csv
+    test_data: datasets/Avazu/Avazu_x4/test.csv
+    train_data: datasets/Avazu/Avazu_x4/train.csv
+    valid_data: datasets/Avazu/Avazu_x4/valid.csv
 
 taobaoad_x1:
     data_format: parquet
-    data_root: /Users/dairui/PycharmProjects/FuxiCTR/data/Taobao
+    data_root: data/Taobao
     feature_cols:
     - {active: true, dtype: int, name: group_id, preprocess: copy_from(userid), remap: false,
         type: meta}
@@ -98,9 +98,9 @@ taobaoad_x1:
     label_col: {dtype: float, name: clk}
 #      feature_group_id: is_personalization
     min_categr_count: 10
-    test_data: /scratch/dliu2/FuxiCTR/datasets/TaobaoAd/processed/test.csv
-    train_data: /scratch/dliu2/FuxiCTR/datasets/TaobaoAd/processed/train.csv
-    valid_data: /scratch/dliu2/FuxiCTR/datasets/TaobaoAd/processed/valid.csv
+    test_data: datasets/TaobaoAd/processed/test.csv
+    train_data: datasets/TaobaoAd/processed/train.csv
+    valid_data: datasets/TaobaoAd/processed/valid.csv
 
 taobao_mcc_x1:
 
@@ -158,7 +158,7 @@ taobao_mcc_x1:
 #  2. 或者使用 user 侧特征（user_os, user_gender, user_age_level 等）代替 user_id
 
     data_format: csv
-    data_root: /scratch/dliu2/FuxiCTR/data/TaobaoMCC/
+    data_root: data/TaobaoMCC/
     feature_cols:
     # User ID - 可作为 group_id 用于 gAUC 评估
     - {active: true, dtype: int, name: user_id, type: categorical}
@@ -204,6 +204,6 @@ taobao_mcc_x1:
     - {active: true, dtype: float, name: score, type: numeric}
     label_col: {dtype: float, name: label}
     min_categr_count: 1
-    train_data: /scratch/dliu2/FuxiCTR/datasets/TaobaoOpenMCC/train.csv
-    valid_data: /scratch/dliu2/FuxiCTR/datasets/TaobaoOpenMCC/valid.csv
-    test_data: /scratch/dliu2/FuxiCTR/datasets/TaobaoOpenMCC/test.csv
+    train_data: datasets/TaobaoOpenMCC/train.csv
+    valid_data: datasets/TaobaoOpenMCC/valid.csv
+    test_data: datasets/TaobaoOpenMCC/test.csv

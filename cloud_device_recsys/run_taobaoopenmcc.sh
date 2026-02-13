@@ -1,5 +1,5 @@
 export PYTHONBUFFERED=1
-output_root=/scratch/dliu2/FuxiCTR/outputs
+output_root=outputs
 cloud_device_recsys_dir=~/FuxiCTR/cloud_device_recsys
 cd ~/FuxiCTR/cloud_device_recsys
 
