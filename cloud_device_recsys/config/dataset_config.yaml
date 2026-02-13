@@ -15,8 +15,6 @@ TaobaoOpenMCC:
   # -----------------------------------------
   # Processed Data Settings (Server paths)
   # -----------------------------------------
-#  processed_data_root: "/scratch/dliu2/FuxiCTR/data/TaobaoOpenMCC"
-#  processed_data_root: "/scratch/dliu2/FuxiCTR/processed/TaobaoOpenMCC"
   processed_data_root: ""
   processed_data_format: "parquet"
   # Default outputs: train.parquet, valid.parquet, test.parquet, feature_map.json, feature_vocab.json
@@ -101,11 +99,14 @@ TaobaoOpenMCC:
         ipv_item_bc_type_seq: cand_item_bc_type
 
     # FG3: Device-only Privacy Features
-    - name: [user_id, user_os, user_gender, user_age_level, user_purchase_level, user_hour]
+    - name: [user_os, user_gender, user_age_level, user_purchase_level, user_hour]
       type: categorical
       dtype: int
       feature_group: FG3
-
+    - name: user_id
+      type: categorical
+      dtype: int
+      feature_group: drop
 
 # =============================================================================
 # TaobaoAd Dataset
