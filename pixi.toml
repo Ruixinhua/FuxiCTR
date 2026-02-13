@@ -1,5 +1,4 @@
 [workspace]
-authors = ["Moeta Yuko <loli@yuko.moe>"]
 channels = ["conda-forge"]
 name = "FuxiCTR"
 platforms = ["linux-64", "win-64"]
