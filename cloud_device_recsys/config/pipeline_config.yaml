@@ -44,12 +44,12 @@ stages:
       max_gradient_norm: 5.0         # Gradient
       dropout: 0.1                   # Dropout for
       learning_rate: 0.001
+      monitor: "Recall@1000"
 
     training:
       epochs: 10
       batch_size: 4096
       optimizer: "adam"
-      monitor: "Recall@1000"
 
     metrics: ["Recall"]
 
@@ -66,12 +66,12 @@ stages:
       din_target_field: "cand_item_id"
       din_sequence_field: "ipv_item_id_seq"
       learning_rate: 0.001
+      monitor: "Recall@100"
 
     training:
       epochs: 10
       batch_size: 2048
       optimizer: "adam"
-      monitor: "Recall@100"
 
     metrics: ["nDCG", "Recall", "MRR", "gAUC"]
 
@@ -90,6 +90,8 @@ stages:
       din_sequence_field: "ipv_item_id_seq"
       max_model_size_kb: 500  # Device model size constraint
       learning_rate: 0.001
+      monitor: "Recall@1"
+      use_cloud_score: true
 
     training:
       epochs: 10

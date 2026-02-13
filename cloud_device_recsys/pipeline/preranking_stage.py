@@ -88,9 +88,7 @@ class PrerankingStage(BaseStage):
         self.negative_sampler: Optional[NegativeSampler] = None
         # Item features storage for lookups during evaluation/processing
         self.item_features_df = None
-        # MMR inference reranking parameters
-        self.mmr_lambda = model_params.get('mmr_lambda', 0.5)
-    
+
     def load_item_features(self, item_pool_path: str):
         """Load item features from parquet file for inference lookup"""
         import pandas as pd

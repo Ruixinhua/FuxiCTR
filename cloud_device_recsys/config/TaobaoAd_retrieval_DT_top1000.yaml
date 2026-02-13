@@ -12,30 +12,31 @@ stages:
     model: "DualTowerRetrieval"
     features: ["FG1", "FG2"]
     top_k: 1000
+    hard_negative_top_k: 100
     model_params:  # Best params from hyperparameter tuning
       num_negatives: 0
 #      task: regression
       loss_type: "bpr"   # margin/bpr/softmax
       metrics_k: [1000, 5000, 10000]
       embedding_dim: 16
-      use_feature_encoder: 0
+      use_feature_encoder: 1
       use_user_transformer: 1
       user_transformer_layers: 1
       use_item_transformer: 0
       item_transformer_layers: 0
-      user_tower_layers: [512, 256, 128, 64]
-      item_tower_layers: [512, 256, 128, 64]
+      user_tower_layers: [128, 32]
+      item_tower_layers: [128, 32]
       embedding_regularizer: 1.0e-5
       net_regularizer: 1.0e-5
       max_gradient_norm: 5.0
       dropout: 0.1
       learning_rate: 0.001
+      monitor: "Recall@1000"
 
     training:
       epochs: 10
       batch_size: 4096
       optimizer: "adam"
-      monitor: "Recall@1000"
     metrics: ["Recall"]
 
 output:

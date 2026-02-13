@@ -7,7 +7,7 @@ Re-ranking Stage Implementation
 
 This module wraps the DeviceReranker model as a pipeline stage.
 """
-
+import torch
 import os
 import csv
 import numpy as np
@@ -107,6 +107,10 @@ class RerankingStage(BaseStage):
         The teacher model (pre-ranking, FG1+FG2 only) provides cloud_score
         as a numeric feature for the reranking model. This does NOT violate
         privacy: the teacher only uses cloud-available features.
+        
+        Note: The teacher keeps its sigmoid activation. We apply torch.logit()
+        during injection to recover discriminative raw logits from the
+        compressed sigmoid output (~0.9999).
         """
         self.cloud_score_teacher = teacher_model
         self.cloud_score_teacher.eval()
@@ -165,8 +169,6 @@ class RerankingStage(BaseStage):
         Returns:
             Training metrics
         """
-        import torch
-        
         if self.model is None:
             self.build_model()
             
@@ -231,16 +233,19 @@ class RerankingStage(BaseStage):
                 
                 for batch_data in train_data:
                     if use_negative_sampling:
-                        loss = self._train_step_with_negatives(batch_data, item_id_col, torch)
+                        loss = self._train_step_with_negatives(batch_data, item_id_col)
                     else:
                         # Inject cloud_score for standard training (non-negative-sampling)
                         if self.use_cloud_score and self.cloud_score_teacher is not None:
                             batch_dict = dict(batch_data)
                             with torch.no_grad():
                                 teacher_out = self.cloud_score_teacher.forward(batch_dict)
-                                # Logit transform: spread compressed sigmoid scores
-                                batch_dict['cloud_score'] = torch.logit(
+                                # Logit + z-score: recover discrimination, control magnitude
+                                logit_score = torch.logit(
                                     teacher_out['y_pred'].detach().squeeze(-1), eps=1e-7
+                                )
+                                batch_dict['cloud_score'] = (
+                                    (logit_score - logit_score.mean()) / (logit_score.std() + 1e-8)
                                 )
                             loss = self.model.train_step(batch_dict)
                         else:
@@ -300,7 +305,7 @@ class RerankingStage(BaseStage):
         
         return metrics
     
-    def _train_step_with_negatives(self, batch_data, item_id_col: str, torch):
+    def _train_step_with_negatives(self, batch_data, item_id_col: str):
         """
         Single training step with negative sampling for pairwise ranking.
         
@@ -310,8 +315,7 @@ class RerankingStage(BaseStage):
         Args:
             batch_data: Positive example batch
             item_id_col: Name of item ID column
-            torch: Torch module reference
-            
+
         Returns:
             Loss tensor
         """
@@ -326,27 +330,11 @@ class RerankingStage(BaseStage):
             pos_item_ids, self.num_negatives
         )
         
-        # === Cloud Score Injection for positive examples ===
-        if self.use_cloud_score and self.cloud_score_teacher is not None:
-            with torch.no_grad():
-                teacher_pos_out = self.cloud_score_teacher.forward(batch_dict)
-                # Logit transform: spread compressed sigmoid scores
-                batch_dict['cloud_score'] = torch.logit(
-                    teacher_pos_out['y_pred'].detach().squeeze(-1), eps=1e-7
-                )
-        
-        # Get positive predictions (batch_dict now includes cloud_score if enabled)
-        pos_output = self.model.forward(batch_dict)
-        pos_scores = pos_output['y_pred']  # [B, 1]
-        
-        # === Optimized: Batch all negatives into single forward pass ===
+        # === Build batched negative dict: repeat user features, use negative item features ===
         # Flatten: [B, num_neg] -> [B * num_neg]
         neg_ids_flat = neg_item_ids.reshape(-1)
-        
-        # Get features for all negatives at once using the optimized method
         neg_features = self.negative_sampler.get_features_by_ids(neg_ids_flat)
         
-        # Build batched negative dict: repeat user features, use negative item features
         neg_batch_dict = {}
         for key, val in batch_dict.items():
             if key == item_id_col:
@@ -363,21 +351,31 @@ class RerankingStage(BaseStage):
                 # Repeat user features along batch dimension: [B, ...] -> [B * num_neg, ...]
                 if hasattr(val, 'to'):
                     val = val.to(self.model.device)
-                    # Repeat each element num_negatives times along batch dim (dim=0)
                     neg_batch_dict[key] = val.repeat_interleave(self.num_negatives, dim=0)
                 else:
                     neg_batch_dict[key] = val
         
-        # === Cloud Score Injection for negative examples ===
+        # === Cloud Score Injection (positive + negative, jointly normalized) ===
         if self.use_cloud_score and self.cloud_score_teacher is not None:
             with torch.no_grad():
+                teacher_pos_out = self.cloud_score_teacher.forward(batch_dict)
+                pos_logit = torch.logit(
+                    teacher_pos_out['y_pred'].detach().squeeze(-1), eps=1e-7
+                )
                 teacher_neg_out = self.cloud_score_teacher.forward(neg_batch_dict)
-                # Logit transform: spread compressed sigmoid scores
-                neg_batch_dict['cloud_score'] = torch.logit(
+                neg_logit = torch.logit(
                     teacher_neg_out['y_pred'].detach().squeeze(-1), eps=1e-7
                 )
+                # Joint z-score normalization (pos + neg for consistent scale)
+                all_logits = torch.cat([pos_logit, neg_logit])
+                mean, std = all_logits.mean(), all_logits.std() + 1e-8
+                batch_dict['cloud_score'] = (pos_logit - mean) / std
+                neg_batch_dict['cloud_score'] = (neg_logit - mean) / std
         
-        # Single forward pass for all negatives
+        # Forward passes
+        pos_output = self.model.forward(batch_dict)
+        pos_scores = pos_output['y_pred']  # [B, 1]
+        
         neg_output = self.model.forward(neg_batch_dict)
         neg_scores_flat = neg_output['y_pred']  # [B * num_neg, 1]
         
