@@ -1,40 +1,51 @@
 # Exp 1: Baseline
-dataset_id: "TaobaoOpenMCC"
-dataset_config: "./config/dataset_config.yaml"
-prev_output_path: "/scratch/dliu2/FuxiCTR/outputs/TaobaoOpenMCC_preranking_DINRanker_top100_neg/stage_outputs"
 seed: 2024
 gpu: 0
 debug:
   n_rows: null
 
-candidates:
-  preranking:
-    source: "retrieval_candidates.parquet"
-    top_k: 100
-    output: "preranking_candidates.parquet"
-
 stages:
-  reranking:
+  preranking:
     enabled: true
-    model: "DINRanker"
-    features: ["FG1", "FG2", "FG3"]
+    model: "PNN"
+    features: ["FG1", "FG2"]
     top_k: 100
     model_params:
       num_negatives: 4
       loss_type: "bpr"
       use_diversity_loss: 0
       use_feature_encoder: 1
-      metrics_k: [10, 50, 100]
+      metrics_k: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 50, 100]
+      embedding_dim: 16
+      learning_rate: 0.001
+      embedding_regularizer: 1.0e-5
+      net_regularizer: 1.0e-5
+      max_gradient_norm: 5.0
+      hidden_units: [64, 32]
+      batch_norm: False
+      monitor: "Recall@100"
+
+  reranking:
+    enabled: true
+    model: "PNN"
+    features: ["FG1", "FG2", "FG3"]
+    top_k: 10
+    model_params:
+      num_negatives: 4
+      loss_type: "bpr"
+      use_cloud_score: 1
+      use_feature_encoder: 1
+      metrics_k: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 50, 100]
       embedding_dim: 4
       hidden_units: [128, 64]
       embedding_regularizer: 1.0e-5
       net_regularizer: 1.0e-5
       max_gradient_norm: 5.0
       learning_rate: 0.001
+      monitor: "Recall@1"
 
     training:
       epochs: 10
-      monitor: "Recall@100"
       batch_size: 2048
       optimizer: "adam"
     metrics: ["nDCG", "Recall"]

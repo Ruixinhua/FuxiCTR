@@ -1,6 +1,5 @@
 # Exp 1: Baseline
 dataset_id: "TaobaoOpenMCC"
-dataset_config: "/home/people/dliu2/FuxiCTR/cloud_device_recsys/config/dataset_config.yaml"
 seed: 2024
 gpu: 0
 debug:
@@ -16,7 +15,7 @@ stages:
       num_negatives: 4
       loss_type: "bpr"
       use_diversity_loss: 0
-      use_feature_encoder: 0
+      use_feature_encoder: 1
       metrics_k: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 50, 100]
       embedding_dim: 16
       attention_hidden_units: [512, 256, 128, 64]
@@ -25,9 +24,9 @@ stages:
       net_regularizer: 1.0e-5
       max_gradient_norm: 5.0
       learning_rate: 0.001
+      monitor: "Recall@100"
 
     training:
-      monitor: "Recall@100"
       epochs: 10
       batch_size: 4096
       optimizer: "adam"
