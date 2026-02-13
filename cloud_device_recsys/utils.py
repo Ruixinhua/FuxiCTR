@@ -874,10 +874,16 @@ def process_and_rank_candidates(
     cloud_score_array = None
     if inject_cloud_score and all_cloud_scores is not None:
         cloud_score_array = all_cloud_scores[valid_mask].astype(np.float32)
-        # Logit transform: spread compressed sigmoid scores (consistent with training)
+        # Logit transform: undo sigmoid to recover discriminative logits
+        # Pre-ranking model outputs sigmoid probabilities (~0.9999 for most items).
+        # During training, we apply torch.logit() on teacher output. Here we do
+        # the same with numpy to keep training/inference cloud_score consistent.
         eps = 1e-7
         cloud_score_array = np.clip(cloud_score_array, eps, 1.0 - eps)
         cloud_score_array = np.log(cloud_score_array / (1.0 - cloud_score_array))
+        # Z-score normalization: prevents extreme logit values from saturating the model
+        cs_mean, cs_std = cloud_score_array.mean(), cloud_score_array.std() + 1e-8
+        cloud_score_array = (cloud_score_array - cs_mean) / cs_std
         if not cloud_score_array.flags['C_CONTIGUOUS']:
             cloud_score_array = np.ascontiguousarray(cloud_score_array)
         logger.info(f"Injecting cloud_score feature ({len(cloud_score_array)} items, "
