@@ -1,0 +1,57 @@
+# Exp 1: Baseline
+dataset_id: "Ali_CCP"
+dataset_config: "./config/dataset_config.yaml"
+seed: 2024
+gpu: 0
+debug:
+  n_rows: null
+
+stages:
+  preranking:
+    enabled: true
+    model: "PNN"
+    features: ["FG1", "FG2"]
+    top_k: 100
+    model_params:
+      num_negatives: 4
+      loss_type: "bpr"
+      use_feature_encoder: 1
+      metrics_k: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 50, 100]
+      embedding_dim: 16
+      num_deep_cross_layers: 1
+      num_shallow_cross_layers: 1
+      num_heads: 1
+      embedding_regularizer: 1.0e-5
+      net_regularizer: 1.0e-5
+      max_gradient_norm: 5.0
+      learning_rate: 0.001
+
+  reranking:
+    enabled: true
+    model: "DCNv3"
+    features: ["FG1", "FG2", "FG3"]
+    top_k: 10
+    model_params:
+      num_negatives: 4
+      loss_type: "bpr"
+      use_cloud_score: 1
+      use_feature_encoder: 1
+      metrics_k: [1, 10]
+      embedding_dim: 4
+      hidden_units: [128, 64]
+      embedding_regularizer: 1.0e-5
+      net_regularizer: 1.0e-5
+      max_gradient_norm: 5.0
+      learning_rate: 0.0001
+      monitor: "Recall@1"
+
+    training:
+      epochs: 10
+      batch_size: 2048
+      optimizer: "adam"
+    metrics: ["nDCG", "Recall"]
+
+output:
+  root: "/scratch/dliu2/FuxiCTR/outputs"
+  save_intermediate: true
+  save_csv: true
