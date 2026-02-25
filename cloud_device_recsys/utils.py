@@ -345,7 +345,8 @@ def compute_ranking_metrics(
     scores: np.ndarray,
     labels: np.ndarray,
     metrics_k: List[int] = None,
-    pre_sorted: bool = False
+    pre_sorted: bool = False,
+    top_k_for_metrics: Optional[int] = None,
 ) -> Dict[str, float]:
     """
     Compute ranking metrics for a single query/user.
@@ -353,8 +354,10 @@ def compute_ranking_metrics(
     Metrics computed:
         - Recall@K: Proportion of relevant items in top-K
         - nDCG@K: Normalized Discounted Cumulative Gain at K
-        - MRR: Mean Reciprocal Rank (1 / rank of first relevant item)
-        - gAUC: Group AUC (AUC computed for this single user's predictions)
+        - MRR: Mean Reciprocal Rank over all items
+        - gAUC: Group AUC over all items
+        - MRR@<top_k_for_metrics>: MRR restricted to top-K items
+        - gAUC@<top_k_for_metrics>: Group AUC restricted to top-K items
     
     Args:
         scores: Predicted scores for each item (1D array/list)
@@ -364,6 +367,10 @@ def compute_ranking_metrics(
                     (e.g., with random tie-breaking from process_and_rank_candidates).
                     The function will skip re-sorting and use the input order as-is.
                     If False (default), uses pessimistic tie-breaking (positives ranked last among ties).
+        top_k_for_metrics: If set, additionally compute gAUC and MRR restricted to the top-K
+                           items (by score). Useful for aligning preranking evaluation (1000 items)
+                           with reranking evaluation (100 items). The suffix @K is appended to
+                           distinguish these from the full-pool metrics.
         
     Returns:
         Dict of metric names to values
@@ -376,52 +383,61 @@ def compute_ranking_metrics(
         # This is consistent with the candidate ranking in process_and_rank_candidates,
         # where ties are randomly ordered (stable sort preserves original input order).
         sorted_labels = labels
+        sorted_scores = scores
     else:
         # Sort by score descending with PESSIMISTIC tie-breaking:
         # When scores are tied, positive items (label=1) are ranked LAST among ties.
         sorted_indices = np.lexsort((labels, -scores))
         sorted_labels = labels[sorted_indices]
+        sorted_scores = scores[sorted_indices]
     
     true_relevant_count = np.sum(sorted_labels)
     if true_relevant_count == 0:
         return {}
     
     metrics = {}
-    
-    # ========== MRR: Mean Reciprocal Rank ==========
-    # Find the rank of the first relevant item (1-indexed)
-    first_relevant_positions = np.where(sorted_labels == 1)[0]
-    if len(first_relevant_positions) > 0:
-        first_relevant_rank = first_relevant_positions[0] + 1  # Convert to 1-indexed
-        metrics['MRR'] = 1.0 / first_relevant_rank
-    else:
-        metrics['MRR'] = 0.0
-    
-    # ========== gAUC: Group AUC ==========
-    # AUC for this single user/group
-    # Count pairs: (positive, negative) where positive has higher score
-    num_positive = int(true_relevant_count)
-    num_negative = len(labels) - num_positive
-    
-    if num_positive > 0 and num_negative > 0:
-        # Efficient AUC calculation using ranking
-        # For each positive sample, count how many negatives have lower scores
-        positive_scores = scores[labels == 1]
-        negative_scores = scores[labels == 0]
-        
-        # Count concordant pairs
+
+    def _compute_gauc(pos_scores, neg_scores):
+        """Concordant-pair AUC for one user."""
         concordant = 0
         ties = 0
-        for pos_score in positive_scores:
-            concordant += np.sum(negative_scores < pos_score)
-            ties += np.sum(negative_scores == pos_score)
-        
-        # AUC = (concordant + 0.5 * ties) / (num_positive * num_negative)
-        metrics['gAUC'] = (concordant + 0.5 * ties) / (num_positive * num_negative)
+        for ps in pos_scores:
+            concordant += np.sum(neg_scores < ps)
+            ties += np.sum(neg_scores == ps)
+        n_pos, n_neg = len(pos_scores), len(neg_scores)
+        if n_pos == 0 or n_neg == 0:
+            return 0.0
+        return (concordant + 0.5 * ties) / (n_pos * n_neg)
+
+    def _compute_mrr(lbl_array):
+        """1 / rank of first positive in label array (already sorted)."""
+        pos_positions = np.where(lbl_array == 1)[0]
+        if len(pos_positions) == 0:
+            return 0.0
+        return 1.0 / (pos_positions[0] + 1)
+
+    # ========== MRR & gAUC over ALL items ==========
+    metrics['MRR'] = _compute_mrr(sorted_labels)
+
+    num_positive = int(true_relevant_count)
+    num_negative = len(labels) - num_positive
+    if num_positive > 0 and num_negative > 0:
+        metrics['gAUC'] = _compute_gauc(
+            scores[labels == 1], scores[labels == 0]
+        )
     else:
-        # Cannot compute AUC without both positive and negative samples
         metrics['gAUC'] = 0.0
-    
+
+    # ========== MRR@K & gAUC@K restricted to top-K items ==========
+    if top_k_for_metrics is not None and top_k_for_metrics < len(sorted_labels):
+        k = top_k_for_metrics
+        topk_labels = sorted_labels[:k]
+        topk_scores = sorted_scores[:k]
+        metrics[f'MRR@{k}'] = _compute_mrr(topk_labels)
+        topk_pos = topk_scores[topk_labels == 1]
+        topk_neg = topk_scores[topk_labels == 0]
+        metrics[f'gAUC@{k}'] = _compute_gauc(topk_pos, topk_neg)
+
     # ========== Recall@K and nDCG@K ==========
     if metrics_k is None:
         metrics_k = []
@@ -708,6 +724,7 @@ def process_and_rank_candidates(
     logger: logging.Logger = None,
     inference_batch_size: int = 100000,
     inject_cloud_score: bool = False,
+    metrics_top_k_eval: Optional[int] = None,
     **kwargs
 ) -> Tuple[Optional[StageOutput], Dict[str, float]]:
     """
@@ -731,6 +748,9 @@ def process_and_rank_candidates(
         top_k: Top-K candidates to select (used when return_output=True)
         logger: Logger instance
         inference_batch_size: Number of candidates to process per batch (default 50K)
+        metrics_top_k_eval: If set, additionally compute gAUC@K and MRR@K restricted to the
+                            top-K items per user. Useful for comparing preranking (1000 items)
+                            with reranking (100 items) on equal footing.
         **kwargs: Additional arguments
         
     Returns:
@@ -1145,6 +1165,12 @@ def process_and_rank_candidates(
         total_metrics = {f'{m}@{k}': 0.0 for k in metrics_k for m in ['Recall', 'nDCG']}
         total_metrics['MRR'] = 0.0
         total_metrics['gAUC'] = 0.0
+        if metrics_top_k_eval is not None:
+            total_metrics[f'gAUC@{metrics_top_k_eval}'] = 0.0
+            total_metrics[f'MRR@{metrics_top_k_eval}'] = 0.0
+        # Accumulators for global (non-grouped) AUC
+        all_query_scores_list = []   # list of per-query score arrays
+        all_query_labels_list = []   # list of per-query label arrays
 
     effective_top_k = kwargs.get('top_k', top_k)
     
@@ -1208,7 +1234,13 @@ def process_and_rank_candidates(
             sorted_order = random_perm[np.argsort(-req_scores[random_perm], kind='stable')]
             sorted_scores = req_scores[sorted_order]
             sorted_labels = req_labels[sorted_order]
-            query_metrics = compute_ranking_metrics(sorted_scores, sorted_labels, metrics_k, pre_sorted=True)
+            # Accumulate raw scores/labels for global AUC
+            all_query_scores_list.append(req_scores)
+            all_query_labels_list.append(req_labels)
+            query_metrics = compute_ranking_metrics(
+                sorted_scores, sorted_labels, metrics_k,
+                pre_sorted=True, top_k_for_metrics=metrics_top_k_eval
+            )
             # Detailed debugging for first 3 queries
             if num_queries < 3:
                 pos_scores = req_scores[req_labels == 1]
@@ -1243,11 +1275,29 @@ def process_and_rank_candidates(
     
     if compute_metrics:
         if num_queries > 0:
+            gauc_metrics = {'gAUC', 'MRR'}
+            if metrics_top_k_eval is not None:
+                gauc_metrics.add(f'gAUC@{metrics_top_k_eval}')
+                gauc_metrics.add(f'MRR@{metrics_top_k_eval}')
             for metric_name in total_metrics:
-                if metric_name == 'gAUC':  # gAUC should averaged across valid queries
-                    metrics[metric_name] = total_metrics['gAUC'] / valid_queries if valid_queries > 0 else 0.0
+                if metric_name in gauc_metrics:
+                    # gAUC / MRR averaged only over queries that have at least one positive
+                    metrics[metric_name] = total_metrics[metric_name] / valid_queries if valid_queries > 0 else 0.0
                 else:
                     metrics[metric_name] = total_metrics[metric_name] / num_queries
+
+            # ===== Global (non-grouped) AUC over all scores =====
+            if all_query_scores_list:
+                try:
+                    from sklearn.metrics import roc_auc_score
+                    global_scores = np.concatenate(all_query_scores_list)
+                    global_labels = np.concatenate(all_query_labels_list)
+                    if global_labels.sum() > 0 and global_labels.sum() < len(global_labels):
+                        metrics['AUC'] = float(roc_auc_score(global_labels, global_scores))
+                    else:
+                        metrics['AUC'] = 0.0
+                except Exception as e:
+                    logger.warning(f"Failed to compute global AUC: {e}")
         else:
             logger.warning("No valid queries with positive labels for ranking evaluation.")
     
