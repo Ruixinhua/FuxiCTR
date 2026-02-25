@@ -107,33 +107,50 @@ class CloudDeviceJointTrainer(BaseModel, ContrastiveLearningBase):
         """
         Forward pass through both preranking (Cloud) and reranking (Device) models.
         """
+        # Move all input tensors to the model device.
+        # Data loaders yield CPU tensors; sub-models are on GPU.
+        target_device = next(self.preranking_model.parameters()).device
+        inputs = {k: v.to(target_device) if isinstance(v, torch.Tensor) else v
+                  for k, v in inputs.items()}
+
         self._current_inputs = inputs
-        
+
         pre_output = self.preranking_model(inputs)
         re_output = self.reranking_model(inputs)
-        
+
         return_dict = {
             "pre_pred": pre_output.get("y_pred"),
             "re_pred": re_output.get("y_pred"),
         }
-        
-        # Extract features for CL if needed
+
+        # Extract features for CL if needed.
+        # IMPORTANT: filter inputs to each model's own feature set.
+        # The batch uses the reranking feature map (all FG1+FG2+FG3 features), but the
+        # preranking embedding layer only knows FG1+FG2 — passing FG3 keys causes a KeyError.
         if self.use_contrastive_learning and self.training:
             if hasattr(self.preranking_model, 'embedding_layer'):
+                pre_known = set(self.preranking_model.feature_map.features.keys())
+                pre_inputs = {k: v for k, v in inputs.items() if k in pre_known}
                 return_dict["pre_emb"] = self.get_feature_embeddings(
-                    self.preranking_model.embedding_layer, inputs
+                    self.preranking_model.embedding_layer, pre_inputs
                 )
             if hasattr(self.reranking_model, 'embedding_layer'):
+                re_known = set(self.reranking_model.feature_map.features.keys())
+                re_inputs = {k: v for k, v in inputs.items() if k in re_known}
                 return_dict["re_emb"] = self.get_feature_embeddings(
-                    self.reranking_model.embedding_layer, inputs
+                    self.reranking_model.embedding_layer, re_inputs
                 )
-                
+
         return return_dict
+
 
     def add_loss(self, return_dict, y_true):
         """
         Compute joint loss: Preranking Task Loss + Reranking Task Loss + (Optional) CL Loss
         """
+        target_device = return_dict["pre_pred"].device
+        y_true = y_true.to(target_device)
+
         pre_loss = self.loss_fn(return_dict["pre_pred"], y_true, reduction='mean')
         re_loss = self.loss_fn(return_dict["re_pred"], y_true, reduction='mean')
 
@@ -144,9 +161,9 @@ class CloudDeviceJointTrainer(BaseModel, ContrastiveLearningBase):
 
         group_ids = self.get_group_ids(self._current_inputs) if hasattr(self, '_current_inputs') else None
 
-        # CL: Make Preranking (Student) align with Reranking (Teacher).
+        # CL: Make Preranking align with Reranking.
         # A single compute_cl_loss call accumulates all sub-losses:
-        #   - KD + group-aware: use re_pred (teacher) vs pre_pred (student) logits
+        #   - KD + group-aware: use re_pred vs pre_pred logits
         #   - Feature alignment / field uniformity: use re_emb (reranking feature embeddings)
         # We pass base_loss=0 to get a pure CL loss, then scale and add.
         cl_loss = self.compute_cl_loss(
@@ -227,20 +244,23 @@ class CloudDeviceJointTrainer(BaseModel, ContrastiveLearningBase):
         # Get negative item features from sampler
         neg_features_df = self.negative_sampler.get_features_by_ids(neg_ids_flat)
 
-        # Build negative batch dict: replace item features, repeat user features
+        # Build negative batch dict: replace item features, repeat user features.
+        # Note: forward() handles device placement, so we can leave tensors on CPU here
+        # and they'll be moved to GPU inside forward(). We keep dtype consistency though.
+        model_device = next(self.preranking_model.parameters()).device
         neg_batch_dict = {}
         for key, val in batch_dict.items():
             if key == item_id_col:
-                neg_batch_dict[key] = torch.tensor(neg_ids_flat, device=self.device)
+                neg_batch_dict[key] = torch.tensor(neg_ids_flat, device=model_device)
             elif key in neg_features_df.columns:
                 col_vals = neg_features_df[key].to_numpy(copy=False)
                 if not np.isscalar(col_vals[0]):
                     col_vals = np.vstack(col_vals)
-                neg_batch_dict[key] = torch.tensor(col_vals, device=self.device)
+                neg_batch_dict[key] = torch.tensor(col_vals, device=model_device)
             else:
                 # Repeat user features: [B, ...] -> [B * num_neg, ...]
                 if hasattr(val, 'to'):
-                    val = val.to(self.device)
+                    val = val.to(model_device)
                     neg_batch_dict[key] = val.repeat_interleave(self.num_negatives, dim=0)
                 else:
                     neg_batch_dict[key] = val
@@ -291,11 +311,13 @@ class CloudDeviceJointTrainer(BaseModel, ContrastiveLearningBase):
              return loss
              
         # Add CL Loss using positive samples only
-        y_true = self.get_labels(pos_batch_data).to(self.device)
+        # y_true: derive device from pre_pos_scores (already on GPU from forward())
+        gpu_device = pre_pos_scores.device
+        y_true = self.get_labels(pos_batch_data).to(gpu_device)
         group_ids = self.get_group_ids(pos_batch_data)
-        
+
         cl_loss = self.compute_cl_loss(
-            base_loss=torch.tensor(0.0, device=self.device),
+            base_loss=torch.tensor(0.0, device=gpu_device),
             feature_embeddings=pos_output.get("re_emb"),  # reranking embeddings for alignment/uniformity
             h1_logits=pos_output["re_pred"],               # Teacher logits
             h2_logits=pos_output["pre_pred"],              # Student logits
