@@ -724,7 +724,6 @@ def process_and_rank_candidates(
     logger: logging.Logger = None,
     inference_batch_size: int = 100000,
     inject_cloud_score: bool = False,
-    metrics_top_k_eval: Optional[int] = None,
     **kwargs
 ) -> Tuple[Optional[StageOutput], Dict[str, float]]:
     """
@@ -745,12 +744,10 @@ def process_and_rank_candidates(
         return_output: If True, generate and return StageOutput with top-K candidates
         compute_metrics: If True, compute and return ranking metrics
         metrics_k: K values for evaluation metrics (required if compute_metrics=True)
-        top_k: Top-K candidates to select (used when return_output=True)
+        top_k: Top-K candidates to select. Also used to compute gAUC@K, MRR@K, and AUC@K
+                            restricted to the top-K items per user for fair comparison across stages.
         logger: Logger instance
         inference_batch_size: Number of candidates to process per batch (default 50K)
-        metrics_top_k_eval: If set, additionally compute gAUC@K and MRR@K restricted to the
-                            top-K items per user. Useful for comparing preranking (1000 items)
-                            with reranking (100 items) on equal footing.
         **kwargs: Additional arguments
         
     Returns:
@@ -1165,12 +1162,14 @@ def process_and_rank_candidates(
         total_metrics = {f'{m}@{k}': 0.0 for k in metrics_k for m in ['Recall', 'nDCG']}
         total_metrics['MRR'] = 0.0
         total_metrics['gAUC'] = 0.0
-        if metrics_top_k_eval is not None:
-            total_metrics[f'gAUC@{metrics_top_k_eval}'] = 0.0
-            total_metrics[f'MRR@{metrics_top_k_eval}'] = 0.0
+        total_metrics[f'gAUC@{top_k}'] = 0.0
+        total_metrics[f'MRR@{top_k}'] = 0.0
         # Accumulators for global (non-grouped) AUC
         all_query_scores_list = []   # list of per-query score arrays
         all_query_labels_list = []   # list of per-query label arrays
+        # Accumulators for global AUC restricted to top-K items per user
+        all_topk_scores_list = []
+        all_topk_labels_list = []
 
     effective_top_k = kwargs.get('top_k', top_k)
     
@@ -1237,9 +1236,13 @@ def process_and_rank_candidates(
             # Accumulate raw scores/labels for global AUC
             all_query_scores_list.append(req_scores)
             all_query_labels_list.append(req_labels)
+            # Accumulate top-K scores/labels for AUC@K
+            k = min(top_k, len(sorted_scores))
+            all_topk_scores_list.append(sorted_scores[:k])
+            all_topk_labels_list.append(sorted_labels[:k])
             query_metrics = compute_ranking_metrics(
                 sorted_scores, sorted_labels, metrics_k,
-                pre_sorted=True, top_k_for_metrics=metrics_top_k_eval
+                pre_sorted=True, top_k_for_metrics=top_k
             )
             # Detailed debugging for first 3 queries
             if num_queries < 3:
@@ -1276,9 +1279,8 @@ def process_and_rank_candidates(
     if compute_metrics:
         if num_queries > 0:
             gauc_metrics = {'gAUC', 'MRR'}
-            if metrics_top_k_eval is not None:
-                gauc_metrics.add(f'gAUC@{metrics_top_k_eval}')
-                gauc_metrics.add(f'MRR@{metrics_top_k_eval}')
+            gauc_metrics.add(f'gAUC@{top_k}')
+            gauc_metrics.add(f'MRR@{top_k}')
             for metric_name in total_metrics:
                 if metric_name in gauc_metrics:
                     # gAUC / MRR averaged only over queries that have at least one positive
@@ -1298,6 +1300,18 @@ def process_and_rank_candidates(
                         metrics['AUC'] = 0.0
                 except Exception as e:
                     logger.warning(f"Failed to compute global AUC: {e}")
+            # ===== Global AUC@K restricted to top-K items per user =====
+            if all_topk_scores_list:
+                try:
+                    from sklearn.metrics import roc_auc_score
+                    topk_scores = np.concatenate(all_topk_scores_list)
+                    topk_labels = np.concatenate(all_topk_labels_list)
+                    if topk_labels.sum() > 0 and topk_labels.sum() < len(topk_labels):
+                        metrics[f'AUC@{top_k}'] = float(roc_auc_score(topk_labels, topk_scores))
+                    else:
+                        metrics[f'AUC@{top_k}'] = 0.0
+                except Exception as e:
+                    logger.warning(f"Failed to compute global AUC@{top_k}: {e}")
         else:
             logger.warning("No valid queries with positive labels for ranking evaluation.")
     

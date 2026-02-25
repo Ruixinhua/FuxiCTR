@@ -559,7 +559,6 @@ class PrerankingStage(BaseStage):
             top_k=kwargs.get('top_k', self.top_k),
             logger=self.logger,
             metrics_k=self.metrics_k,
-            metrics_top_k_eval=100,
             **kwargs
         )
 
@@ -593,7 +592,6 @@ class PrerankingStage(BaseStage):
             compute_metrics=True,
             metrics_k=metrics_k or self.metrics_k,
             logger=self.logger,
-            metrics_top_k_eval=100,
             **kwargs
         )
         return metrics
