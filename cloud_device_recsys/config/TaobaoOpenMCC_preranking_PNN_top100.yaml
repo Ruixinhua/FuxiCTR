@@ -9,7 +9,7 @@ stages:
   preranking:
     enabled: true
     model: "PNN"
-    features: ["FG1", "FG2"]
+    features: ["FG1", "FG2", "FG3"]
     top_k: 100
     model_params:
       num_negatives: 20

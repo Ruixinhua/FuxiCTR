@@ -1,0 +1,72 @@
+# =============================================================================
+# Hyperparameter Search Configuration for Joint Training (PNN + PNN)
+# =============================================================================
+# Cloud-side preranking model: PNN (FG1+FG2, top_k=100)
+# Device-side reranking model: PNN (FG1+FG2+FG3, top_k=5)
+# Training mode: Joint (with or without Contrastive Learning)
+#
+# Usage:
+#   python run_hyperparam_search.py \
+#       --mode joint_train \
+#       --search_config ./hp_config/joint_pnn_pnn.yaml \
+#       --base_config ./config/TaobaoOpenMCC_joint_PNN_PNN.yaml \
+#       --config_dir ./config \
+#       --dataset_id TaobaoOpenMCC \
+#       --prev_output_path /path/to/retrieval/stage_outputs \
+#       --output_dir /path/to/output \
+#       --gpu 0
+
+# -----------------------------------------
+# Search Space Definition
+# -----------------------------------------
+# Sections match top-level config keys:
+#   - joint_training: controls the joint trainer (learning rate, CL, etc.)
+#   - preranking: overrides config['stages']['preranking']
+#   - reranking: overrides config['stages']['reranking']
+
+search_space:
+  # ---- Joint Trainer Parameters ----
+  joint_training:
+    use_contrastive_learning: [false, true]
+    learning_rate: [0.0005, 0.001]
+
+  # ---- Preranking Model Parameters ----
+  preranking:
+    model_params.embedding_dim: [16, 32]
+    model_params.hidden_units:
+      - [128, 64, 32]
+      - [256, 128, 64]
+    model_params.num_negatives: [4, 0, 20]
+
+  # ---- Reranking Model Parameters ----
+  reranking:
+    model_params.embedding_dim: [4]
+    model_params.hidden_units:
+      - [64, 32]
+      - [128, 64, 32]
+
+# -----------------------------------------
+# Fixed Overrides (applied to all experiments)
+# -----------------------------------------
+fixed_overrides:
+  joint_training:
+    epochs: 10
+    loss_type: "bpr"
+    monitor: "Recall@100"
+    cl_weights:
+      cl_loss_weight: 1.0
+      knowledge_distillation_loss_weight: 1.0
+      group_aware_loss_weight: 0.5
+      feature_alignment_loss_weight: 0.0
+      field_uniformity_loss_weight: 0.0
+      distance_loss_weight: 0.0
+      temperature: 4.0
+  preranking:
+    model_params.loss_type: "bpr"
+    model_params.use_feature_encoder: 1
+    model_params.use_diversity_loss: 0
+    training.batch_size: 4096
+  reranking:
+    model_params.use_feature_encoder: 1
+    model_params.use_cloud_score: false
+    training.batch_size: 2048

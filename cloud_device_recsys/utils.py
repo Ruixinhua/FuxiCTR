@@ -663,7 +663,7 @@ def parse_pipeline_args():
     parser.add_argument('--dataset_id', type=str, default=None,
                        help='Dataset ID from dataset_config.yaml')
     parser.add_argument('--mode', type=str, default='full',
-                       choices=['full', 'retrieval', 'preranking', 'reranking', 'train', 'evaluate'],
+                       choices=['full', 'retrieval', 'preranking', 'reranking', 'train', 'evaluate', 'joint_train'],
                        help='Execution mode')
     parser.add_argument('--stage', type=str, default=None,
                        choices=['retrieval', 'preranking', 'reranking'],
