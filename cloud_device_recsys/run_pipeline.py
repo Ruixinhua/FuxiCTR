@@ -436,11 +436,14 @@ def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, fg_m
     return metrics, valid_output, test_output
 
 def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_manager=None, logger=None,
-                        prev_output_valid=None, prev_output_test=None, run_test=True,
-                        preranking_model=None, stages=None):
+                        run_test=True, prev_output_path=None, preranking_model=None, stages=None):
     if logger is None:
         logger = logging.getLogger('PipelineRunner')
-
+    if prev_output_path is not None:
+        prev_output_valid, prev_output_test = load_stage_outputs_from_dir(prev_output_path, "preranking",logger)
+    else:
+        raise RuntimeError("Previous stage outputs not provided or failed to load. "
+                           "Reranking will run without candidate filtering from preranking.")
     reranking_config = pipeline_config['stages']['reranking']
     metrics = {}
 
@@ -520,8 +523,7 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_man
                 # Find best weights in preranking output dir
                 import glob
                 preranking_model_dir = os.path.join(
-                    preranking_stage_obj.output_dir,
-                    preranking_stage_obj.feature_map.dataset_id
+                    Path(prev_output_path).parent, "preranking", preranking_stage_obj.feature_map.dataset_id
                 )
                 weight_files = glob.glob(os.path.join(preranking_model_dir, '*.model'))
                 if weight_files:
@@ -531,7 +533,7 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_man
                     reranking_stage.set_cloud_score_teacher(preranking_stage_obj.model)
                     logger.info(f"[Reranking] Loaded preranking teacher from {best_weights}")
                 else:
-                    logger.warning("[Reranking] No preranking model weights found. Cloud score disabled for training.")
+                    logger.warning(f"[Reranking] No preranking model weights found in {preranking_model_dir}. Cloud score disabled for training.")
             else:
                 logger.warning("[Reranking] No preranking config found. Cloud score disabled for training.")
         except Exception as e:
@@ -727,14 +729,9 @@ def main():
         # Instantiate Reranking Stage lazily (after preranking)
         reranking_stage = stages['reranking']()
         # Run reranking stage with its own data loaders
-        d_metrics = run_reranking_stage(
-            reranking_stage, pipeline_config, dataset_config, fg_manager=fg_manager,
-            logger=logger,
-            prev_output_valid=p_valid, prev_output_test=p_test,
-            run_test=bool(args.run_reranking_test),
-            preranking_model=preranking_stage.model,
-            stages=stages
-        )
+        d_metrics = run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_manager=fg_manager,
+                                        logger=logger, run_test=bool(args.run_reranking_test), stages=stages,
+                                        prev_output_path=args.prev_output_path, preranking_model=preranking_stage.model)
         all_metrics.update(d_metrics)
 
     elif args.mode == 'retrieval':
@@ -789,25 +786,11 @@ def main():
         logger.info("Running reranking stage only")
         if 'reranking' not in stages:
             raise RuntimeError("No reranking stage found. Please run preranking first")
-
-        # Load previous stage outputs if provided (from preranking stage)
-        if args.prev_output_path:
-            prev_output_valid, prev_output_test = load_stage_outputs_from_dir(
-                args.prev_output_path, 'preranking', logger
-            )
-        else:
-            raise RuntimeError("Previous stage outputs not provided or failed to load. "
-                               "Reranking will run without candidate filtering from preranking.")
-
         # Instantiate Reranking Stage lazily
         reranking_stage = stages['reranking']()
-        d_metrics = run_reranking_stage(
-            reranking_stage, pipeline_config, dataset_config, fg_manager=fg_manager,
-            logger=logger,
-            prev_output_valid=prev_output_valid, prev_output_test=prev_output_test,
-            run_test=bool(args.run_reranking_test),
-            stages=stages
-        )
+        d_metrics = run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_manager=fg_manager,
+                                        logger=logger, run_test=bool(args.run_reranking_test), stages=stages,
+                                        prev_output_path=args.prev_output_path)
         all_metrics.update(d_metrics)
     else:
         raise ValueError(f"Unknown mode: {args.mode}")

@@ -74,6 +74,8 @@ def parse_args():
                         help='Resume from previous search (skip completed experiments)')
     parser.add_argument('--seed', type=int, default=2024,
                         help='Random seed')
+    parser.add_argument('--run_reranking_test', type=int, default=1,
+                        help='Whether to run reranking test stage')
     return parser.parse_args()
 
 
@@ -273,6 +275,9 @@ def build_run_pipeline_cmd(
 
     if args.prev_output_path:
         cmd.extend(['--prev_output_path', args.prev_output_path])
+
+    if args.run_reranking_test:
+        cmd.extend(['--run_reranking_test', str(args.run_reranking_test)])
 
     return cmd
 
