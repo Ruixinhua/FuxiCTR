@@ -429,7 +429,7 @@ class RerankingStage(BaseStage):
         Returns:
             Tuple of (StageOutput with re-ranked Top-K candidates, metrics dict)
         """
-        from ..utils import process_and_rank_candidates
+        from ..metric_utils import process_and_rank_candidates
         
         if os.path.exists(self.best_weights_path):
             self.model.load_weights(self.best_weights_path)
@@ -472,7 +472,7 @@ class RerankingStage(BaseStage):
         Returns:
             Dictionary of evaluation metrics
         """
-        from ..utils import process_and_rank_candidates
+        from ..metric_utils import process_and_rank_candidates
 
         if self.item_features_df is None:
             self.logger.error("Item features not loaded. Call load_item_features() first.")

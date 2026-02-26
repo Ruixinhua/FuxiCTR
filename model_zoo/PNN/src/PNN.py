@@ -52,7 +52,7 @@ class PNN(BaseModel):
                              output_dim=1, 
                              hidden_units=hidden_units,
                              hidden_activations=hidden_activations,
-                             output_activation=self.output_activation,
+                             output_activation=None,
                              dropout_rates=net_dropout, 
                              batch_norm=batch_norm)
         self.compile(kwargs["optimizer"], kwargs["loss"], learning_rate)
@@ -67,6 +67,7 @@ class PNN(BaseModel):
         feature_emb = self.embedding_layer(X)
         inner_products = self.inner_product_layer(feature_emb)
         dense_input = torch.cat([feature_emb.flatten(start_dim=1), inner_products], dim=1)
-        y_pred = self.dnn(dense_input)
-        return_dict = {"y_pred": y_pred}
+        logit = self.dnn(dense_input)
+        y_pred = self.output_activation(logit)
+        return_dict = {"y_pred": y_pred, "logit": logit}
         return return_dict
