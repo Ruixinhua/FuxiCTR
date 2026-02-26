@@ -437,170 +437,126 @@ def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, fg_m
 
 def run_joint_training_stage(preranking_stage, reranking_stage, pipeline_config, dataset_config, fg_manager, logger=None,
                              run_test=True, prev_output_test=None, prev_output_valid=None):
+    """Orchestrate joint preranking + reranking training.
+
+    Delegates all training logic to CloudDeviceJointTrainingStage, which holds
+    references to the stage objects and calls their existing train() methods.
+    """
     if logger is None:
         logger = logging.getLogger('PipelineRunner')
 
-    preranking_config = pipeline_config['stages']['preranking']
-    reranking_config = pipeline_config['stages']['reranking']
-    metrics = {}
-
     import copy
-    from cloud_device_recsys.models.joint_trainer import CloudDeviceJointTrainer
+    from cloud_device_recsys.pipeline import CloudDeviceJointTrainingStage
 
-    # 1. Prepare Data Loaders (Using Reranking config because it has all FG1, FG2, FG3)
+    preranking_config = pipeline_config['stages']['preranking']
+    reranking_config  = pipeline_config['stages']['reranking']
+    joint_params = pipeline_config.get('joint_training', {})
+
+    # 1. Prepare data paths
     paths = get_data_paths(dataset_config, pipeline_config, logger)
     paths = prepare_debug_paths(paths, dataset_config, logger)
 
-    loader_feature_map = copy.deepcopy(reranking_stage.feature_map)
-    # num_negatives priority: preranking config > joint_training config > reranking config > 0
-    # The HP search sets it under preranking.model_params.num_negatives.
-    # Use explicit None checks (not `or`) so that num_negatives=0 is respected.
-    joint_params = pipeline_config.get('joint_training', {})
-    _pre_nn = preranking_config.get('model_params', {}).get('num_negatives', None)
-    _jt_nn  = joint_params.get('num_negatives', None)
-    _re_nn  = reranking_config.get('model_params', {}).get('num_negatives', None)
-    num_negatives = _pre_nn if _pre_nn is not None else (_jt_nn if _jt_nn is not None else (_re_nn if _re_nn is not None else 0))
-    logger.info(f"[Joint Training] num_negatives={num_negatives} ({'Pairwise BPR' if num_negatives > 0 else 'Pointwise CE'})")
-    loaders = _prepare_stage_data_loaders(
-        feature_map=loader_feature_map,
+    # Per-stage num_negatives: read from each stage's model_params
+    # (joint_params.num_negatives acts as fallback if not set per-stage)
+    _jt_nn = joint_params.get('num_negatives', None)
+    pre_num_negatives = preranking_config.get('model_params', {}).get('num_negatives', _jt_nn or 0)
+    re_num_negatives  = reranking_config.get('model_params', {}).get('num_negatives', _jt_nn or 0)
+    logger.info(f"[Joint Training] num_negatives: preranking={pre_num_negatives}, reranking={re_num_negatives}")
+
+    label_col = dataset_config.get('label_col', {}).get('name', 'label')
+
+    # 1a. Preranking train loader — uses preranking feature_map + config (correct batch_size)
+    pre_loader_fm = copy.deepcopy(preranking_stage.feature_map)
+    pre_loaders = _prepare_stage_data_loaders(
+        feature_map=pre_loader_fm,
+        stage_config=preranking_config,
+        paths=paths,
+        create_train=True,
+        create_test=False,
+        num_negatives=pre_num_negatives,
+        label_col=label_col,
+        logger=logger,
+    )
+    preranking_train_loader = pre_loaders['train_loader']
+
+    # 1b. Reranking train loader — uses reranking feature_map + config (correct batch_size)
+    re_loader_fm = copy.deepcopy(reranking_stage.feature_map)
+    re_loaders = _prepare_stage_data_loaders(
+        feature_map=re_loader_fm,
         stage_config=reranking_config,
         paths=paths,
         create_train=True,
         create_test=False,
-        num_negatives=num_negatives,
-        label_col=dataset_config.get('label_col', {}).get('name', 'label'),
-        logger=logger
+        num_negatives=re_num_negatives,
+        label_col=label_col,
+        logger=logger,
     )
-    train_loader = loaders['train_loader']
+    reranking_train_loader = re_loaders['train_loader']
 
-
-    # Load item pool for training vs evaluation
+    # 2. Ensure item pool exists
     if fg_manager is not None:
         ensure_item_pool(
-            data_paths={'item_pool_path': paths['item_pool_path'], 'valid_path': paths['valid_path'],
+            data_paths={'item_pool_path': paths['item_pool_path'],
+                        'valid_path': paths['valid_path'],
                         'test_path': paths['test_path']},
             dataset_config=dataset_config,
             feature_group_manager=fg_manager,
-            logger=logger
+            logger=logger,
         )
 
-    # 2. Build individual models
+    # 3. Build individual stage models
     preranking_stage.build_model()
-    preranking_stage.best_weights_path = os.path.join(preranking_stage.model.model_dir, preranking_stage.model.model_id + ".model")
-    
+    preranking_stage.best_weights_path = os.path.join(
+        preranking_stage.model.model_dir, preranking_stage.model.model_id + ".model"
+    )
     reranking_stage.build_model()
-    reranking_stage.best_weights_path = os.path.join(reranking_stage.model.model_dir, reranking_stage.model.model_id + ".model")
-
-    # 3. Create Joint Trainer
-    logger.info("[Joint Training] Initializing CloudDeviceJointTrainer...")
-    joint_params = pipeline_config.get('joint_training', {})
-    cl_weights = joint_params.get('cl_weights', {})
-    
-    joint_trainer = CloudDeviceJointTrainer(
-        preranking_model=preranking_stage.model,
-        reranking_model=reranking_stage.model,
-        gpu=preranking_config.get('model_params', {}).get('gpu', -1),
-        learning_rate=joint_params.get('learning_rate', 1e-3),
-        use_contrastive_learning=joint_params.get('use_contrastive_learning', False),
-        num_negatives=num_negatives,
-        loss_type=joint_params.get('loss_type', 'bpr'),
-        margin=joint_params.get('margin', 1.0),
-        **cl_weights
+    reranking_stage.best_weights_path = os.path.join(
+        reranking_stage.model.model_dir, reranking_stage.model.model_id + ".model"
     )
 
-    epochs = joint_params.get('epochs', 5)
+    # 4. Load item features for negative sampling
+    # neg_sampling_pool: 'full' → cand_items_all.parquet (800K+ items, like standalone preranking)
+    #                    'candidate' → item_pool_path (~28K, default)
+    neg_pool_mode = joint_params.get('neg_sampling_pool', 'candidate')
+    if neg_pool_mode == 'full' and os.path.exists(paths['full_item_pool_path']):
+        neg_pool_path = paths['full_item_pool_path']
+    else:
+        neg_pool_path = paths['item_pool_path']
+        if neg_pool_mode == 'full':
+            logger.warning("[Joint Training] full_item_pool_path not found, falling back to candidate pool.")
+    logger.info(f"[Joint Training] Negative sampling pool: '{neg_pool_mode}' → {neg_pool_path}")
+    max_neg_nn = max(pre_num_negatives, re_num_negatives)
+    if max_neg_nn > 0 and os.path.exists(neg_pool_path):
+        preranking_stage.load_item_features(neg_pool_path)
+        # Share item_features_df to reranking — avoids a redundant file load
+        reranking_stage.item_features_df = preranking_stage.item_features_df
+        logger.info("[Joint Training] Shared item_features_df from preranking to reranking stage.")
+    neg_pool_path_for_params = neg_pool_path
 
-    # 4. Setup negative sampling for pairwise training (if num_negatives > 0)
-    if num_negatives > 0:
-        # Load item pool eagerly so the negative sampler can use it
-        if os.path.exists(paths['item_pool_path']):
-            preranking_stage.load_item_features(paths['item_pool_path'])
-        if preranking_stage.item_features_df is not None:
-            from cloud_device_recsys.data.negative_sampler import NegativeSampler
-            item_id_col = getattr(preranking_stage.feature_map, 'dataset_config', {}).get('item_id_col', 'cand_item_id')
-            neg_sampler = NegativeSampler(preranking_stage.item_features_df, item_id_col=item_id_col)
-            joint_trainer.set_negative_sampler(neg_sampler, item_id_col=item_id_col)
-        else:
-            logger.warning("[Joint Training] num_negatives > 0 but item pool not loaded. Falling back to pointwise training.")
+    # 5. Merge per-stage num_negatives and pool info for the orchestrator
+    merged_joint_params = dict(joint_params)
+    merged_joint_params['pre_num_negatives'] = pre_num_negatives
+    merged_joint_params['re_num_negatives']  = re_num_negatives
+    merged_joint_params['_neg_pool_path']    = neg_pool_path_for_params
 
-    # 5. Joint Training Loop
-    logger.info(f"[Joint Training] Starting {epochs} epochs...")
-    # Each stage independently tracks its own best model
-    prerank_monitor = preranking_config.get('model_params', {}).get('monitor', 'Recall@100')
-    rerank_monitor  = reranking_config.get('model_params', {}).get('monitor', 'Recall@1')
-    best_prerank_metric = -float('inf')
-    best_rerank_metric  = -float('inf')
-    logger.info(f"[Joint Training] Preranking monitor: {prerank_monitor} | Reranking monitor: {rerank_monitor}")
-
-    for epoch in range(epochs):
-        logger.info(f"--- Epoch {epoch+1}/{epochs} ---")
-        joint_trainer.train_epoch(train_loader.make_iterator()[0])
-
-
-        # Complex Validation: 
-        # 1. Predict with Preranking on original validation set (Retrieval output)
-        logger.info("[Validation] Preranking step...")
-        # Make sure item features are loaded for processing!
-        if os.path.exists(paths['item_pool_path']):
-            preranking_stage.load_item_features(paths['item_pool_path'])
-            reranking_stage.load_item_features(paths['item_pool_path'])
-            
-        prerank_output_valid, prerank_valid_metrics = preranking_stage.process(prev_output_valid, compute_metrics=True)
-        
-        # 2. Run those candidates through Reranking
-        logger.info("[Validation] Reranking step...")
-        if fg_manager is not None:
-            impression_id_col = dataset_config.get('impression_id_col', 'impression_id')
-            prerank_output_valid = enrich_stage_output_user_features(
-                prerank_output_valid,
-                paths['valid_path'],
-                fg_manager,
-                impression_id_col,
-                logger
-            )
-        rerank_valid_metrics = reranking_stage.evaluate(prerank_output_valid)
-        
-        current_prerank = prerank_valid_metrics.get(prerank_monitor, 0)
-        current_rerank  = rerank_valid_metrics.get(rerank_monitor, 0)
-        logger.info(f"[Validation] Prerank Metrics: {prerank_valid_metrics}")
-        logger.info(f"[Validation] Rerank  Metrics: {rerank_valid_metrics}")
-
-        if current_prerank > best_prerank_metric:
-            best_prerank_metric = current_prerank
-            logger.info(f"[Preranking] New best {prerank_monitor}: {current_prerank:.4f}. Saving preranking weights...")
-            preranking_stage.model.save_weights(preranking_stage.best_weights_path)
-
-        if current_rerank > best_rerank_metric:
-            best_rerank_metric = current_rerank
-            logger.info(f"[Reranking] New best {rerank_monitor}: {current_rerank:.4f}. Saving reranking weights...")
-            reranking_stage.model.save_weights(reranking_stage.best_weights_path)
-
-    # 5. Evaluate on test set
-    if run_test:
-        logger.info("[Joint Training Test] Loading best weights for final test evaluation...")
-        preranking_stage.model.load_weights(preranking_stage.best_weights_path)
-        reranking_stage.model.load_weights(reranking_stage.best_weights_path)
-        
-        if prev_output_test is not None:
-            logger.info("[Test] Preranking step...")
-            prerank_output_test, prerank_test_metrics = preranking_stage.process(prev_output_test, compute_metrics=True)
-            logger.info("[Test] Reranking step...")
-            if fg_manager is not None:
-                impression_id_col = dataset_config.get('impression_id_col', 'impression_id')
-                prerank_output_test = enrich_stage_output_user_features(
-                    prerank_output_test,
-                    paths['test_path'],
-                    fg_manager,
-                    impression_id_col,
-                    logger
-                )
-            rerank_test_metrics = reranking_stage.evaluate(prerank_output_test)
-            metrics.update({f"joint_prerank_test_{k}": v for k, v in prerank_test_metrics.items()})
-            metrics.update({f"joint_rerank_test_{k}": v for k, v in rerank_test_metrics.items()})
-        else:
-            logger.warning("[Test] No prev_output_test provided. Skipping test.")
-            
+    # 6. Create orchestrator and train
+    logger.info("[Joint Training] Initializing CloudDeviceJointTrainingStage...")
+    joint = CloudDeviceJointTrainingStage(
+        preranking_stage=preranking_stage,
+        reranking_stage=reranking_stage,
+        joint_params=merged_joint_params,
+        preranking_config=preranking_config,
+        reranking_config=reranking_config,
+        preranking_train_loader=preranking_train_loader,
+        reranking_train_loader=reranking_train_loader,
+        fg_manager=fg_manager,
+        dataset_config=dataset_config,
+        paths=paths,
+        logger=logger,
+    )
+    metrics = joint.train(prev_output_valid, prev_output_test, run_test=run_test)
     return metrics
+
 
 
 def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_manager=None, logger=None,

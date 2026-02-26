@@ -98,10 +98,12 @@ def compute_ranking_metrics(
         k = top_k_for_metrics
         topk_labels = sorted_labels[:k]
         topk_scores = sorted_scores[:k]
-        metrics[f'MRR@{k}'] = _compute_mrr(topk_labels)
-        topk_pos = topk_scores[topk_labels == 1]
-        topk_neg = topk_scores[topk_labels == 0]
-        metrics[f'gAUC@{k}'] = _compute_gauc(topk_pos, topk_neg)
+        # Fair comparison: only output metrics if the top-K subset has at least one positive
+        if np.sum(topk_labels) > 0:
+            metrics[f'MRR@{k}'] = _compute_mrr(topk_labels)
+            topk_pos = topk_scores[topk_labels == 1]
+            topk_neg = topk_scores[topk_labels == 0]
+            metrics[f'gAUC@{k}'] = _compute_gauc(topk_pos, topk_neg)
 
     # ========== Recall@K and nDCG@K ==========
     if metrics_k is None:
@@ -146,6 +148,7 @@ def process_and_rank_candidates(
         logger: logging.Logger = None,
         inference_batch_size: int = 100000,
         inject_cloud_score: bool = False,
+        ranking_candidates_df: Optional[pd.DataFrame] = None,
         **kwargs
 ) -> Tuple[Optional[StageOutput], Dict[str, float]]:
     """
@@ -587,6 +590,7 @@ def process_and_rank_candidates(
     global_to_valid_idx[valid_global_indices] = np.arange(num_valid)
     num_queries = 0
     valid_queries = 0
+    valid_queries_at_k = 0
     if compute_metrics:
         total_metrics = {f'{m}@{k}': 0.0 for k in metrics_k for m in ['Recall', 'nDCG']}
         total_metrics['MRR'] = 0.0
@@ -599,6 +603,20 @@ def process_and_rank_candidates(
         # Accumulators for global AUC restricted to top-K items per user
         all_topk_scores_list = []
         all_topk_labels_list = []
+
+    # Build per-request ranking candidate sets if ranking_candidates_df is provided
+    # This is used to restrict Recall@K/nDCG@K to a preranking-filtered subset,
+    # while still computing AUC/gAUC on the full pool (fair cross-stage comparison).
+    ranking_item_sets = None
+    if ranking_candidates_df is not None and compute_metrics:
+        # Build a dict: request_id -> set of item_ids in the filtered subset
+        ranking_item_sets = (
+            ranking_candidates_df.groupby('request_id')['item_id']
+            .apply(set)
+            .to_dict()
+        )
+        logger.info(f"Using ranking_candidates_df with {len(ranking_item_sets)} requests "
+                    f"for Recall@K/nDCG@K ({len(ranking_candidates_df)} filtered candidates)")
 
     effective_top_k = kwargs.get('top_k', top_k)
 
@@ -662,15 +680,35 @@ def process_and_rank_candidates(
             sorted_order = random_perm[np.argsort(-req_scores[random_perm], kind='stable')]
             sorted_scores = req_scores[sorted_order]
             sorted_labels = req_labels[sorted_order]
-            # Accumulate raw scores/labels for global AUC
+            sorted_item_ids = req_item_ids[sorted_order]
+
+            # ------------------------------------------------------------------
+            # If ranking_candidates_df is provided, use it to restrict the
+            # Recall@K / nDCG@K sorted list to the preranking-filtered items.
+            # AUC / gAUC still use the full sorted_scores / sorted_labels.
+            # ------------------------------------------------------------------
+            if ranking_item_sets is not None and req_id in ranking_item_sets:
+                # Mask: which positions in the full sorted list are in the filtered set
+                rank_mask = np.isin(sorted_item_ids, list(ranking_item_sets[req_id]))
+                recall_sorted_scores = sorted_scores[rank_mask]
+                recall_sorted_labels = sorted_labels[rank_mask]
+            else:
+                recall_sorted_scores = sorted_scores
+                recall_sorted_labels = sorted_labels
+
+            # Accumulate raw scores/labels for global AUC (always full pool)
             all_query_scores_list.append(req_scores)
             all_query_labels_list.append(req_labels)
-            # Accumulate top-K scores/labels for AUC@K
+            # Accumulate top-K scores/labels for AUC@K (from full sorted list)
             k = min(top_k, len(sorted_scores))
-            all_topk_scores_list.append(sorted_scores[:k])
-            all_topk_labels_list.append(sorted_labels[:k])
+            topk_labels_subset = sorted_labels[:k]
+            if np.sum(topk_labels_subset) > 0:
+                valid_queries_at_k += 1
+                all_topk_scores_list.append(sorted_scores[:k])
+                all_topk_labels_list.append(topk_labels_subset)
+
             query_metrics = compute_ranking_metrics(
-                sorted_scores, sorted_labels, metrics_k,
+                recall_sorted_scores, recall_sorted_labels, metrics_k,
                 pre_sorted=True, top_k_for_metrics=top_k
             )
             # Detailed debugging for first 3 queries
@@ -711,12 +749,13 @@ def process_and_rank_candidates(
     if compute_metrics:
         if num_queries > 0:
             gauc_metrics = {'gAUC', 'MRR'}
-            gauc_metrics.add(f'gAUC@{top_k}')
-            gauc_metrics.add(f'MRR@{top_k}')
+            gauc_metrics_at_k = {f'gAUC@{top_k}', f'MRR@{top_k}'}
             for metric_name in total_metrics:
                 if metric_name in gauc_metrics:
                     # gAUC / MRR averaged only over queries that have at least one positive
                     metrics[metric_name] = total_metrics[metric_name] / valid_queries if valid_queries > 0 else 0.0
+                elif metric_name in gauc_metrics_at_k:
+                    metrics[metric_name] = total_metrics[metric_name] / valid_queries_at_k if valid_queries_at_k > 0 else 0.0
                 else:
                     metrics[metric_name] = total_metrics[metric_name] / num_queries
 

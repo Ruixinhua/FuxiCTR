@@ -454,19 +454,24 @@ class RerankingStage(BaseStage):
             logger=self.logger,
             metrics_k=self.metrics_k,
             inject_cloud_score=self.use_cloud_score,
+            ranking_candidates_df=kwargs.pop('preranking_candidates_df', None),
             **kwargs
         )
 
     def evaluate(self,
                  input_data: StageOutput,
                  metrics_k: List[int] = None,
+                 preranking_output: Optional[StageOutput] = None,
                  **kwargs) -> Dict[str, float]:
         """
         Evaluate re-ranking model with list-wise metrics (nDCG, Recall).
         
         Args:
-            input_data: StageOutput containing candidate sets with labels
+            input_data: StageOutput containing candidate sets with labels (full pool, e.g. 1000 candidates)
             metrics_k: List of K values for Recall@K and nDCG@K
+            preranking_output: Optional StageOutput with preranking-filtered candidates (e.g. top-100).
+                               When provided, Recall@K/nDCG@K are computed within this filtered subset,
+                               while AUC/gAUC use the full input_data pool for fair cross-stage comparison.
             **kwargs: Additional parameters
             
         Returns:
@@ -477,6 +482,13 @@ class RerankingStage(BaseStage):
         if self.item_features_df is None:
             self.logger.error("Item features not loaded. Call load_item_features() first.")
             return {}
+        
+        ranking_candidates_df = None
+        if preranking_output is not None:
+            ranking_candidates_df = preranking_output.candidates_df
+            self.logger.info(f"Fair eval: scoring on {input_data.get_total_candidates()} candidates, "
+                             f"ranking restricted to {len(ranking_candidates_df)} preranking candidates")
+
         _, metrics = process_and_rank_candidates(
             model=self.model,
             feature_map=self.feature_map,
@@ -488,6 +500,7 @@ class RerankingStage(BaseStage):
             metrics_k=metrics_k or self.metrics_k,
             logger=self.logger,
             inject_cloud_score=self.use_cloud_score,
+            ranking_candidates_df=ranking_candidates_df,
             **kwargs
         )
         return metrics
