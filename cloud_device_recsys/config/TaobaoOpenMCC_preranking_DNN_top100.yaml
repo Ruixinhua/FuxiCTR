@@ -24,9 +24,9 @@ stages:
       max_gradient_norm: 5.0
       hidden_units: [512, 256, 128, 64]
       batch_norm: False
-      monitor: "Recall@100"
 
     training:
+      monitor: "Recall@100"
       epochs: 10
       batch_size: 4096
       optimizer: "adam"
