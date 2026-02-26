@@ -46,7 +46,7 @@ class DNN(BaseModel):
                              output_dim=1, 
                              hidden_units=hidden_units,
                              hidden_activations=hidden_activations,
-                             output_activation=self.output_activation,
+                             output_activation=None,
                              dropout_rates=net_dropout,
                              batch_norm=batch_norm)
         self.compile(kwargs["optimizer"], kwargs["loss"], learning_rate)
@@ -59,7 +59,8 @@ class DNN(BaseModel):
         """
         X = self.get_inputs(inputs)
         feature_emb = self.embedding_layer(X, flatten_emb=True)
-        y_pred = self.mlp(feature_emb)
-        return_dict = {"y_pred": y_pred}
+        logit = self.mlp(feature_emb)
+        y_pred = self.output_activation(logit)
+        return_dict = {"y_pred": y_pred, "logit": logit}
         return return_dict
         

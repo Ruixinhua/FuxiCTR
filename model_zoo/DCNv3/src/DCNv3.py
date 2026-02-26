@@ -129,14 +129,15 @@ class DCNv3(BaseModel):
         
         # 轻微的数值稳定化，避免过度限制模型表达能力
         # 只处理极端的数值问题，不影响正常的梯度流
-        eps = 1e-6
-        y_pred = torch.clamp(y_pred, min=eps, max=1.0-eps)
-        y_d = torch.clamp(y_d, min=eps, max=1.0-eps)
-        y_s = torch.clamp(y_s, min=eps, max=1.0-eps)
+        # eps = 1e-6
+        # y_pred = torch.clamp(y_pred, min=eps, max=1.0-eps)
+        # y_d = torch.clamp(y_d, min=eps, max=1.0-eps)
+        # y_s = torch.clamp(y_s, min=eps, max=1.0-eps)
         
         return_dict = {"y_pred": y_pred,
                        "y_d": y_d,
-                       "y_s": y_s}
+                       "y_s": y_s,
+                       "logit": logit}
         return return_dict
 
     def _generate_domain_aware_logits_pytorch(self, X_features, net_output):

@@ -8,23 +8,29 @@ debug:
 stages:
   preranking:
     enabled: true
-    model: "PNN"
-    features: ["FG1", "FG2", "FG3"]
+    model: "DCNv3"
+    features: ["FG1", "FG2"]
     top_k: 100
     model_params:
-      num_negatives: 20
+      num_negatives: 10
       loss_type: "bpr"
 #      task: "regression"
-      use_diversity_loss: 0
+      use_diversity_loss: 1
+      diversity_lambda: 0.0001
+      diversity_theta: 0
+      diversity_start_epoch: 0   # -1 = auto (Phase 1 early stop then Phase 2)
+      diversity_epochs: 10         # Phase 2 training epochs
+      diversity_warmup_epochs: 0  # Linear warmup for diversity lambda in Phase 2
       use_feature_encoder: 1
       metrics_k: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 50, 100]
       embedding_dim: 32
-      learning_rate: 0.001
+      num_deep_cross_layers: 1
+      num_shallow_cross_layers: 1
+      num_heads: 2
       embedding_regularizer: 1.0e-5
       net_regularizer: 1.0e-5
       max_gradient_norm: 5.0
-      hidden_units: [128, 64, 32]
-      batch_norm: False
+      learning_rate: 0.001
       monitor: "Recall@100"
 
     training:

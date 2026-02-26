@@ -62,7 +62,7 @@ def parse_args():
     parser.add_argument('--gpu', nargs='+', type=int, default=[-1],
                         help='GPU device ID (-1 for CPU)')
     parser.add_argument('--mode', type=str, default='full',
-                        choices=['full', 'retrieval', 'preranking', 'reranking'],
+                        choices=['full', 'retrieval', 'preranking', 'reranking', 'joint_train'],
                         help='Pipeline execution mode')
     parser.add_argument('--n_rows', type=int, default=None,
                         help='Override debug n_rows for quick testing')
@@ -74,6 +74,8 @@ def parse_args():
                         help='Resume from previous search (skip completed experiments)')
     parser.add_argument('--seed', type=int, default=2024,
                         help='Random seed')
+    parser.add_argument('--run_reranking_test', type=int, default=1,
+                        help='Whether to run reranking test stage')
     return parser.parse_args()
 
 
@@ -170,25 +172,42 @@ def apply_params_to_config(base_config: dict, params: Dict[str, Dict[str, Any]],
         
     Returns:
         Modified configuration dict
+    
+    Note:
+        Stage names that are inside `stages:` are accessed via config['stages'][stage].
+        Top-level sections like `joint_training` are accessed directly via config[stage].
     """
     config = copy.deepcopy(base_config)
-    
+
+    TOP_LEVEL_SECTIONS = {'joint_training'}
+
+    def _get_target_dict(cfg, stage):
+        """Return the dict to apply params to for the given stage name."""
+        if stage in TOP_LEVEL_SECTIONS:
+            if stage not in cfg:
+                cfg[stage] = {}
+            return cfg[stage]
+        else:
+            return cfg.get('stages', {}).get(stage)
+
     # Apply fixed overrides first
     if fixed_overrides:
         for stage, stage_params in fixed_overrides.items():
-            if stage not in config.get('stages', {}):
+            target = _get_target_dict(config, stage)
+            if target is None:
                 continue
             for param_path, value in stage_params.items():
-                set_nested_value(config['stages'][stage], param_path, value)
-    
+                set_nested_value(target, param_path, value)
+
     # Apply search params
     for stage, stage_params in params.items():
-        if stage not in config.get('stages', {}):
+        target = _get_target_dict(config, stage)
+        if target is None:
             print(f"Warning: Stage '{stage}' not found in config, skipping")
             continue
         for param_path, value in stage_params.items():
-            set_nested_value(config['stages'][stage], param_path, value)
-    
+            set_nested_value(target, param_path, value)
+
     return config
 
 
@@ -273,6 +292,9 @@ def build_run_pipeline_cmd(
 
     if args.prev_output_path:
         cmd.extend(['--prev_output_path', args.prev_output_path])
+
+    if args.run_reranking_test:
+        cmd.extend(['--run_reranking_test', str(args.run_reranking_test)])
 
     return cmd
 
