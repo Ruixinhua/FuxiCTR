@@ -16,10 +16,10 @@ stages:
       loss_type: "bpr"
       use_diversity_loss: 0
       use_feature_encoder: 1
-      embedding_dim: 16
-      num_deep_cross_layers: 1
+      embedding_dim: 32
+      num_deep_cross_layers: 2
       num_shallow_cross_layers: 1
-      num_heads: 1
+      num_heads: 8
       deep_net_dropout: 0.1
       shallow_net_dropout: 0.1
       embedding_regularizer: 1.0e-5

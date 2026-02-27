@@ -56,16 +56,12 @@ stages:
     learning_rate: 0.001
     use_contrastive_learning: false
     loss_type: bpr
+    neg_sampling_pool: candidate
     margin: 1.0
     monitor: "Recall@100"
     cl_weights:
       cl_loss_weight: 1.0
-      knowledge_distillation_loss_weight: 1.0
-      group_aware_loss_weight: 0.5
-      feature_alignment_loss_weight: 0.0
-      field_uniformity_loss_weight: 0.0
       distance_loss_weight: 0.0
-      temperature: 4.0
 
 output:
   root: "/scratch/dliu2/FuxiCTR/outputs"
