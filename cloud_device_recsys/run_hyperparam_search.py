@@ -74,9 +74,9 @@ def parse_args():
                         help='Resume from previous search (skip completed experiments)')
     parser.add_argument('--seed', type=int, default=2024,
                         help='Random seed')
-    parser.add_argument('--run_reranking_test', type=int, default=1,
+    parser.add_argument('--run_reranking_test', type=int, default=0,
                         help='Whether to run reranking test stage')
-    parser.add_argument('--run_preranking_test', type=int, default=1,
+    parser.add_argument('--run_preranking_test', type=int, default=0,
                         help='Whether to run repranking test stage')
     return parser.parse_args()
 
