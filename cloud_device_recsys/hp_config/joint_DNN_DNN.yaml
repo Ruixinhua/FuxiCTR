@@ -27,13 +27,13 @@
 search_space:
   # ---- Joint Trainer Parameters ----
   joint_training:
-    cl_weights.distance_loss_weight: [0.0, 0.01, 0.001]
-    neg_sampling_pool: [candidate]  # candidate, full
+    cl_weights.distance_loss_weight: [0.0]
+    neg_sampling_pool: [full, candidate]  # candidate, full
   # ---- Preranking Model Parameters ----
   preranking:
     model_params.embedding_dim: [32]
     model_params.hidden_units:
-      - [128, 64, 32]
+      - [ 128, 64, 32 ]
       - [ 256, 128, 64, 32 ]
     model_params.num_negatives: [4]
   # ---- Reranking Model Parameters ----
@@ -53,7 +53,7 @@ fixed_overrides:
     cl_weights:
       cl_loss_weight: 1.0
   preranking:
-    training.epochs: 15
+    training.epochs: 20
     model_params.use_diversity_loss: 0
   reranking:
     model_params.embedding_dim: 4

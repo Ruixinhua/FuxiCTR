@@ -28,7 +28,10 @@ stages:
       learning_rate: 0.001
       metrics_k: [1, 10, 50, 100]
       monitor: "Recall@100"
-
+    training:
+      epochs: 15
+      batch_size: 4096
+      optimizer: "adam"
   reranking:
     enabled: true
     model: "DCNv3"
@@ -53,7 +56,7 @@ stages:
 
     training:
       epochs: 10
-      batch_size: 2048
+      batch_size: 4096
       optimizer: "adam"
     metrics: ["nDCG", "Recall"]
 
