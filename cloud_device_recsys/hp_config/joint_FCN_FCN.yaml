@@ -1,0 +1,40 @@
+# =============================================================================
+# Hyperparameter Search Configuration for Joint Training (FCN + FCN)
+# =============================================================================
+# Cloud-side preranking model: FCN (DCNv3)
+# Device-side reranking model: FCN (DCNv3)
+# Training mode: Joint (with Contrastive Learning)
+
+search_space:
+  # ---- Preranking Model Parameters ----
+  preranking:
+    model: ["DCNv3"]
+    model_params.embedding_dim: [32]
+    model_params.num_heads: [16, 32, 8]
+    model_params.num_negatives: [4, 8]
+    model_params.num_deep_cross_layers: [ 2, 1 ]
+    model_params.num_shallow_cross_layers: [ 1, 2 ]
+  # ---- Reranking Model Parameters ----
+  reranking:
+    model: ["DCNv3"]
+#    model_params.num_heads: [1, 2]
+  # ---- Joint Trainer Parameters ----
+  joint_training:
+    cl_weights.distance_loss_weight: [0.0, 0.01]
+    neg_sampling_pool: [full, candidate]  # candidate, full
+fixed_overrides:
+  joint_training:
+    training_mode: sequential
+    freeze_preranking: 1
+    use_contrastive_learning: 1
+    epochs: 25
+    neg_sampling_pool: full  # candidate, full
+    cl_weights:
+      cl_loss_weight: 1.0
+  preranking:
+    training.epochs: 20
+    model_params.use_diversity_loss: 0
+    model_params.learning_rate: 0.001
+  reranking:
+    model_params.embedding_dim: 4
+    model_params.use_cloud_score: 1

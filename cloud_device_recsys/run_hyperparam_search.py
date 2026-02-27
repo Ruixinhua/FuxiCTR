@@ -76,6 +76,8 @@ def parse_args():
                         help='Random seed')
     parser.add_argument('--run_reranking_test', type=int, default=1,
                         help='Whether to run reranking test stage')
+    parser.add_argument('--run_preranking_test', type=int, default=1,
+                        help='Whether to run repranking test stage')
     return parser.parse_args()
 
 
@@ -296,6 +298,8 @@ def build_run_pipeline_cmd(
     if args.run_reranking_test:
         cmd.extend(['--run_reranking_test', str(args.run_reranking_test)])
 
+    if args.run_preranking_test:
+        cmd.extend(['--run_preranking_test', str(args.run_preranking_test)])
     return cmd
 
 

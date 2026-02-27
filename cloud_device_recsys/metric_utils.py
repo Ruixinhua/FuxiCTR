@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from typing import Tuple, List, Dict, Any, Optional, TYPE_CHECKING
+from typing import Tuple, List, Dict, Any, Optional
 from .pipeline.stage_output import StageOutput
 
 def compute_ranking_metrics(
@@ -12,6 +12,8 @@ def compute_ranking_metrics(
         metrics_k: List[int] = None,
         pre_sorted: bool = False,
         top_k_for_metrics: Optional[int] = None,
+        item_features_arr: Optional[np.ndarray] = None,
+        sorted_order: Optional[np.ndarray] = None,
 ) -> Dict[str, float]:
     """
     Compute ranking metrics for a single query/user.
@@ -19,6 +21,7 @@ def compute_ranking_metrics(
     Metrics computed:
         - Recall@K: Proportion of relevant items in top-K
         - nDCG@K: Normalized Discounted Cumulative Gain at K
+        - Diversity@K: 1 - average categorical pairwise similarity of top-K items
         - MRR: Mean Reciprocal Rank over all items
         - gAUC: Group AUC over all items
         - MRR@<top_k_for_metrics>: MRR restricted to top-K items
@@ -27,7 +30,7 @@ def compute_ranking_metrics(
     Args:
         scores: Predicted scores for each item (1D array/list)
         labels: Ground truth labels (1 for relevant, 0 otherwise, 1D array/list)
-        metrics_k: List of K values for Recall@K and nDCG@K metrics
+        metrics_k: List of K values for Recall@K, nDCG@K and Diversity@K metrics
         pre_sorted: If True, scores and labels are already sorted by descending score
                     (e.g., with random tie-breaking from process_and_rank_candidates).
                     The function will skip re-sorting and use the input order as-is.
@@ -36,6 +39,11 @@ def compute_ranking_metrics(
                            items (by score). Useful for aligning preranking evaluation (1000 items)
                            with reranking evaluation (100 items). The suffix @K is appended to
                            distinguish these from the full-pool metrics.
+        item_features_arr: Optional 2D array (num_candidates, num_features) of item categorical
+                           features for this query (unsorted, indexed same as scores/labels).
+                           Required to compute Diversity@K.
+        sorted_order: Permutation array mapping sorted positions to original indices in
+                      item_features_arr. Required when item_features_arr is provided.
 
     Returns:
         Dict of metric names to values
@@ -46,7 +54,7 @@ def compute_ranking_metrics(
     if pre_sorted:
         # Trust the input ordering — scores/labels are already sorted by descending score.
         # This is consistent with the candidate ranking in process_and_rank_candidates,
-        # where ties are randomly ordered (stable sort preserves original input order).
+        # where ties are randomly ordered (stable sort preserves random order within ties).
         sorted_labels = labels
         sorted_scores = scores
     else:
@@ -98,12 +106,14 @@ def compute_ranking_metrics(
         k = top_k_for_metrics
         topk_labels = sorted_labels[:k]
         topk_scores = sorted_scores[:k]
-        metrics[f'MRR@{k}'] = _compute_mrr(topk_labels)
-        topk_pos = topk_scores[topk_labels == 1]
-        topk_neg = topk_scores[topk_labels == 0]
-        metrics[f'gAUC@{k}'] = _compute_gauc(topk_pos, topk_neg)
+        # Fair comparison: only output metrics if the top-K subset has at least one positive
+        if np.sum(topk_labels) > 0:
+            metrics[f'MRR@{k}'] = _compute_mrr(topk_labels)
+            topk_pos = topk_scores[topk_labels == 1]
+            topk_neg = topk_scores[topk_labels == 0]
+            metrics[f'gAUC@{k}'] = _compute_gauc(topk_pos, topk_neg)
 
-    # ========== Recall@K and nDCG@K ==========
+    # ========== Recall@K, nDCG@K, and Diversity@K ==========
     if metrics_k is None:
         metrics_k = []
 
@@ -130,6 +140,23 @@ def compute_ranking_metrics(
         else:
             metrics[f'nDCG@{k}'] = 0.0
 
+        # Diversity@K — 1 minus average pairwise categorical similarity
+        if item_features_arr is not None and sorted_order is not None and k > 1:
+            real_k = min(k, item_features_arr.shape[0])
+            if real_k > 1:
+                # Index into item_features_arr using sorted_order to get top-real_k features
+                feats = item_features_arr[sorted_order[:real_k]]  # (real_k, num_features)
+                sim_matrix = np.zeros((real_k, real_k), dtype=np.float64)
+                for f in range(feats.shape[1]):
+                    col = feats[:, f].reshape(-1, 1)
+                    sim_matrix += (col == col.T).astype(np.float64)
+                sim_matrix /= feats.shape[1]  # normalise to [0, 1]
+                # Average pairwise similarity (exclude diagonal self-pairs)
+                avg_sim = (sim_matrix.sum() - np.trace(sim_matrix)) / (real_k * (real_k - 1))
+                metrics[f'Diversity@{k}'] = float(1.0 - avg_sim)
+            else:
+                metrics[f'Diversity@{k}'] = 0.0
+
     return metrics
 
 
@@ -146,6 +173,7 @@ def process_and_rank_candidates(
         logger: logging.Logger = None,
         inference_batch_size: int = 100000,
         inject_cloud_score: bool = False,
+        ranking_candidates_df: Optional[pd.DataFrame] = None,
         **kwargs
 ) -> Tuple[Optional[StageOutput], Dict[str, float]]:
     """
@@ -301,6 +329,11 @@ def process_and_rank_candidates(
     else:
         logger.warning("No valid items found in item pool.")
         return output, metrics
+
+    # Precompute diversity feature matrix: shape (num_valid, num_item_features)
+    # Uses item_features_df columns (cate_id, brand, …) for categorical similarity.
+    # Kept as float64 so integer IDs remain exact.
+    item_feat_diversity_arr: np.ndarray = item_features_lookup.values.astype(np.float64)
 
     # ========== Phase 3: Prepare user feature metadata ==========
     valid_global_indices = np.where(valid_mask)[0]
@@ -587,8 +620,9 @@ def process_and_rank_candidates(
     global_to_valid_idx[valid_global_indices] = np.arange(num_valid)
     num_queries = 0
     valid_queries = 0
+    valid_queries_at_k = 0
     if compute_metrics:
-        total_metrics = {f'{m}@{k}': 0.0 for k in metrics_k for m in ['Recall', 'nDCG']}
+        total_metrics = {f'{m}@{k}': 0.0 for k in metrics_k for m in ['Recall', 'nDCG', 'Diversity']}
         total_metrics['MRR'] = 0.0
         total_metrics['gAUC'] = 0.0
         total_metrics[f'gAUC@{top_k}'] = 0.0
@@ -599,6 +633,20 @@ def process_and_rank_candidates(
         # Accumulators for global AUC restricted to top-K items per user
         all_topk_scores_list = []
         all_topk_labels_list = []
+
+    # Build per-request ranking candidate sets if ranking_candidates_df is provided
+    # This is used to restrict Recall@K/nDCG@K to a preranking-filtered subset,
+    # while still computing AUC/gAUC on the full pool (fair cross-stage comparison).
+    ranking_item_sets = None
+    if ranking_candidates_df is not None and compute_metrics:
+        # Build a dict: request_id -> set of item_ids in the filtered subset
+        ranking_item_sets = (
+            ranking_candidates_df.groupby('request_id')['item_id']
+            .apply(set)
+            .to_dict()
+        )
+        logger.info(f"Using ranking_candidates_df with {len(ranking_item_sets)} requests "
+                    f"for Recall@K/nDCG@K ({len(ranking_candidates_df)} filtered candidates)")
 
     effective_top_k = kwargs.get('top_k', top_k)
 
@@ -662,16 +710,43 @@ def process_and_rank_candidates(
             sorted_order = random_perm[np.argsort(-req_scores[random_perm], kind='stable')]
             sorted_scores = req_scores[sorted_order]
             sorted_labels = req_labels[sorted_order]
-            # Accumulate raw scores/labels for global AUC
+            sorted_item_ids = req_item_ids[sorted_order]
+
+            # ------------------------------------------------------------------
+            # If ranking_candidates_df is provided, use it to restrict the
+            # Recall@K / nDCG@K sorted list to the preranking-filtered items.
+            # AUC / gAUC still use the full sorted_scores / sorted_labels.
+            # ------------------------------------------------------------------
+            if ranking_item_sets is not None and req_id in ranking_item_sets:
+                # Mask: which positions in the full sorted list are in the filtered set
+                rank_mask = np.isin(sorted_item_ids, list(ranking_item_sets[req_id]))
+                recall_sorted_scores = sorted_scores[rank_mask]
+                recall_sorted_labels = sorted_labels[rank_mask]
+            else:
+                recall_sorted_scores = sorted_scores
+                recall_sorted_labels = sorted_labels
+
+            # Accumulate raw scores/labels for global AUC (always full pool)
             all_query_scores_list.append(req_scores)
             all_query_labels_list.append(req_labels)
-            # Accumulate top-K scores/labels for AUC@K
+            # Accumulate top-K scores/labels for AUC@K (from full sorted list)
             k = min(top_k, len(sorted_scores))
-            all_topk_scores_list.append(sorted_scores[:k])
-            all_topk_labels_list.append(sorted_labels[:k])
+            topk_labels_subset = sorted_labels[:k]
+            if np.sum(topk_labels_subset) > 0:
+                valid_queries_at_k += 1
+                all_topk_scores_list.append(sorted_scores[:k])
+                all_topk_labels_list.append(topk_labels_subset)
+
+            # Extract item features for this query (for Diversity@K computation)
+            # item_features_lookup rows are indexed same as item_feat_diversity_arr;
+            # req_valid_idx maps query candidates into that global valid array.
+            req_item_feat_diversity = item_feat_diversity_arr[req_valid_idx]  # (num_cands, num_feats)
+
             query_metrics = compute_ranking_metrics(
-                sorted_scores, sorted_labels, metrics_k,
-                pre_sorted=True, top_k_for_metrics=top_k
+                recall_sorted_scores, recall_sorted_labels, metrics_k,
+                pre_sorted=True, top_k_for_metrics=top_k,
+                item_features_arr=req_item_feat_diversity,
+                sorted_order=sorted_order,
             )
             # Detailed debugging for first 3 queries
             if num_queries < 3:
@@ -711,12 +786,13 @@ def process_and_rank_candidates(
     if compute_metrics:
         if num_queries > 0:
             gauc_metrics = {'gAUC', 'MRR'}
-            gauc_metrics.add(f'gAUC@{top_k}')
-            gauc_metrics.add(f'MRR@{top_k}')
+            gauc_metrics_at_k = {f'gAUC@{top_k}', f'MRR@{top_k}'}
             for metric_name in total_metrics:
                 if metric_name in gauc_metrics:
                     # gAUC / MRR averaged only over queries that have at least one positive
                     metrics[metric_name] = total_metrics[metric_name] / valid_queries if valid_queries > 0 else 0.0
+                elif metric_name in gauc_metrics_at_k:
+                    metrics[metric_name] = total_metrics[metric_name] / valid_queries_at_k if valid_queries_at_k > 0 else 0.0
                 else:
                     metrics[metric_name] = total_metrics[metric_name] / num_queries
 

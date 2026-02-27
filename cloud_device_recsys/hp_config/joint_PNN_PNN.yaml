@@ -19,30 +19,26 @@
 # -----------------------------------------
 # Search Space Definition
 # -----------------------------------------
-# Sections match top-level config keys:
+# Sections match top-level config keys via apply_params_to_config:
 #   - joint_training: controls the joint trainer (learning rate, CL, etc.)
 #   - preranking: overrides config['stages']['preranking']
-#   - reranking: overrides config['stages']['reranking']
+#   - reranking:   overrides config['stages']['reranking']
 
 search_space:
   # ---- Joint Trainer Parameters ----
   joint_training:
-    use_contrastive_learning: [false, true]
-    learning_rate: [0.0005, 0.001]
-
+    cl_weights.distance_loss_weight: [0.0, 0.1]
+    neg_sampling_pool: [full, candidate]  # candidate, full
   # ---- Preranking Model Parameters ----
   preranking:
     model_params.embedding_dim: [16, 32]
     model_params.hidden_units:
       - [128, 64, 32]
-      - [256, 128, 64]
-    model_params.num_negatives: [4, 0, 20]
-
+    model_params.num_negatives: [4]
   # ---- Reranking Model Parameters ----
   reranking:
-    model_params.embedding_dim: [4]
+    model_params.num_negatives: [4]
     model_params.hidden_units:
-      - [64, 32]
       - [128, 64, 32]
 
 # -----------------------------------------
@@ -50,23 +46,15 @@ search_space:
 # -----------------------------------------
 fixed_overrides:
   joint_training:
-    epochs: 10
-    loss_type: "bpr"
-    monitor: "Recall@100"
+    use_contrastive_learning: true
+    training_mode: sequential
+    freeze_preranking: true
+    neg_sampling_pool: full   # 'full' = all 800K+ items; 'candidate' = ~28K candidate pool
     cl_weights:
       cl_loss_weight: 1.0
-      knowledge_distillation_loss_weight: 1.0
-      group_aware_loss_weight: 0.5
-      feature_alignment_loss_weight: 0.0
-      field_uniformity_loss_weight: 0.0
-      distance_loss_weight: 0.0
-      temperature: 4.0
   preranking:
-    model_params.loss_type: "bpr"
-    model_params.use_feature_encoder: 1
+    training.epochs: 15
     model_params.use_diversity_loss: 0
-    training.batch_size: 4096
   reranking:
-    model_params.use_feature_encoder: 1
+    model_params.embedding_dim: 4
     model_params.use_cloud_score: false
-    training.batch_size: 2048
