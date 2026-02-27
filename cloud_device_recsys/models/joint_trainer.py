@@ -116,15 +116,43 @@ class CloudDeviceJointTrainer(BaseModel, ContrastiveLearningBase):
     # Forward / Loss
     # ------------------------------------------------------------------
 
-    def forward(self, inputs):
-        """Forward pass through both preranking and reranking models."""
+    def forward(self, inputs, re_inputs=None):
+        """Forward pass through both preranking and reranking models.
+
+        Args:
+            inputs: Batch dict for the **preranking** model (FG1/FG2 features).
+            re_inputs: Batch dict for the **reranking** model (FG1/FG2/FG3 + optional
+                cloud_score).  When ``None`` the same ``inputs`` dict is used for both
+                models — this is the legacy behaviour valid only when both models share
+                an identical feature set.
+        """
         target_device = next(self.preranking_model.parameters()).device
         inputs = {k: v.to(target_device) if isinstance(v, torch.Tensor) else v
                   for k, v in inputs.items()}
+        if re_inputs is None:
+            re_inputs = inputs
+        else:
+            re_inputs = {k: v.to(target_device) if isinstance(v, torch.Tensor) else v
+                         for k, v in re_inputs.items()}
+
         self._current_inputs = inputs
 
         pre_output = self.preranking_model(inputs)
-        re_output = self.reranking_model(inputs)
+
+        # Inject cloud_score into re_inputs if the reranking feature_map expects it.
+        # We run the preranking model on the reranking batch's shared features (FG1/FG2)
+        # to produce a cloud_score that matches re_inputs' batch size.
+        if 'cloud_score' in self.reranking_model.feature_map.features and \
+                'cloud_score' not in re_inputs:
+            pre_known = set(self.preranking_model.feature_map.features.keys())
+            re_pre_inputs = {k: v for k, v in re_inputs.items() if k in pre_known}
+            with torch.no_grad():
+                re_pre_out = self.preranking_model(re_pre_inputs)
+                pre_logit = torch.logit(re_pre_out['y_pred'].detach().squeeze(-1), eps=1e-7)
+                mean, std = pre_logit.mean(), pre_logit.std() + 1e-8
+                re_inputs['cloud_score'] = (pre_logit - mean) / std
+
+        re_output  = self.reranking_model(re_inputs)
 
         return_dict = {
             "pre_pred": pre_output.get("y_pred"),
@@ -132,7 +160,6 @@ class CloudDeviceJointTrainer(BaseModel, ContrastiveLearningBase):
         }
 
         # Extract embeddings for CL if needed.
-        # Filter inputs to each model's own feature set to avoid KeyErrors.
         if self.use_contrastive_learning and self.training:
             if hasattr(self.preranking_model, 'embedding_layer'):
                 pre_known = set(self.preranking_model.feature_map.features.keys())
@@ -144,7 +171,7 @@ class CloudDeviceJointTrainer(BaseModel, ContrastiveLearningBase):
                 re_known = set(self.reranking_model.feature_map.features.keys())
                 return_dict["re_emb"] = self.get_feature_embeddings(
                     self.reranking_model.embedding_layer,
-                    {k: v for k, v in inputs.items() if k in re_known}
+                    {k: v for k, v in re_inputs.items() if k in re_known}
                 )
 
         return return_dict
@@ -181,8 +208,17 @@ class CloudDeviceJointTrainer(BaseModel, ContrastiveLearningBase):
     # Training loop (simultaneous)
     # ------------------------------------------------------------------
 
-    def train_epoch(self, data_generator):
-        """One simultaneous training epoch: both models update every batch."""
+    def train_epoch(self, data_generator, re_data_generator=None):
+        """One simultaneous training epoch: both models update every batch.
+
+        Args:
+            data_generator: Iterator for **preranking** model batches.
+            re_data_generator: Optional iterator for **reranking** model batches.
+                When provided each step draws one preranking batch and one
+                (independent) reranking batch and feeds them to the respective
+                models.  When ``None`` the same preranking batch is used for
+                both models — valid only if both models share the same feature set.
+        """
         self._batch_index = 0
         train_loss = 0
         self.train()
@@ -198,20 +234,32 @@ class CloudDeviceJointTrainer(BaseModel, ContrastiveLearningBase):
             import sys
             batch_iterator = tqdm(data_generator, disable=True, file=sys.stdout)
 
+        re_iter = iter(re_data_generator) if re_data_generator is not None else None
+
         for batch_index, batch_data in enumerate(batch_iterator):
             self._batch_index = batch_index
+
+            # Obtain a reranking batch (cycle if shorter than preranking loader)
+            re_batch_data = None
+            if re_iter is not None:
+                try:
+                    re_batch_data = next(re_iter)
+                except StopIteration:
+                    re_iter = iter(re_data_generator)
+                    re_batch_data = next(re_iter)
+
             if use_negatives:
-                loss = self._train_step_with_negatives_online(batch_data)
+                loss = self._train_step_with_negatives_online(batch_data, re_batch_data)
             else:
-                loss = self.train_step(batch_data)
+                loss = self.train_step(batch_data, re_batch_data)
             train_loss += loss.item()
 
         return train_loss / (self._batch_index + 1)
 
-    def train_step(self, batch_data):
+    def train_step(self, batch_data, re_batch_data=None):
         """Pointwise cross-entropy simultaneous training step."""
         self.optimizer.zero_grad()
-        return_dict = self.forward(batch_data)
+        return_dict = self.forward(batch_data, re_batch_data)
         y_true = self.get_labels(batch_data).to(self.device)
         loss = self.add_loss(return_dict, y_true) + self.regularization_loss()
         loss.backward()
@@ -222,13 +270,21 @@ class CloudDeviceJointTrainer(BaseModel, ContrastiveLearningBase):
         self.optimizer.step()
         return loss
 
-    def _train_step_with_negatives_online(self, batch_data):
-        """Online pairwise training step with on-the-fly negative sampling."""
+    def _train_step_with_negatives_online(self, batch_data, re_batch_data=None):
+        """Online pairwise training step with on-the-fly negative sampling.
+
+        Builds a negative batch for the *preranking* model from ``batch_data``.
+        If ``re_batch_data`` is provided it is used as the reranking positive
+        batch and a corresponding reranking negative batch is constructed from
+        it; otherwise the same preranking batch/neg_batch are reused for the
+        reranking model (legacy, only valid when feature sets are identical).
+        """
         import numpy as np
         batch_dict = dict(batch_data)
         item_id_col = self._item_id_col
         model_device = next(self.preranking_model.parameters()).device
 
+        # ---- Preranking negatives (built from preranking batch) ----
         pos_item_ids = batch_dict[item_id_col].cpu().numpy()
         neg_item_ids = self.negative_sampler.sample_negatives_batch(pos_item_ids, self.num_negatives)
         neg_ids_flat = neg_item_ids.reshape(-1)
@@ -250,19 +306,67 @@ class CloudDeviceJointTrainer(BaseModel, ContrastiveLearningBase):
                 else:
                     neg_batch_dict[key] = val
 
-        return self._train_step_with_negatives(batch_dict, neg_batch_dict)
+        # ---- Reranking negatives (built from re_batch_data if available) ----
+        if re_batch_data is not None:
+            re_batch_dict = dict(re_batch_data)
+            re_pos_item_ids = re_batch_dict[item_id_col].cpu().numpy()
+            re_neg_item_ids = self.negative_sampler.sample_negatives_batch(
+                re_pos_item_ids, self.num_negatives
+            )
+            re_neg_ids_flat = re_neg_item_ids.reshape(-1)
+            re_neg_features_df = self.negative_sampler.get_features_by_ids(re_neg_ids_flat)
 
-    def _train_step_with_negatives(self, pos_batch_data, neg_batch_data):
-        """Pairwise (BPR / Margin / Softmax) simultaneous training step."""
-        batch_size = next(iter(pos_batch_data.values())).size(0)
+            re_neg_batch_dict = {}
+            for key, val in re_batch_dict.items():
+                if key == item_id_col:
+                    re_neg_batch_dict[key] = torch.tensor(re_neg_ids_flat, device=model_device)
+                elif key in re_neg_features_df.columns:
+                    col_vals = re_neg_features_df[key].to_numpy(copy=False)
+                    if not np.isscalar(col_vals[0]):
+                        col_vals = np.vstack(col_vals)
+                    re_neg_batch_dict[key] = torch.tensor(col_vals, device=model_device)
+                else:
+                    if hasattr(val, 'to'):
+                        val = val.to(model_device)
+                        re_neg_batch_dict[key] = val.repeat_interleave(self.num_negatives, dim=0)
+                    else:
+                        re_neg_batch_dict[key] = val
+        else:
+            # Legacy: reuse preranking batches for reranking model
+            re_batch_dict = batch_dict
+            re_neg_batch_dict = neg_batch_dict
 
-        pos_output = self.forward(pos_batch_data)
-        neg_output = self.forward(neg_batch_data)
+        return self._train_step_with_negatives(
+            batch_dict, neg_batch_dict, re_batch_dict, re_neg_batch_dict
+        )
+
+    def _train_step_with_negatives(self, pos_batch_data, neg_batch_data,
+                                   re_pos_batch_data=None, re_neg_batch_data=None):
+        """Pairwise (BPR / Margin / Softmax) simultaneous training step.
+
+        Args:
+            pos_batch_data: Positive batch for preranking model.
+            neg_batch_data: Negative batch for preranking model.
+            re_pos_batch_data: Positive batch for reranking model (may differ in feature set).
+                               Falls back to ``pos_batch_data`` when ``None``.
+            re_neg_batch_data: Negative batch for reranking model.
+                               Falls back to ``neg_batch_data`` when ``None``.
+        """
+        if re_pos_batch_data is None:
+            re_pos_batch_data = pos_batch_data
+        if re_neg_batch_data is None:
+            re_neg_batch_data = neg_batch_data
+
+        batch_size    = next(iter(pos_batch_data.values())).size(0)
+        re_batch_size = next(iter(re_pos_batch_data.values())).size(0)
+
+        pos_output = self.forward(pos_batch_data, re_pos_batch_data)
+        neg_output = self.forward(neg_batch_data, re_neg_batch_data)
 
         pre_pos = pos_output["pre_pred"]
         re_pos  = pos_output["re_pred"]
         pre_neg = neg_output["pre_pred"].view(batch_size, self.num_negatives)
-        re_neg  = neg_output["re_pred"].view(batch_size, self.num_negatives)
+        re_neg  = neg_output["re_pred"].view(re_batch_size, self.num_negatives)
 
         if self.loss_type == 'bpr':
             pre_loss = bpr_loss(pre_pos, pre_neg)

@@ -249,7 +249,11 @@ class CloudDeviceJointTrainingStage:
         final_pre_v, final_re_v = {}, {}
         for epoch in range(self.epochs):
             self.logger.info(f"--- Epoch {epoch + 1}/{self.epochs} ---")
-            self._joint_trainer.train_epoch(self.preranking_train_loader.make_iterator()[0])
+            # Each model receives batches from its own loader so that the
+            # feature dimensionalities match the model's feature_map exactly.
+            pre_iter = self.preranking_train_loader.make_iterator()[0]
+            re_iter  = self.reranking_train_loader.make_iterator()[0]
+            self._joint_trainer.train_epoch(pre_iter, re_data_generator=re_iter)
             best_pre, best_re, final_pre_v, final_re_v = self._validate_and_checkpoint(
                 f"Epoch {epoch + 1}/{self.epochs}", best_pre, best_re, prev_output_valid
             )

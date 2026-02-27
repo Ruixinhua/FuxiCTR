@@ -416,7 +416,7 @@ def load_stage_outputs_from_dir(
         output_dir: str,
         prev_stage_name: str,
         logger: logging.Logger = None,
-        load_test: bool = True,
+        load_test: bool = True
 ) -> Tuple[Optional[StageOutput], Optional[StageOutput]]:
     """
     Load valid and test stage outputs from a directory. Auto-detects Parquet or pickle format.
@@ -425,24 +425,22 @@ def load_stage_outputs_from_dir(
         output_dir: Directory containing stage output files (e.g., './outputs/exp_xxx/stage_outputs')
         prev_stage_name: Name of the previous stage (e.g., 'retrieval' or 'preranking')
         logger: Optional logger instance
-        load_test: Whether to load test stage output (default: True)
+        load_test: If True, load test stage outputs
+
     Returns:
         Tuple of (valid_output, test_output), both can be None if loading fails
     """
     # Try Parquet format first (directory), then fall back to pickle (.pkl file)
-    valid_parquet = os.path.join(output_dir, f"{prev_stage_name}_valid_stage_output")
-    valid_pickle = os.path.join(output_dir, f"{prev_stage_name}_valid_stage_output.pkl")
-    valid_path = valid_parquet if os.path.isdir(valid_parquet) else valid_pickle
-    valid_output = load_stage_output(valid_path, logger)
-    
+    test_output = None
     if load_test:
         test_parquet = os.path.join(output_dir, f"{prev_stage_name}_test_stage_output")
         test_pickle = os.path.join(output_dir, f"{prev_stage_name}_test_stage_output.pkl")
         test_path = test_parquet if os.path.isdir(test_parquet) else test_pickle
         test_output = load_stage_output(test_path, logger)
-    else:
-        test_output = None
-
+    valid_parquet = os.path.join(output_dir, f"{prev_stage_name}_valid_stage_output")
+    valid_pickle = os.path.join(output_dir, f"{prev_stage_name}_valid_stage_output.pkl")
+    valid_path = valid_parquet if os.path.isdir(valid_parquet) else valid_pickle
+    valid_output = load_stage_output(valid_path, logger)
     return valid_output, test_output
 
 
