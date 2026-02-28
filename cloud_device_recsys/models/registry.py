@@ -142,6 +142,13 @@ def build_model(
     logger.info(f"Building model: {model_name}")
     model = model_cls(feature_map, **params)
     
+    # Apply vocabulary pruning if prune_info is available on the feature_map
+    vocab_prune_info = getattr(feature_map, '_vocab_prune_info', None)
+    if vocab_prune_info and vocab_prune_info.features:
+        from .compact_embedding import apply_vocab_pruning_to_model
+        logger.info(f"Applying vocabulary pruning to {model_name}...")
+        apply_vocab_pruning_to_model(model, vocab_prune_info, feature_map)
+    
     # Apply diversity loss wrapper if requested
     if use_diversity_loss:
         model = wrap_model_with_diversity(

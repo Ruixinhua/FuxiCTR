@@ -77,21 +77,23 @@ def create_stages(
     STAGE_REGISTRY = {
         'retrieval': {
             'class': RetrievalStage,
-            'model_kwargs_map': {
+            'kwargs_map': {
                 'features': 'allowed_feature_groups',
                 'top_k': 'top_k'
             }
         },
         'preranking': {
             'class': PrerankingStage,
-            'model_kwargs_map': {
+            'kwargs_map': {
+                'features': 'allowed_feature_groups',
                 'top_k': 'top_k',
                 'use_diversity': 'use_diversity'
             }
         },
         'reranking': {
             'class': RerankingStage,
-            'model_kwargs_map': {
+            'kwargs_map': {
+                'features': 'allowed_feature_groups',
                 'top_k': 'top_k',
                 'distillation': 'support_distillation'  # config 'distillation' maps to class 'support_distillation'
             }
@@ -118,7 +120,7 @@ def create_stages(
             }
 
             # Add extra parameters dynamically
-            for config_key, class_param in stage_info['model_kwargs_map'].items():
+            for config_key, class_param in stage_info['kwargs_map'].items():
                 if config_key in stage_config:
                     if config_key == 'features':  # Special handling for 'features' to map to enum
                         stage_kwargs[class_param] = [getattr(FeatureGroup, f) for f in stage_config['features']]
@@ -235,6 +237,7 @@ def _create_item_feature_map(feature_map, fg_manager):
     item_fm.set_column_index()
     item_fm.column_index = {k: v for k, v in item_fm.column_index.items() if k in item_feature_names}
     return item_fm
+
 
 def run_retrieval_stage(retrieval_stage, pipeline_config, dataset_config, fg_manager, logger=None, run_test=True):
     if logger is None:
@@ -361,16 +364,6 @@ def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, fg_m
     paths = get_data_paths(dataset_config, pipeline_config, logger)
     paths = prepare_debug_paths(paths, dataset_config, logger)
 
-    # Ensure item pool exists (test/valid only - for evaluation)
-    if fg_manager is not None:
-        ensure_item_pool(
-            data_paths={'item_pool_path': paths['item_pool_path'], 'valid_path': paths['valid_path'],
-                        'test_path': paths['test_path']},
-            dataset_config=dataset_config,
-            feature_group_manager=fg_manager,
-            logger=logger
-        )
-
     # Create data loaders for preranking stage
     num_negatives = preranking_config.get('model_params', {}).get('num_negatives', 0)
     loaders = _prepare_stage_data_loaders(
@@ -384,25 +377,43 @@ def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, fg_m
         logger=logger
     )
     train_gen, _ = loaders['train_loader'].make_iterator()
-
+    cand_item_pool_path = ensure_item_pool(
+        data_paths={'item_pool_path': paths['item_pool_path'], 'valid_path': paths['valid_path'],
+                    'test_path': paths['test_path']},
+        dataset_config=dataset_config,
+        feature_group_manager=fg_manager,
+        logger=logger
+    )
     # Load item pool for training (negative sampling) vs evaluation
     if num_negatives > 0 and fg_manager is not None:
-        # Use FULL item pool (train+valid+test) for negative sampling during training
-        full_pool_path = ensure_full_item_pool(
-            data_paths=paths,
-            dataset_config=dataset_config,
-            feature_group_manager=fg_manager,
-            logger=logger
-        )
-        preranking_stage.load_item_features(full_pool_path)
-        logger.info(f"[Preranking] Loaded FULL item pool ({len(preranking_stage.item_features_df)} items) for negative sampling")
+        neg_pool_mode = preranking_config.get('neg_sampling_pool', 'candidate')
+        if neg_pool_mode == 'full':
+            neg_pool_path = ensure_full_item_pool(
+                data_paths=paths,
+                dataset_config=dataset_config,
+                feature_group_manager=fg_manager,
+                logger=logger
+            )
+        else:
+            neg_pool_path = cand_item_pool_path
+        # Use item pool (train+valid+test) for negative sampling during training
+        preranking_stage.load_item_features(neg_pool_path)
+        logger.info(f"[Preranking] Negative sampling pool: '{neg_pool_mode}' → {neg_pool_path} ({len(preranking_stage.item_features_df)} items) for negative sampling")
     else:
         # Pointwise mode: load test/valid-only pool directly for evaluation
         if os.path.exists(paths['item_pool_path']):
             preranking_stage.load_item_features(paths['item_pool_path'])
         else:
             logger.warning(f"Item pool not found at {paths['item_pool_path']}. Evaluation will lack negative features.")
-
+    # Enrich stage outputs with missing FG3 user features (backward compatibility)
+    if fg_manager is not None:
+        impression_id_col = dataset_config.get('impression_id_col', 'impression_id')
+        prev_output_valid = enrich_stage_output_user_features(
+            prev_output_valid, paths['valid_path'], fg_manager, impression_id_col, logger
+        )
+        prev_output_test = enrich_stage_output_user_features(
+            prev_output_test, paths['test_path'], fg_manager, impression_id_col, logger
+        )
     # 2. Train Preranking Model
     logger.info("[Preranking] Training model...")
     preranking_stage.build_model()
@@ -414,9 +425,9 @@ def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, fg_m
     )
 
     # After training, switch to test/valid-only item pool for evaluation/processing
-    if num_negatives > 0 and os.path.exists(paths['item_pool_path']):
-        preranking_stage.load_item_features(paths['item_pool_path'])
-        logger.info(f"[Preranking] Switched to eval item pool ({len(preranking_stage.item_features_df)} items) for processing")
+    if num_negatives > 0 and os.path.exists(cand_item_pool_path):
+        preranking_stage.load_item_features(cand_item_pool_path)
+        logger.info(f"[Preranking] Switched to eval item pool '{cand_item_pool_path}' → {cand_item_pool_path} ({len(preranking_stage.item_features_df)} items) for negative sampling")
 
     # 3. Pipeline Processing
     logger.info("[Preranking] Processing pipeline candidates...")
@@ -503,7 +514,13 @@ def run_joint_training_stage(preranking_stage, reranking_stage, pipeline_config,
             feature_group_manager=fg_manager,
             logger=logger,
         )
-
+        impression_id_col = dataset_config.get('impression_id_col', 'impression_id')
+        prev_output_valid = enrich_stage_output_user_features(
+            prev_output_valid, paths['valid_path'], fg_manager, impression_id_col, logger
+        )
+        prev_output_test = enrich_stage_output_user_features(
+            prev_output_test, paths['test_path'], fg_manager, impression_id_col, logger
+        )
     # 3. Build individual stage models
     preranking_stage.build_model()
     preranking_stage.best_weights_path = os.path.join(
@@ -605,15 +622,18 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_man
 
     # Load item pool for training (negative sampling) vs evaluation
     if num_negatives > 0 and fg_manager is not None:
-        # Use FULL item pool (train+valid+test) for negative sampling during training
-        full_pool_path = ensure_full_item_pool(
+        neg_pool_mode = reranking_config.get('neg_sampling_pool', 'candidate')
+        if neg_pool_mode == 'full':
+            neg_pool_path = ensure_full_item_pool(
             data_paths=paths,
             dataset_config=dataset_config,
             feature_group_manager=fg_manager,
             logger=logger
-        )
-        reranking_stage.load_item_features(full_pool_path)
-        logger.info(f"[Reranking] Loaded FULL item pool ({len(reranking_stage.item_features_df)} items) for negative sampling")
+            )
+        else:
+            neg_pool_path = paths['item_pool_path']
+        reranking_stage.load_item_features(neg_pool_mode)
+        logger.info(f"[Reranking] Negative sampling pool: '{neg_pool_mode}' → {neg_pool_path} ({len(reranking_config.item_features_df)} items) for negative sampling")
     else:
         # Pointwise mode: load test/valid-only pool directly for evaluation
         if os.path.exists(paths['item_pool_path']):
@@ -766,6 +786,35 @@ def main():
             feature_map.labels.append(impression_id_col)
 
         logger.info(f"Loaded feature map with {len(feature_map.features)} features")
+
+        # --- Vocabulary Pruning (optional) ---
+        # Reduces embedding size by scanning data for actually-used feature values.
+        # Scans train + valid + test to ensure no feature value is lost during evaluation.
+        vocab_pruning_config = pipeline_config.get('vocab_pruning', {})
+        if vocab_pruning_config.get('enabled', False):
+            from cloud_device_recsys.data.vocab_pruner import compute_vocab_pruning
+            # Collect all data paths to scan (train + valid + test)
+            train_positive_path = os.path.join(data_dir, 'train_positive.parquet')
+            train_full_path = os.path.join(data_dir, 'train.parquet')
+            valid_path = os.path.join(data_dir, 'valid.parquet')
+            test_path = os.path.join(data_dir, 'test.parquet')
+            # Use train_positive if it exists (negative sampling mode), otherwise full train
+            train_scan_path = train_positive_path if os.path.exists(train_positive_path) else train_full_path
+            scan_paths = [train_scan_path, valid_path, test_path]
+            logger.info(f"[VocabPruner] Will scan {len(scan_paths)} data splits for vocabulary usage")
+            prune_info = compute_vocab_pruning(
+                feature_map,
+                data_paths=scan_paths,
+                min_vocab_size=vocab_pruning_config.get('min_vocab_size', 100),
+                min_reduction_ratio=vocab_pruning_config.get('min_reduction_ratio', 0.3),
+                cache_dir=data_dir,
+            )
+            # Attach to feature_map for use in model building (registry.py)
+            feature_map._vocab_prune_info = prune_info
+            logger.info(f"[VocabPruner] Pruning complete. {len(prune_info.features)} features pruned.")
+        else:
+            feature_map._vocab_prune_info = None
+
     else:
         logger.warning(f"Feature map not found at {feature_map_json}")
         logger.info("Please run data preprocessing first")

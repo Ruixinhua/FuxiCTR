@@ -38,6 +38,7 @@ class PrerankingStage(BaseStage):
                  feature_map: FeatureMap,
                  feature_group_manager: FeatureGroupManager,
                  model_params: Dict[str, Any],
+                 allowed_feature_groups: List[FeatureGroup] = None,
                  output_dir: str = "./outputs/preranking",
                  top_k: int = 100,
                  **kwargs):
@@ -48,15 +49,19 @@ class PrerankingStage(BaseStage):
             feature_map: FuxiCTR FeatureMap
             feature_group_manager: Feature group manager
             model_params: Parameters for preranking model
+            allowed_feature_groups: Allowed feature groups
             output_dir: Output directory
             top_k: Number of candidates to pass to next stage
             use_diversity: Whether to apply diversity in selection
         """
+        if allowed_feature_groups is None:
+            allowed_feature_groups = [FeatureGroup.FG1, FeatureGroup.FG2]
+            
         super().__init__(
             stage_name="preranking",
             stage_type=StageType.PRERANKING,
             feature_group_manager=feature_group_manager,
-            allowed_feature_groups=[FeatureGroup.FG1, FeatureGroup.FG2],
+            allowed_feature_groups=allowed_feature_groups,
             output_dir=output_dir,
             **kwargs
         )
@@ -478,6 +483,21 @@ class PrerankingStage(BaseStage):
                     neg_batch_dict[key] = val
         
         # Single forward pass for all negatives
+        # --- DIAGNOSTIC INJECTION ---
+        if True:
+            # Check for any dtype anomalies or out-of-bound indices
+            fmap = self.model.feature_map
+            for k, v in neg_batch_dict.items():
+                if isinstance(v, torch.Tensor) and k in fmap.features:
+                    vocab_size = fmap.features[k].get('vocab_size', None)
+                    if vocab_size is not None and v.dtype in [torch.int32, torch.int64]:
+                        max_val = v.max().item()
+                        min_val = v.min().item()
+                        if max_val >= vocab_size or min_val < 0:
+                            print(f"!!! OUT OF BOUNDS !!! key={k} max={max_val} min={min_val} vocab_size={vocab_size}", flush=True)
+                    if v.dtype not in [torch.int32, torch.int64] and fmap.features[k]['type'] == 'categorical':
+                        print(f"!!! TYPE MISMATCH !!! key={k} dtype={v.dtype} expected integer", flush=True)
+        # ---------------------------
         neg_output = self.model.forward(neg_batch_dict)
         neg_scores_flat = neg_output['y_pred']  # [B * num_neg, 1]
         
@@ -535,8 +555,7 @@ class PrerankingStage(BaseStage):
             Tuple of (StageOutput with Top-K candidates, metrics dict)
         """
         from ..metric_utils import process_and_rank_candidates
-
-        if os.path.exists(self.best_weights_path):
+        if os.path.exists(self.best_weights_path) and kwargs.pop('load_best_model', True):
             self.model.load_weights(self.best_weights_path)
             self.logger.info(f"Loaded best weights from {self.best_weights_path}")
         else:

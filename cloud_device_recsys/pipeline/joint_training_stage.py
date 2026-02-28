@@ -108,14 +108,13 @@ class CloudDeviceJointTrainingStage:
             self.preranking_stage.model.load_weights(self.preranking_stage.best_weights_path)
             self.reranking_stage.model.load_weights(self.reranking_stage.best_weights_path)
             # self._reload_item_features()
-
             self.logger.info("[JointTraining/Test] Preranking step...")
-            prerank_out_test, prerank_test_metrics = self.preranking_stage.process(
-                prev_output_test, compute_metrics=True
-            )
-            prerank_out_test_enriched = self._enrich(prerank_out_test, self.paths['test_path'])
+            prev_output_test = self._enrich(prev_output_test, self.paths['test_path'])
             retrieval_enriched_test = self._enrich(prev_output_test, self.paths['test_path'])
-
+            prerank_out_test, prerank_test_metrics = self.preranking_stage.process(
+                prev_output_test, compute_metrics=True, load_best=False
+            )
+            prerank_out_test_enriched = self._enrich(prev_output_test, self.paths['test_path'])
             self.logger.info("[JointTraining/Test] Reranking step (fair AUC on 1000 candidates)...")
             rerank_test_metrics = self.reranking_stage.evaluate(
                 retrieval_enriched_test, preranking_output=prerank_out_test_enriched
@@ -150,7 +149,7 @@ class CloudDeviceJointTrainingStage:
         preranking_train_cfg = {k: v for k, v in preranking_train_cfg.items() if k not in _explicit}
         reranking_train_cfg  = {k: v for k, v in reranking_train_cfg.items()  if k not in _explicit}
         best_pre, best_re = -float('inf'), -float('inf')
-
+        # prev_output_valid = self._enrich(prev_output_valid, self.paths['valid_path'])  # enrich once and reuse for both phases
         # ---- Phase 1: Preranking ----
         self.logger.info(
             f"[Sequential] Phase 1: Training Preranking for up to {self.preranking_epochs} epochs..."
@@ -183,7 +182,7 @@ class CloudDeviceJointTrainingStage:
 
         # Generate preranking top-100 output as the validation feed for reranking
         self.logger.info("[Sequential] Generating preranking output for reranking validation...")
-        prerank_valid_for_re, _ = self.preranking_stage.process(prev_output_valid, compute_metrics=False)
+        prerank_valid_for_re, _ = self.preranking_stage.process(prev_output_valid, compute_metrics=False, load_best=True)
         prerank_valid_for_re = self._enrich(prerank_valid_for_re, self.paths['valid_path'])
 
         self.logger.info(
@@ -206,7 +205,12 @@ class CloudDeviceJointTrainingStage:
     def _train_simultaneous(self, prev_output_valid):
         """
         Both models trained jointly each epoch via CloudDeviceJointTrainer.
-        Uses preranking_train_loader (preranking feature_map) for joint batches.
+
+        Each model receives batches from its own loader (preranking_train_loader for
+        the preranking model, reranking_train_loader for the reranking model) so that
+        the feature dimensionalities match each model's feature_map exactly.
+        cloud_score is injected into the reranking batch automatically inside
+        CloudDeviceJointTrainer.forward() when use_cloud_score is enabled.
         """
         from ..models.joint_trainer import CloudDeviceJointTrainer
         from ..data.negative_sampler import NegativeSampler
@@ -280,18 +284,16 @@ class CloudDeviceJointTrainingStage:
             (best_pre, best_re, prerank_v_metrics, rerank_v_metrics)
         """
         prerank_monitor = self.preranking_stage.model_params.get('monitor', 'Recall@100')
+        # retrieval_enriched_v = self._enrich(prev_output_valid, self.paths['valid_path'])
         prerank_out_v, prerank_v_metrics = self.preranking_stage.process(
-            prev_output_valid, compute_metrics=True
+            prev_output_valid, compute_metrics=True, load_best_model=False
         )
         self.logger.info(f"[{label}/Preranking] Valid: {prerank_v_metrics}")
         prerank_out_v_enriched = self._enrich(prerank_out_v, self.paths['valid_path'])
         rerank_monitor = self.reranking_stage.model_params.get('monitor', 'Recall@1')
-
-        retrieval_enriched_v = self._enrich(prev_output_valid, self.paths['valid_path'])
-
         # Fair AUC: score reranking on 1000-candidate pool; Recall on preranking top-100
         rerank_v_metrics = self.reranking_stage.evaluate(
-            retrieval_enriched_v, preranking_output=prerank_out_v_enriched
+            prev_output_valid, preranking_output=prerank_out_v_enriched
         )
         self.logger.info(f"[{label}/Reranking] Valid: {rerank_v_metrics}")
 
