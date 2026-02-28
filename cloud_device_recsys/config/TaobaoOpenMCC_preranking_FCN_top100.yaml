@@ -5,6 +5,10 @@ gpu: 0
 debug:
   n_rows: null
 
+vocab_pruning:
+  enabled: true
+  min_vocab_size: 400000
+  min_reduction_ratio: 0.3
 stages:
   preranking:
     enabled: true
@@ -17,7 +21,7 @@ stages:
 #      task: "regression"
       use_diversity_loss: 0
       use_feature_encoder: 1
-      metrics_k: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 50, 100]
+      metrics_k: [1, 10, 50, 100]
       embedding_dim: 16
       num_deep_cross_layers: 1
       num_shallow_cross_layers: 1

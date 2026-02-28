@@ -37,21 +37,19 @@ class RemappedEmbedding(nn.Module):
 
     def __init__(
         self,
-        compact_vocab_size: int,
-        embedding_dim: int,
+        compact_embedding: nn.Embedding,
         remap_table: torch.LongTensor,
-        padding_idx: Optional[int] = 0,
+        original_vocab_size: int,
     ):
         super().__init__()
-        self.embedding = nn.Embedding(
-            compact_vocab_size, embedding_dim, padding_idx=padding_idx
-        )
+        self.embedding = compact_embedding
+        
         # Register as buffer: moves with model to GPU, saved in state_dict,
         # but not a parameter (no gradients)
         self.register_buffer("remap_table", remap_table)
-        self.original_vocab_size = len(remap_table)
-        self.compact_vocab_size = compact_vocab_size
-        self.embedding_dim = embedding_dim
+        self.original_vocab_size = original_vocab_size
+        self.compact_vocab_size = compact_embedding.num_embeddings
+        self.embedding_dim = compact_embedding.embedding_dim
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Clamp to valid range to handle any OOV indices gracefully
@@ -125,33 +123,42 @@ def apply_vocab_pruning_to_model(model, prune_info: VocabPruneInfo, feature_map=
 
             old_vocab = old_emb.num_embeddings
             emb_dim = old_emb.embedding_dim
-            padding_idx = old_emb.padding_idx
 
-            old_params = old_vocab * emb_dim
-            new_params = info.compact_vocab_size * emb_dim
+            # Because feature_map was pruned before model construction,
+            # FuxiCTR's FeatureEmbeddingDict already created old_emb with the compact_vocab_size!
+            # It also already applied the correct initialization (e.g. N(0, 1e-4) or pretrained).
+            # We simply need to wrap it and provide the remap_table.
+            
+            if old_vocab != info.compact_vocab_size:
+                logger.warning(
+                    f"Unexpected vocab size mismatch for {feature_name}: "
+                    f"model has {old_vocab}, expected compact size {info.compact_vocab_size}. "
+                    "Did pruning run before model construction?"
+                )
 
-            # Create RemappedEmbedding
-            remapped_emb = RemappedEmbedding(
-                compact_vocab_size=info.compact_vocab_size,
-                embedding_dim=emb_dim,
-                remap_table=info.remap_table,
-                padding_idx=0 if padding_idx is not None else None,
-            )
-
-            # Move to same device as old embedding
+            # Move remap table to the correct device
             device = old_emb.weight.device
-            remapped_emb = remapped_emb.to(device)
+            remap_table_device = info.remap_table.to(device)
+
+            # Create RemappedEmbedding wrapping the ALREADY CORRECT compact embedding
+            remapped_emb = RemappedEmbedding(
+                compact_embedding=old_emb,
+                remap_table=remap_table_device,
+                original_vocab_size=info.original_vocab_size
+            )
 
             emb_dict[feature_name] = remapped_emb
             replaced_bases[base_name] = remapped_emb
             replaced_count += 1
 
+            old_params = info.original_vocab_size * emb_dim
+            new_params = info.compact_vocab_size * emb_dim
             total_old_params += old_params
             total_new_params += new_params
 
             logger.info(
                 f"[VocabPruner] Replaced {feature_name}: "
-                f"Embedding({old_vocab}, {emb_dim}) → "
+                f"Embedding({info.original_vocab_size}, {emb_dim}) → "
                 f"RemappedEmbedding({info.compact_vocab_size}, {emb_dim}) "
                 f"[{old_params:,} → {new_params:,} params]"
             )

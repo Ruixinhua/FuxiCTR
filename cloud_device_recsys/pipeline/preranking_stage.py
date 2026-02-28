@@ -484,19 +484,19 @@ class PrerankingStage(BaseStage):
         
         # Single forward pass for all negatives
         # --- DIAGNOSTIC INJECTION ---
-        if True:
-            # Check for any dtype anomalies or out-of-bound indices
-            fmap = self.model.feature_map
-            for k, v in neg_batch_dict.items():
-                if isinstance(v, torch.Tensor) and k in fmap.features:
-                    vocab_size = fmap.features[k].get('vocab_size', None)
-                    if vocab_size is not None and v.dtype in [torch.int32, torch.int64]:
-                        max_val = v.max().item()
-                        min_val = v.min().item()
-                        if max_val >= vocab_size or min_val < 0:
-                            print(f"!!! OUT OF BOUNDS !!! key={k} max={max_val} min={min_val} vocab_size={vocab_size}", flush=True)
-                    if v.dtype not in [torch.int32, torch.int64] and fmap.features[k]['type'] == 'categorical':
-                        print(f"!!! TYPE MISMATCH !!! key={k} dtype={v.dtype} expected integer", flush=True)
+        # if True:
+        #     # Check for any dtype anomalies or out-of-bound indices
+        #     fmap = self.model.feature_map
+        #     for k, v in neg_batch_dict.items():
+        #         if isinstance(v, torch.Tensor) and k in fmap.features:
+        #             vocab_size = fmap.features[k].get('vocab_size', None)
+        #             if vocab_size is not None and v.dtype in [torch.int32, torch.int64]:
+        #                 max_val = v.max().item()
+        #                 min_val = v.min().item()
+        #                 if max_val >= vocab_size or min_val < 0:
+        #                     print(f"!!! OUT OF BOUNDS !!! key={k} max={max_val} min={min_val} vocab_size={vocab_size}", flush=True)
+        #             if v.dtype not in [torch.int32, torch.int64] and fmap.features[k]['type'] == 'categorical':
+        #                 print(f"!!! TYPE MISMATCH !!! key={k} dtype={v.dtype} expected integer", flush=True)
         # ---------------------------
         neg_output = self.model.forward(neg_batch_dict)
         neg_scores_flat = neg_output['y_pred']  # [B * num_neg, 1]
