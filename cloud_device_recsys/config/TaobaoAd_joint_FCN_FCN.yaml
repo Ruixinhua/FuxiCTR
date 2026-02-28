@@ -27,8 +27,8 @@ stages:
       monitor: "Recall@100"
       metrics_k: [1, 10, 50, 100]
     training:
-      epochs: 15
-      batch_size: 4096
+      epochs: 30
+      batch_size: 2048
       optimizer: "adam"
   reranking:
     enabled: true
