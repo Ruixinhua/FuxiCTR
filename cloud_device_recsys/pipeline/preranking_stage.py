@@ -70,7 +70,7 @@ class PrerankingStage(BaseStage):
         self.feature_map = filter_feature_map(feature_map, feature_group_manager, self.allowed_feature_groups,
                                               use_feature_encoder=model_params.get("use_feature_encoder", False))
         self.feature_map.default_emb_dim = model_params['embedding_dim']
-        self.use_logit = model_params.get('use_logit', False)
+        self.use_logit = model_params.get('use_logit', True)
         self.top_k = top_k
         self.use_diversity_loss = model_params.get('use_diversity_loss', False)
         if self.use_diversity_loss:
