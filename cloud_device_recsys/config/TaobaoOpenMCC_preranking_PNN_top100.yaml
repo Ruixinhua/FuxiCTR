@@ -12,12 +12,12 @@ stages:
     features: ["FG1", "FG2", "FG3"]
     top_k: 100
     model_params:
-      num_negatives: 20
+      num_negatives: 0
       loss_type: "bpr"
 #      task: "regression"
       use_diversity_loss: 0
       use_feature_encoder: 1
-      metrics_k: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 50, 100]
+      metrics_k: [1, 10, 50, 100]
       embedding_dim: 32
       learning_rate: 0.001
       embedding_regularizer: 1.0e-5

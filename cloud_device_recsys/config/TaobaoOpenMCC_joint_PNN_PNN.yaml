@@ -22,7 +22,7 @@ stages:
       embedding_regularizer: 1.0e-5
       net_regularizer: 1.0e-5
       max_gradient_norm: 5.0
-      hidden_units: [128, 64, 32]
+      hidden_units: [512, 256, 128, 64]
       batch_norm: false
       monitor: "Recall@100"
     training:

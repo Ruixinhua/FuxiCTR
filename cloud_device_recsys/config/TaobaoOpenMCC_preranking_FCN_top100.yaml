@@ -16,7 +16,7 @@ stages:
     features: ["FG1", "FG2", "FG3"]
     top_k: 100
     model_params:
-      num_negatives: 4
+      num_negatives:
       loss_type: "bpr"
 #      task: "regression"
       use_diversity_loss: 0
