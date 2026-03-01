@@ -70,6 +70,7 @@ class PrerankingStage(BaseStage):
         self.feature_map = filter_feature_map(feature_map, feature_group_manager, self.allowed_feature_groups,
                                               use_feature_encoder=model_params.get("use_feature_encoder", False))
         self.feature_map.default_emb_dim = model_params['embedding_dim']
+        self.use_logit = model_params.get('use_logit', False)
         self.top_k = top_k
         self.use_diversity_loss = model_params.get('use_diversity_loss', False)
         if self.use_diversity_loss:
@@ -454,7 +455,10 @@ class PrerankingStage(BaseStage):
         # Get positive predictions
         pos_output = self.model.forward(batch_data)
         # BPR and Softmax losses require logits, not probabilities
-        pos_scores = pos_output.get('logit', pos_output['y_pred'])  # [B, 1]
+        if self.use_logit:
+            pos_scores = pos_output.get('logit', pos_output['y_pred'])  # [B, 1]
+        else:
+            pos_scores = pos_output['y_pred']
         
         # === Optimized: Batch all negatives into single forward pass ===
         # Flatten: [B, num_neg] -> [B * num_neg]
@@ -485,7 +489,10 @@ class PrerankingStage(BaseStage):
 
         neg_output = self.model.forward(neg_batch_dict)
         # BPR and Softmax losses require logits, not probabilities
-        neg_scores_flat = neg_output.get('logit', neg_output['y_pred'])  # [B * num_neg, 1]
+        if self.use_logit:
+            neg_scores_flat = neg_output.get('logit', neg_output['y_pred'])  # [B * num_neg, 1]
+        else:
+            neg_scores_flat = neg_output['y_pred']
         
         # Reshape back: [B * num_neg, 1] -> [B, num_neg]
         neg_scores = neg_scores_flat.view(batch_size, self.num_negatives)
