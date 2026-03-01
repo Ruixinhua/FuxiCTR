@@ -287,10 +287,14 @@ Ali_CCP:
         '150_14': '210'
 
     # FG3: Device-only Privacy Features
-    - name: ['101', '121', '122', '124', '125', '126', '127', '128', '129']
+    - name: ['121', '122', '124', '125', '126', '127', '128', '129']
       type: categorical
       dtype: int
       feature_group: FG3
+    - name: '101'
+      type: categorical
+      dtype: int
+      feature_group: drop
 
   # -----------------------------------------
   # Preprocessing Options
@@ -299,7 +303,7 @@ Ali_CCP:
     min_categr_count: 1
     positive_only_eval: true  # Filter valid/test to positive samples only
     generate_impression_id: true  # Auto-generate impression_id if missing
-    max_eval_test_rows: 50000
+    min_item_count_eval: 10
     
   # -----------------------------------------
   # Item Pool Configuration

@@ -18,7 +18,7 @@ setuptools.setup(
     include_package_data=True,
     python_requires=">=3.6",
     install_requires=["keras_preprocessing", "pandas", "PyYAML>=5.1", "scikit-learn",
-                      "numpy", "h5py", "tqdm", "pyarrow", "polars"],
+                      "torchmetrics", "numpy", "h5py", "tqdm", "pyarrow", "polars"],
     classifiers=(
         "License :: OSI Approved :: Apache Software License",
         "Operating System :: OS Independent",

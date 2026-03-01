@@ -2,6 +2,7 @@ keras_preprocessing
 pandas
 PyYAML
 scikit-learn
+torchmetrics
 numpy
 h5py
 tqdm

@@ -2,6 +2,7 @@ import logging
 import numpy as np
 import pandas as pd
 import torch
+from torchmetrics.functional.classification import binary_auroc
 
 from typing import Tuple, List, Dict, Any, Optional
 from .pipeline.stage_output import StageOutput
@@ -799,11 +800,14 @@ def process_and_rank_candidates(
             # ===== Global (non-grouped) AUC over all scores =====
             if all_query_scores_list:
                 try:
-                    from sklearn.metrics import roc_auc_score
                     global_scores = np.concatenate(all_query_scores_list)
                     global_labels = np.concatenate(all_query_labels_list)
                     if global_labels.sum() > 0 and global_labels.sum() < len(global_labels):
-                        metrics['AUC'] = float(roc_auc_score(global_labels, global_scores))
+                        auc = binary_auroc(
+                            torch.as_tensor(global_scores, dtype=torch.float32),
+                            torch.as_tensor(global_labels, dtype=torch.int64)
+                        )
+                        metrics['AUC'] = float(auc.item())
                     else:
                         metrics['AUC'] = 0.0
                 except Exception as e:
@@ -811,11 +815,14 @@ def process_and_rank_candidates(
             # ===== Global AUC@K restricted to top-K items per user =====
             if all_topk_scores_list:
                 try:
-                    from sklearn.metrics import roc_auc_score
                     topk_scores = np.concatenate(all_topk_scores_list)
                     topk_labels = np.concatenate(all_topk_labels_list)
                     if 0 < topk_labels.sum() < len(topk_labels):
-                        metrics[f'AUC@{top_k}'] = float(roc_auc_score(topk_labels, topk_scores))
+                        auc_at_k = binary_auroc(
+                            torch.as_tensor(topk_scores, dtype=torch.float32),
+                            torch.as_tensor(topk_labels, dtype=torch.int64)
+                        )
+                        metrics[f'AUC@{top_k}'] = float(auc_at_k.item())
                     else:
                         metrics[f'AUC@{top_k}'] = 0.0
                 except Exception as e:
