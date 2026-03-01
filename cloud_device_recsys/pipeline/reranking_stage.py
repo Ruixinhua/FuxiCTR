@@ -66,6 +66,7 @@ class RerankingStage(BaseStage):
         self.feature_map = filter_feature_map(feature_map, feature_group_manager, self.allowed_feature_groups,
                                               use_feature_encoder=model_params.get("use_feature_encoder", False))
         self.feature_map.default_emb_dim = model_params['embedding_dim']
+        self.use_logit = model_params.get('use_logit', True)
         self.top_k = top_k
         self.support_distillation = support_distillation
         self.model_params = model_params
@@ -371,14 +372,17 @@ class RerankingStage(BaseStage):
                 mean, std = all_logits.mean(), all_logits.std() + 1e-8
                 batch_dict['cloud_score'] = (pos_logit - mean) / std
                 neg_batch_dict['cloud_score'] = (neg_logit - mean) / std
-        
+
         # Forward passes
         pos_output = self.model.forward(batch_dict)
-        pos_scores = pos_output['y_pred']  # [B, 1]
-        
+
         neg_output = self.model.forward(neg_batch_dict)
-        neg_scores_flat = neg_output['y_pred']  # [B * num_neg, 1]
-        
+        if self.use_logit:
+            pos_scores = pos_output.get('logit', pos_output['y_pred'])  # [B, 1]
+            neg_scores_flat = neg_output.get('logit', neg_output['y_pred'])  # [B * num_neg, 1]
+        else:
+            pos_scores = pos_output['y_pred']
+            neg_scores_flat = neg_output['y_pred']  # [B * num_neg, 1]
         # Reshape back: [B * num_neg, 1] -> [B, num_neg]
         neg_scores = neg_scores_flat.view(batch_size, self.num_negatives)
         

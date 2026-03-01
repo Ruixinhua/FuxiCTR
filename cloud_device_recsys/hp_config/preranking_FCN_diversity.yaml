@@ -27,16 +27,16 @@ search_space:
     model: ["DCNv3"]
 #    model_params.diversity_lambda: [0.0001, 0.001]
 #    model_params.num_heads: [ 1, 2, 4 ]
-    model_params.num_heads: [ 8, 16, 32 ]
-    model_params.loss_type: ["bpr"]
-    model_params.embedding_dim: [ 32 ]
-    model_params.num_deep_cross_layers: [1]
-    model_params.num_shallow_cross_layers: [1]
+#    model_params.num_heads: [ 32 ]
+#    model_params.loss_type: ["bpr"]
+#    model_params.embedding_dim: [ 32 ]
+#    model_params.num_deep_cross_layers: [1]
+#    model_params.num_shallow_cross_layers: [1]
 #    model_params.diversity_theta: [ 0.00005, 0.0001, 0.0005, 0.001 ]
 #    0.00005
 #    model_params.diversity_theta: [ 0.1, 0.01 ]
-    model_params.num_negatives: [ 4 ]
-    model_params.diversity_lambda: [ 0.0001, 0.00001, 0.00005, 0.0002 ]
+    model_params.num_negatives: [ 4, 8, 16 ]
+    model_params.diversity_lambda: [ 0.0001, 0.00001, 0.00005, 0.0002, 0 ]
 
 # -----------------------------------------
 # Fixed Overrides (Optional)
@@ -46,11 +46,11 @@ search_space:
 
 fixed_overrides:
   preranking:
-    training.epochs: 15
+    training.epochs: 30
     model_params.patience: 2
     model_params.diversity_theta: 0
     model_params.diversity_start_epoch: 0
-    model_params.diversity_epochs: 15
+    model_params.diversity_epochs: 30
     model_params.diversity_warmup_epochs: 0
     model_params.use_diversity_loss: 1
 #    model_params.diversity_num_negatives: 8

@@ -16,7 +16,7 @@ dataset_config: "./config/dataset_config.yaml"
 seed: 2024
 gpu: 0
 debug:
-  n_rows: null  # Set to integer (e.g., 100000) for quick testing, null for full data
+  n_rows: 1000  # Set to integer (e.g., 100000) for quick testing, null for full data
 
 # -----------------------------------------
 # Pipeline Stages
@@ -55,16 +55,16 @@ stages:
 
   preranking:
     enabled: true
-    model: "DIN"
+    model: "PNN"
     features: ["FG1", "FG2"]
     top_k: 100
 
     model_params:
+      use_feature_encoder: 1
       metrics_k: [10, 50, 100]
       embedding_dim: 32
-      dnn_hidden_units: [128, 64]
-      din_target_field: "cand_item_id"
-      din_sequence_field: "ipv_item_id_seq"
+      hidden_units: [256, 128, 64, 32]
+      batch_norm: False
       learning_rate: 0.001
       monitor: "Recall@100"
 
@@ -78,20 +78,23 @@ stages:
 
   reranking:
     enabled: true
-    model: "DIN"
+    model: "PNN"
     features: ["FG1", "FG2", "FG3"]  # Includes FG3 (device-only features)
     top_k: 10
     
     model_params:
+      use_feature_encoder: 1
       metrics_k: [5, 10, 50]
       embedding_dim: 4
-      dnn_hidden_units: [64, 32]
-      din_target_field: "cand_item_id"
-      din_sequence_field: "ipv_item_id_seq"
+      hidden_units: [64, 32]
+      num_deep_cross_layers: 1
+      num_shallow_cross_layers: 1
+      num_heads: 1
+      batch_norm: False
       max_model_size_kb: 500  # Device model size constraint
       learning_rate: 0.001
       monitor: "Recall@1"
-      use_cloud_score: true
+      use_cloud_score: false
 
     training:
       epochs: 10
@@ -104,6 +107,22 @@ stages:
         temperature: 3.0
         
     metrics: ["nDCG", "Recall", "MRR", "gAUC"]
+
+  joint_training:
+    epochs: 5
+    learning_rate: 0.001
+    use_contrastive_learning: true
+    loss_type: bpr
+    margin: 1.0
+    monitor: "Recall@100"
+    cl_weights:
+      cl_loss_weight: 1.0
+      knowledge_distillation_loss_weight: 1.0
+      group_aware_loss_weight: 0.5
+      feature_alignment_loss_weight: 0.0
+      field_uniformity_loss_weight: 0.0
+      distance_loss_weight: 0.0
+      temperature: 4.0
 
 # -----------------------------------------
 # Output Settings
