@@ -129,27 +129,34 @@ def generate_param_combinations(search_space: Dict[str, Dict[str, List]]) -> Lis
     Generate all parameter combinations from search space.
     
     Args:
-        search_space: {stage_name: {param_path: [value1, value2, ...]}}
+        search_space: {stage_name: {param_path: [value1, value2, ...]}, ...}
+                      May also contain a top-level 'seed' key:
+                      {'seed': [2024, 42, 0], ...}
         
     Returns:
-        List of parameter dictionaries, each representing one combination.
-        Format: [{stage_name: {param_path: value, ...}, ...}, ...]
+        List of (seed_override, param_dict) tuples.
+        seed_override is None when no seed search is requested.
+        param_dict format: {stage_name: {param_path: value, ...}, ...}
     """
+    # Extract seed values (top-level, not a stage)
+    seed_values = search_space.get('seed', None)
+    stage_search_space = {k: v for k, v in search_space.items() if k != 'seed'}
+
     # Flatten to list of (stage, param_path, values)
     param_specs = []
-    for stage, params in search_space.items():
+    for stage, params in stage_search_space.items():
         for param_path, values in params.items():
             param_specs.append((stage, param_path, values))
     
-    if not param_specs:
-        return [{}]
+    # Generate cartesian product of stage params
+    if param_specs:
+        all_values = [spec[2] for spec in param_specs]
+        combinations = list(itertools.product(*all_values))
+    else:
+        combinations = [()]  # single empty combo
     
-    # Generate cartesian product
-    all_values = [spec[2] for spec in param_specs]
-    combinations = list(itertools.product(*all_values))
-    
-    # Convert to list of dicts
-    result = []
+    # Convert to list of param dicts
+    param_dicts = []
     for combo in combinations:
         param_dict = {}
         for i, value in enumerate(combo):
@@ -157,9 +164,17 @@ def generate_param_combinations(search_space: Dict[str, Dict[str, List]]) -> Lis
             if stage not in param_dict:
                 param_dict[stage] = {}
             param_dict[stage][param_path] = value
-        result.append(param_dict)
+        param_dicts.append(param_dict)
     
-    return result
+    # Cross with seed values
+    if seed_values:
+        result = []
+        for seed in seed_values:
+            for pd in param_dicts:
+                result.append((seed, pd))
+        return result
+    else:
+        return [(None, pd) for pd in param_dicts]
 
 
 def apply_params_to_config(base_config: dict, params: Dict[str, Dict[str, Any]], 
@@ -181,7 +196,7 @@ def apply_params_to_config(base_config: dict, params: Dict[str, Dict[str, Any]],
     """
     config = copy.deepcopy(base_config)
 
-    TOP_LEVEL_SECTIONS = {'joint_training'}
+    TOP_LEVEL_SECTIONS = {'joint_training', 'vocab_pruning'}
 
     def _get_target_dict(cfg, stage):
         """Return the dict to apply params to for the given stage name."""
@@ -213,7 +228,7 @@ def apply_params_to_config(base_config: dict, params: Dict[str, Dict[str, Any]],
     return config
 
 
-def generate_experiment_id(params: Dict[str, Dict[str, Any]]) -> str:
+def generate_experiment_id(params: Dict[str, Dict[str, Any]], seed_override: int = None) -> str:
     """
     Generate a unique experiment ID from parameters.
     
@@ -221,6 +236,8 @@ def generate_experiment_id(params: Dict[str, Dict[str, Any]]) -> str:
     """
     # Build a descriptive string
     parts = []
+    if seed_override is not None:
+        parts.append(f"seed_{seed_override}")
     for stage, stage_params in sorted(params.items()):
         for param_path, value in sorted(stage_params.items()):
             # Get last part of param path for brevity
@@ -238,7 +255,8 @@ def generate_experiment_id(params: Dict[str, Dict[str, Any]]) -> str:
     base_name = '__'.join(parts) if parts else 'baseline'
     
     # Add short hash for uniqueness
-    full_hash = hashlib.md5(json.dumps(params, sort_keys=True).encode()).hexdigest()[:6]
+    hash_input = json.dumps({'seed': seed_override, 'params': params}, sort_keys=True)
+    full_hash = hashlib.md5(hash_input.encode()).hexdigest()[:6]
     
     return f"{base_name}__{full_hash}"
 
@@ -269,10 +287,13 @@ def build_run_pipeline_cmd(
     experiment_id: str,
     args: argparse.Namespace,
     script_dir: str,
-    gpu_id: int
+    gpu_id: int,
+    seed_override: int = None
 ) -> List[str]:
     """Build the run_pipeline.py command for an experiment."""
     run_pipeline_path = os.path.join(script_dir, 'run_pipeline.py')
+
+    seed = seed_override if seed_override is not None else args.seed
 
     cmd = [
         sys.executable,
@@ -283,7 +304,7 @@ def build_run_pipeline_cmd(
         '--output_dir', args.output_dir,
         '--experiment_id', experiment_id,
         '--gpu', str(gpu_id),
-        '--seed', str(args.seed),
+        '--seed', str(seed),
     ]
 
     if args.dataset_id:
@@ -330,6 +351,7 @@ def save_results(
     for r in results:
         row = {
             'experiment_id': r['experiment_id'],
+            'seed': r.get('seed', ''),
             'status': r['status'],
             'timestamp': r.get('timestamp', ''),
         }
@@ -344,7 +366,7 @@ def save_results(
     
     # Reorder columns: experiment_id, status, timestamp, params..., metrics...
     if len(df) > 0:
-        meta_cols = ['experiment_id', 'status', 'timestamp']
+        meta_cols = ['experiment_id', 'seed', 'status', 'timestamp']
         param_cols = sorted([c for c in df.columns if c.startswith(('retrieval.', 'preranking.', 'reranking.'))])
         metric_cols = sorted([c for c in df.columns if c not in meta_cols + param_cols])
         df = df[meta_cols + param_cols + metric_cols]
@@ -370,14 +392,27 @@ def main():
     search_space = search_config.get('search_space', {})
     fixed_overrides = search_config.get('fixed_overrides', {})
     
-    # Generate parameter combinations
+    # Apply global section overrides from search config to base config
+    # Anything that is not 'search_space' or 'fixed_overrides' is treated as a config section override
+    global_keys = [k for k in search_config.keys() if k not in ('search_space', 'fixed_overrides')]
+    for k in global_keys:
+        base_config[k] = search_config[k]
+        print(f"Applied global override for section: {k}")
+
+    # Generate parameter combinations (each element is (seed_override, params))
     param_combinations = generate_param_combinations(search_space)
+    
+    # Determine searched stages (exclude 'seed')
+    searched_keys = [k for k in search_space.keys() if k != 'seed']
+    seed_values = search_space.get('seed', None)
     
     print(f"\n{'='*60}")
     print("Hyperparameter Search Configuration")
     print(f"{'='*60}")
     print(f"Total combinations: {len(param_combinations)}")
-    print(f"Stages being searched: {list(search_space.keys())}")
+    print(f"Stages being searched: {searched_keys}")
+    if seed_values:
+        print(f"Seeds being searched: {seed_values}")
     print(f"Output directory: {args.output_dir}")
     print(f"Mode: {args.mode}")
     print(f"GPU: {args.gpu}")
@@ -387,9 +422,11 @@ def main():
     
     # Display all combinations
     print("Parameter combinations:")
-    for i, params in enumerate(param_combinations):
-        exp_id = generate_experiment_id(params)
+    for i, (seed_override, params) in enumerate(param_combinations):
+        exp_id = generate_experiment_id(params, seed_override)
         print(f"\n  [{i+1}/{len(param_combinations)}] {exp_id}")
+        if seed_override is not None:
+            print(f"      seed = {seed_override}")
         for stage, stage_params in params.items():
             for param_path, value in stage_params.items():
                 print(f"      {stage}.{param_path} = {value}")
@@ -421,18 +458,19 @@ def main():
     free_gpus = list(args.gpu)
 
     pending = deque()
-    for i, params in enumerate(param_combinations):
-        experiment_id = generate_experiment_id(params)
+    for i, (seed_override, params) in enumerate(param_combinations):
+        experiment_id = generate_experiment_id(params, seed_override)
         if experiment_id in completed_experiments:
             print(f"\n[{i+1}/{len(param_combinations)}] Skipping {experiment_id} (already completed)")
             continue
-        pending.append((i, params, experiment_id))
+        pending.append((i, seed_override, params, experiment_id))
 
     running = {}
 
     def launch_experiment(gpu_id: int):
-        i, params, experiment_id = pending.popleft()
-        print(f"\n[{i+1}/{len(param_combinations)}] Starting {experiment_id} on GPU {gpu_id}")
+        i, seed_override, params, experiment_id = pending.popleft()
+        seed_msg = f" (seed={seed_override})" if seed_override is not None else ""
+        print(f"\n[{i+1}/{len(param_combinations)}] Starting {experiment_id} on GPU {gpu_id}{seed_msg}")
 
         modified_config = apply_params_to_config(base_config, params, fixed_overrides)
 
@@ -446,7 +484,8 @@ def main():
             experiment_id=experiment_id,
             args=args,
             script_dir=script_dir,
-            gpu_id=gpu_id
+            gpu_id=gpu_id,
+            seed_override=seed_override
         )
 
         print(f"Command: {' '.join(cmd)}")
@@ -461,6 +500,7 @@ def main():
             'process': process,
             'gpu_id': gpu_id,
             'params': params,
+            'seed_override': seed_override,
             'experiment_id': experiment_id,
             'temp_config_path': temp_config_path,
         }
@@ -497,6 +537,7 @@ def main():
 
             result = {
                 'experiment_id': experiment_id,
+                'seed': info['seed_override'],
                 'params': params,
                 'metrics': metrics,
                 'status': 'success' if success else 'failed',

@@ -156,7 +156,9 @@ class CloudDeviceJointTrainer(BaseModel, ContrastiveLearningBase):
 
         return_dict = {
             "pre_pred": pre_output.get("y_pred"),
+            "pre_logit": pre_output.get("logit", pre_output.get("y_pred")),
             "re_pred":  re_output.get("y_pred"),
+            "re_logit": re_output.get("logit", re_output.get("y_pred")),
         }
 
         # Extract embeddings for CL if needed.
@@ -363,10 +365,10 @@ class CloudDeviceJointTrainer(BaseModel, ContrastiveLearningBase):
         pos_output = self.forward(pos_batch_data, re_pos_batch_data)
         neg_output = self.forward(neg_batch_data, re_neg_batch_data)
 
-        pre_pos = pos_output["pre_pred"]
-        re_pos  = pos_output["re_pred"]
-        pre_neg = neg_output["pre_pred"].view(batch_size, self.num_negatives)
-        re_neg  = neg_output["re_pred"].view(re_batch_size, self.num_negatives)
+        pre_pos = pos_output["pre_logit"]
+        re_pos  = pos_output["re_logit"]
+        pre_neg = neg_output["pre_logit"].view(batch_size, self.num_negatives)
+        re_neg  = neg_output["re_logit"].view(re_batch_size, self.num_negatives)
 
         if self.loss_type == 'bpr':
             pre_loss = bpr_loss(pre_pos, pre_neg)

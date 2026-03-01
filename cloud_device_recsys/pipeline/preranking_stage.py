@@ -38,6 +38,7 @@ class PrerankingStage(BaseStage):
                  feature_map: FeatureMap,
                  feature_group_manager: FeatureGroupManager,
                  model_params: Dict[str, Any],
+                 allowed_feature_groups: List[FeatureGroup] = None,
                  output_dir: str = "./outputs/preranking",
                  top_k: int = 100,
                  **kwargs):
@@ -48,15 +49,19 @@ class PrerankingStage(BaseStage):
             feature_map: FuxiCTR FeatureMap
             feature_group_manager: Feature group manager
             model_params: Parameters for preranking model
+            allowed_feature_groups: Allowed feature groups
             output_dir: Output directory
             top_k: Number of candidates to pass to next stage
             use_diversity: Whether to apply diversity in selection
         """
+        if allowed_feature_groups is None:
+            allowed_feature_groups = [FeatureGroup.FG1, FeatureGroup.FG2]
+            
         super().__init__(
             stage_name="preranking",
             stage_type=StageType.PRERANKING,
             feature_group_manager=feature_group_manager,
-            allowed_feature_groups=[FeatureGroup.FG1, FeatureGroup.FG2],
+            allowed_feature_groups=allowed_feature_groups,
             output_dir=output_dir,
             **kwargs
         )
@@ -65,6 +70,7 @@ class PrerankingStage(BaseStage):
         self.feature_map = filter_feature_map(feature_map, feature_group_manager, self.allowed_feature_groups,
                                               use_feature_encoder=model_params.get("use_feature_encoder", False))
         self.feature_map.default_emb_dim = model_params['embedding_dim']
+        self.use_logit = model_params.get('use_logit', True)
         self.top_k = top_k
         self.use_diversity_loss = model_params.get('use_diversity_loss', False)
         if self.use_diversity_loss:
@@ -448,7 +454,11 @@ class PrerankingStage(BaseStage):
         
         # Get positive predictions
         pos_output = self.model.forward(batch_data)
-        pos_scores = pos_output['y_pred']  # [B, 1]
+        # BPR and Softmax losses require logits, not probabilities
+        if self.use_logit:
+            pos_scores = pos_output.get('logit', pos_output['y_pred'])  # [B, 1]
+        else:
+            pos_scores = pos_output['y_pred']
         
         # === Optimized: Batch all negatives into single forward pass ===
         # Flatten: [B, num_neg] -> [B * num_neg]
@@ -476,10 +486,13 @@ class PrerankingStage(BaseStage):
                     neg_batch_dict[key] = val.repeat_interleave(self.num_negatives, dim=0)
                 else:
                     neg_batch_dict[key] = val
-        
-        # Single forward pass for all negatives
+
         neg_output = self.model.forward(neg_batch_dict)
-        neg_scores_flat = neg_output['y_pred']  # [B * num_neg, 1]
+        # BPR and Softmax losses require logits, not probabilities
+        if self.use_logit:
+            neg_scores_flat = neg_output.get('logit', neg_output['y_pred'])  # [B * num_neg, 1]
+        else:
+            neg_scores_flat = neg_output['y_pred']
         
         # Reshape back: [B * num_neg, 1] -> [B, num_neg]
         neg_scores = neg_scores_flat.view(batch_size, self.num_negatives)
@@ -535,8 +548,7 @@ class PrerankingStage(BaseStage):
             Tuple of (StageOutput with Top-K candidates, metrics dict)
         """
         from ..metric_utils import process_and_rank_candidates
-
-        if os.path.exists(self.best_weights_path):
+        if os.path.exists(self.best_weights_path) and kwargs.pop('load_best_model', True):
             self.model.load_weights(self.best_weights_path)
             self.logger.info(f"Loaded best weights from {self.best_weights_path}")
         else:
