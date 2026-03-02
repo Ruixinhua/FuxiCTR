@@ -53,15 +53,15 @@ class RerankingStage(BaseStage):
             support_distillation: Whether to enable distillation
         """
         # Re-ranking uses ALL feature groups
+        self.allowed_feature_groups = kwargs.pop('allowed_feature_groups', [FeatureGroup.FG1, FeatureGroup.FG2, FeatureGroup.FG3])
         super().__init__(
             stage_name="reranking",
             stage_type=StageType.RERANKING,
             feature_group_manager=feature_group_manager,
-            allowed_feature_groups=[FeatureGroup.FG1, FeatureGroup.FG2, FeatureGroup.FG3],
+            allowed_feature_groups = self.allowed_feature_groups,
             output_dir=output_dir,
             **kwargs
         )
-        
         # Filter feature_map to only include allowed features (FG1, FG2, FG3)
         self.feature_map = filter_feature_map(feature_map, feature_group_manager, self.allowed_feature_groups,
                                               use_feature_encoder=model_params.get("use_feature_encoder", False))
