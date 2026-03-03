@@ -113,7 +113,7 @@ def create_stages(
 
             # Prepare stage-specific keyword arguments for the constructor
             stage_kwargs = {
-                'feature_map': feature_map,
+                'feature_map': copy.deepcopy(feature_map),
                 'feature_group_manager': feature_group_manager,
                 'model_params': model_params,
                 'output_dir': os.path.join(output_dir, stage_name),
@@ -576,15 +576,12 @@ def run_joint_training_stage(preranking_stage, reranking_stage, pipeline_config,
 
 
 
-def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_manager=None, logger=None,
-                        run_test=True, prev_output_path=None, preranking_model=None, stages=None):
+def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_manager=None, run_test=True, logger=None,
+                        prev_output_path=None, preranking_model=None,  prev_output_test=None, prev_output_valid=None):
     if logger is None:
         logger = logging.getLogger('PipelineRunner')
     if prev_output_path is not None:
         prev_output_valid, prev_output_test = load_stage_outputs_from_dir(prev_output_path, "preranking",logger)
-    else:
-        raise RuntimeError("Previous stage outputs not provided or failed to load. "
-                           "Reranking will run without candidate filtering from preranking.")
     reranking_config = pipeline_config['stages']['reranking']
     metrics = {}
 
@@ -879,8 +876,9 @@ def main():
         reranking_stage = stages['reranking']()
         # Run reranking stage with its own data loaders
         d_metrics = run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_manager=fg_manager,
-                                        logger=logger, run_test=bool(args.run_reranking_test), stages=stages,
-                                        prev_output_path=args.prev_output_path, preranking_model=preranking_stage.model)
+                                        logger=logger, run_test=bool(args.run_reranking_test),
+                                        prev_output_path=args.prev_output_path, preranking_model=preranking_stage.model,
+                                        prev_output_valid=p_valid, prev_output_test=p_test)
         all_metrics.update(d_metrics)
 
     elif args.mode == 'retrieval':
@@ -938,7 +936,7 @@ def main():
         # Instantiate Reranking Stage lazily
         reranking_stage = stages['reranking']()
         d_metrics = run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_manager=fg_manager,
-                                        logger=logger, run_test=bool(args.run_reranking_test), stages=stages,
+                                        logger=logger, run_test=bool(args.run_reranking_test),
                                         prev_output_path=args.prev_output_path)
         all_metrics.update(d_metrics)
         
