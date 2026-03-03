@@ -188,6 +188,23 @@ def compute_diversity_loss(
         # For normalized embeddings, ||x_i - x_j||^2 = 2 - 2 * cos_sim
         dist_sq = 2.0 - 2.0 * cosine_similarity
         similarity_matrix = torch.exp(-gamma * dist_sq)
+    elif kernel == 'gram':
+        # Fast DPP Literature Gram Matrix: L_ij = r_i r_j <f_i, f_j>
+        # Ensure y_pred is positive (as required by DPP item scores)
+        # For pairwise ranking logics, this assumes y_pred is transformed to [0,1] or positive scaling
+        r = torch.clamp(y_pred, min=eps)
+        if r.dim() == 1:
+            r = r.unsqueeze(-1) # [B, 1]
+        
+        if cosine_similarity.dim() == 3: # Per-user
+            # r could be [B, num_items, 1]
+            if r.dim() == 2:
+                r = r.unsqueeze(-1)
+            r_matrix = torch.bmm(r, r.transpose(-1, -2))
+        else: # Global batch
+            r_matrix = torch.matmul(r, r.t())
+            
+        similarity_matrix = r_matrix * cosine_similarity
     else:
         # Default: Map cosine similarity [-1, 1] to [0, 1]
         similarity_matrix = (1 + cosine_similarity) / 2
@@ -312,6 +329,18 @@ def compute_diversity_loss_per_user(
         # Fast DPP style RBF Kernel: exp(-gamma * ||x_i - x_j||^2)
         dist_sq = 2.0 - 2.0 * cos_sim
         sim_matrices = torch.exp(-gamma * dist_sq)
+    elif kernel == 'gram':
+        # Literature Fast DPP: L_ij = r_i r_j <f_i, f_j>
+        # all_scores captures [pos_score, neg_score1, ...]
+        neg_scores_grouped = neg_scores_flat.view(batch_size, num_negatives)  # [B, num_neg]
+        all_scores = torch.cat([pos_scores, neg_scores_grouped], dim=1)  # [B, group_size]
+        
+        # Ensure scores are positive to act as scaling factors (r_i > 0)
+        # Assuming logits are usually passed, we transform to [0, 1] via sigmoid
+        r = torch.sigmoid(all_scores).unsqueeze(-1) # [B, group_size, 1]
+        r_matrix = torch.bmm(r, r.transpose(-1, -2)) # [B, group_size, group_size]
+        
+        sim_matrices = r_matrix * cos_sim
     else:
         # Map to [0, 1]: (1 + cos_sim) / 2
         sim_matrices = (1 + cos_sim) / 2
