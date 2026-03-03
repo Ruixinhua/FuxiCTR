@@ -140,6 +140,8 @@ def compute_diversity_loss(
     y_pred: torch.Tensor,
     theta: float = 0.7,
     eps: float = 1e-6,
+    kernel: str = 'cosine',
+    gamma: float = 1.0,
 ) -> torch.Tensor:
     """
     Compute diversity loss based on item embedding similarity and prediction scores.
@@ -164,7 +166,7 @@ def compute_diversity_loss(
         >>> div_loss = compute_diversity_loss(item_emb, y_pred, theta=0.7)
         >>> total_loss = base_loss - lambda_ * div_loss
     """
-    # Normalize embeddings for cosine similarity
+    # Normalize embeddings for cosine similarity or RBF kernel
     item_vectors_normalized = torch.nn.functional.normalize(item_embeddings, p=2, dim=-1)
     
     # Compute cosine similarity matrix
@@ -181,8 +183,14 @@ def compute_diversity_loss(
             item_vectors_normalized.t()
         )
     
-    # Apply the formula (1 + cosine_sim) / 2 to get values in [0, 1]
-    similarity_matrix = (1 + cosine_similarity) / 2
+    if kernel == 'rbf':
+        # RBF Kernel: exp(-gamma * ||x_i - x_j||^2)
+        # For normalized embeddings, ||x_i - x_j||^2 = 2 - 2 * cos_sim
+        dist_sq = 2.0 - 2.0 * cosine_similarity
+        similarity_matrix = torch.exp(-gamma * dist_sq)
+    else:
+        # Default: Map cosine similarity [-1, 1] to [0, 1]
+        similarity_matrix = (1 + cosine_similarity) / 2
     
     # Add small identity matrix for numerical stability before logdet
     identity = torch.eye(
@@ -207,11 +215,15 @@ def compute_diversity_loss(
         if torch.isnan(log_det_similarity) or torch.isinf(log_det_similarity):
             log_det_similarity = torch.tensor(0.0, device=item_embeddings.device)
     
-    # Sum of predicted scores
-    r_ui_sum = torch.sum(y_pred)
+    # Normalize log det by candidate size to prevent scale explosion
+    group_size = similarity_matrix.size(-1)
+    log_det_similarity = log_det_similarity / group_size
+    
+    # Mean of predicted scores instead of sum to prevent scale explosion
+    r_ui_mean = torch.mean(y_pred)
     
     # Diversity Loss Calculation
-    diversity_loss = theta * r_ui_sum + (1 - theta) * log_det_similarity
+    diversity_loss = theta * r_ui_mean + (1 - theta) * log_det_similarity
     
     return diversity_loss
 
@@ -251,6 +263,8 @@ def compute_diversity_loss_per_user(
     theta: float = 0.7,
     lambda_: float = 0.01,
     eps: float = 1e-6,
+    kernel: str = 'cosine',
+    gamma: float = 1.0,
 ) -> torch.Tensor:
     """
     Compute per-user diversity loss treating each sample's pos+neg as an impression.
@@ -288,14 +302,19 @@ def compute_diversity_loss_per_user(
     # Reshape to per-user groups: [B, group_size, emb_dim]
     item_embeddings_grouped = item_embeddings.view(batch_size, group_size, emb_dim)
     
-    # Normalize embeddings for cosine similarity
+    # Normalize embeddings for similarity metric computation
     item_emb_norm = torch.nn.functional.normalize(item_embeddings_grouped, p=2, dim=-1)
     
-    # Per-user similarity matrices: [B, group_size, group_size]
-    sim_matrices = torch.bmm(item_emb_norm, item_emb_norm.transpose(-1, -2))
+    # Per-user cosine similarities: [B, group_size, group_size]
+    cos_sim = torch.bmm(item_emb_norm, item_emb_norm.transpose(-1, -2))
     
-    # Map to [0, 1]: (1 + cos_sim) / 2
-    sim_matrices = (1 + sim_matrices) / 2
+    if kernel == 'rbf':
+        # Fast DPP style RBF Kernel: exp(-gamma * ||x_i - x_j||^2)
+        dist_sq = 2.0 - 2.0 * cos_sim
+        sim_matrices = torch.exp(-gamma * dist_sq)
+    else:
+        # Map to [0, 1]: (1 + cos_sim) / 2
+        sim_matrices = (1 + cos_sim) / 2
     
     # Add small identity for numerical stability
     identity = torch.eye(group_size, device=sim_matrices.device) * eps
@@ -311,14 +330,17 @@ def compute_diversity_loss_per_user(
         log_det
     )
     
-    # Per-user prediction sum
+    # Normalize log det by candidate size to prevent gradient explosion
+    log_det = log_det / group_size
+    
+    # Per-user prediction mean instead of sum
     # pos_scores: [B, 1], neg_scores_flat: [B * num_neg, 1]
     neg_scores_grouped = neg_scores_flat.view(batch_size, num_negatives)  # [B, num_neg]
     all_scores = torch.cat([pos_scores, neg_scores_grouped], dim=1)  # [B, group_size]
-    r_ui_sum = all_scores.sum(dim=1)  # [B]
+    r_ui_mean = all_scores.mean(dim=1)  # [B]
     
     # Per-user diversity loss: [B]
-    per_user_div = theta * r_ui_sum + (1 - theta) * log_det
+    per_user_div = theta * r_ui_mean + (1 - theta) * log_det
     
     # Average across users, then apply as regularization (negative = encourage diversity)
     diversity_loss = per_user_div.mean()
@@ -439,6 +461,8 @@ class DiversityLossMixin:
         use_diversity_loss: bool = False,
         diversity_lambda: float = 0.7,
         diversity_theta: float = 0.7,
+        diversity_kernel: str = 'cosine',
+        diversity_gamma: float = 1.0,
         diversity_item_features: Optional[List[str]] = None,
         **kwargs
     ):
@@ -455,6 +479,8 @@ class DiversityLossMixin:
         self._use_diversity_loss = use_diversity_loss
         self._diversity_lambda = diversity_lambda
         self._diversity_theta = diversity_theta
+        self._diversity_kernel = diversity_kernel
+        self._diversity_gamma = diversity_gamma
         self._diversity_item_features = diversity_item_features or []
         self._diversity_logger = logging.getLogger(self.__class__.__name__)
         
@@ -528,6 +554,8 @@ class DiversityLossMixin:
             item_embeddings=item_embeddings,
             y_pred=y_pred,
             theta=self._diversity_theta,
+            kernel=self._diversity_kernel,
+            gamma=self._diversity_gamma,
         )
     
     def add_diversity_to_loss(
@@ -703,6 +731,8 @@ def compute_diversity_for_pairwise(model, inputs, y_pred):
                         item_embeddings=item_embeddings,
                         y_pred=y_pred,
                         theta=model._diversity_theta,
+                        kernel=getattr(model, '_diversity_kernel', 'cosine'),
+                        gamma=getattr(model, '_diversity_gamma', 1.0),
                     )
                     return -model._diversity_lambda * div_loss
             except Exception as e:
@@ -745,6 +775,8 @@ def wrap_model_with_diversity(
     use_diversity_loss: bool = True,
     diversity_lambda: float = 0.7,
     diversity_theta: float = 0.7,
+    diversity_kernel: str = 'cosine',
+    diversity_gamma: float = 1.0,
     diversity_item_features: Optional[List[str]] = None,
 ):
     """
@@ -806,6 +838,8 @@ def wrap_model_with_diversity(
     model._diversity_enabled = True
     model._diversity_lambda = diversity_lambda
     model._diversity_theta = diversity_theta
+    model._diversity_kernel = diversity_kernel
+    model._diversity_gamma = diversity_gamma
     model._diversity_item_features = diversity_item_features
     model._diversity_emb_dict_layer = emb_dict_layer
     model._diversity_item_embeddings = None  # populated during forward
@@ -858,6 +892,8 @@ def wrap_model_with_diversity(
                 item_embeddings=item_embeddings,
                 y_pred=y_pred,
                 theta=diversity_theta,
+                kernel=diversity_kernel,
+                gamma=diversity_gamma,
             )
             total_loss = base_loss - diversity_lambda * div_loss
             return total_loss
