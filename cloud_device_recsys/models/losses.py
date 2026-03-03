@@ -140,7 +140,7 @@ def compute_diversity_loss(
     y_pred: torch.Tensor,
     theta: float = 0.7,
     eps: float = 1e-6,
-    kernel: str = 'cosine',
+    kernel: str = 'gram',
     gamma: float = 1.0,
 ) -> torch.Tensor:
     """
@@ -280,7 +280,7 @@ def compute_diversity_loss_per_user(
     theta: float = 0.7,
     lambda_: float = 0.01,
     eps: float = 1e-6,
-    kernel: str = 'cosine',
+    kernel: str = 'gram',
     gamma: float = 1.0,
 ) -> torch.Tensor:
     """
