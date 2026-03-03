@@ -77,7 +77,7 @@ class PrerankingStage(BaseStage):
             self.logger.info(
                 f"Computing diversity loss theta: {model_params.get('diversity_theta', 0.7)} "
                 f"lambda: {model_params.get('diversity_lambda', 0.7)} "
-                f"kernel: {model_params.get('diversity_kernel', 'rbf')} "
+                f"kernel: {model_params.get('diversity_kernel', 'gram')} "
                 f"gamma: {model_params.get('diversity_gamma', 1.0)}")
         # Delayed diversity loss parameters
         self.diversity_start_epoch = model_params.get('diversity_start_epoch', -1)
@@ -514,7 +514,7 @@ class PrerankingStage(BaseStage):
         if self.use_diversity_loss:
             diversity_theta = self.model_params.get('diversity_theta', 0.7)
             diversity_lambda = getattr(self.model, '_diversity_lambda', self.model_params.get('diversity_lambda', 0.01))
-            diversity_kernel = self.model_params.get('diversity_kernel', 'cosine')
+            diversity_kernel = self.model_params.get('diversity_kernel', 'gram')
             diversity_gamma = self.model_params.get('diversity_gamma', 1.0)
             diversity_delta = compute_diversity_loss_per_user(
                 model=self.model,
