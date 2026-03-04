@@ -92,6 +92,7 @@ class PrerankingStage(BaseStage):
         # Negative sampling parameters
         self.num_negatives = model_params.get('num_negatives', 0)
         self.diversity_num_negatives = model_params.get('diversity_num_negatives', self.num_negatives)
+        self.evaluate_pool_diversity = model_params.get('evaluate_pool_diversity', False)
         self.loss_type = model_params.get('loss_type', 'bpr')  # 'bpr', 'margin', 'softmax'
         self.margin = model_params.get('margin', 1.0)
         self.negative_sampler: Optional[NegativeSampler] = None
@@ -566,6 +567,7 @@ class PrerankingStage(BaseStage):
             raise ValueError("Item features not loaded. Call load_item_features() first.")
 
         compute_metrics = kwargs.pop('compute_metrics', True)
+        evaluate_pool_diversity = kwargs.pop('evaluate_pool_diversity', self.evaluate_pool_diversity)
         
         return process_and_rank_candidates(
             model=self.model,
@@ -578,6 +580,7 @@ class PrerankingStage(BaseStage):
             top_k=kwargs.get('top_k', self.top_k),
             logger=self.logger,
             metrics_k=self.metrics_k,
+            evaluate_pool_diversity=evaluate_pool_diversity,
             **kwargs
         )
 
@@ -600,7 +603,7 @@ class PrerankingStage(BaseStage):
                  
         if self.item_features_df is None:
             raise ValueError("Item features not loaded. Call load_item_features() first.")
-
+        evaluate_pool_diversity = kwargs.pop('evaluate_pool_diversity', self.evaluate_pool_diversity)
         _, metrics = process_and_rank_candidates(
             model=self.model,
             feature_map=self.feature_map,
@@ -611,6 +614,7 @@ class PrerankingStage(BaseStage):
             compute_metrics=True,
             metrics_k=metrics_k or self.metrics_k,
             logger=self.logger,
+            evaluate_pool_diversity=evaluate_pool_diversity,
             **kwargs
         )
         return metrics

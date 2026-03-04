@@ -98,6 +98,7 @@ class DTCNPrerankingStage(PrerankingStage):
 
         # CL loss configuration
         self.cl_loss_weight = dtcn_params.get('cl_loss_weight', 0.1)
+        self.cl_use_logits = dtcn_params.get('cl_use_logits', False)
         self.full_model_loss_weight = dtcn_params.get('full_model_loss_weight', 1.0)
         self.cloud_model_loss_weight = dtcn_params.get('cloud_model_loss_weight', 1.0)
 
@@ -158,27 +159,28 @@ class DTCNPrerankingStage(PrerankingStage):
         self.logger.info(f"Full model built: {self.full_model_name} "
                          f"({sum(p.numel() for p in self.full_model.parameters())} params)")
 
-    def _compute_cl_loss(self, cloud_logit, full_logit):
+    def _compute_cl_loss(self, cloud_target, full_target):
         """
         Compute contrastive learning loss (distance loss) between two models.
 
-        Uses MSE loss on pre-sigmoid logits for stronger gradient signal.
+        Uses MSE loss to encourage cloud model to match full model.
+        The targets can be probabilities or logits depending on `cl_use_logits`.
 
         Args:
-            cloud_logit: Cloud model logits (pre-sigmoid) [B, 1]
-            full_logit: Full model logits (pre-sigmoid) [B, 1]
+            cloud_target: Cloud model predictions or logits [B, 1]
+            full_target: Full model predictions or logits [B, 1]
 
         Returns:
             CL loss (scalar tensor)
         """
-        if cloud_logit is None or full_logit is None:
+        if cloud_target is None or full_target is None:
             return torch.tensor(0.0)
 
-        # Detach full model logits if frozen (no gradient through teacher)
+        # Detach full model predictions if frozen (no gradient through teacher)
         if self.freeze_full_model:
-            full_logit = full_logit.detach()
+            full_target = full_target.detach()
 
-        return F.mse_loss(cloud_logit, full_logit, reduction='mean')
+        return F.mse_loss(cloud_target, full_target, reduction='mean')
 
     def _create_joint_optimizer(self):
         """Create a joint optimizer for both models (when training from scratch)."""
@@ -303,7 +305,7 @@ class DTCNPrerankingStage(PrerankingStage):
 
             # Validation — use cloud model only
             self.logger.info(f"[DTCN] Evaluating epoch {epoch + 1}...")
-            valid_metrics = self.evaluate(valid_data)
+            valid_metrics = self.evaluate(valid_data, evaluate_pool_diversity=self.model_params.get('evaluate_pool_diversity', False))
             metrics.update(valid_metrics)
             self.logger.info(f"[DTCN] Validation: {valid_metrics}")
 
@@ -384,15 +386,12 @@ class DTCNPrerankingStage(PrerankingStage):
             if hasattr(self.model, 'regularization_loss'):
                 cloud_loss = cloud_loss + self.model.regularization_loss()
 
-        # Extract cloud logits for CL loss
-        cloud_logit = cloud_output.get('logit', cloud_output['y_pred'])
-
         # --- Full model forward + loss ---
         if self.freeze_full_model:
             with torch.no_grad():
                 full_output = self.full_model.forward(full_batch)
             full_loss_val = 0.0
-            full_loss = torch.tensor(0.0, device=cloud_logit.device)
+            full_loss = torch.tensor(0.0, device=cloud_output['y_pred'].device)
         else:
             if use_negative_sampling and self.num_negatives > 0:
                 full_loss, full_output = self._compute_pairwise_loss(
@@ -407,11 +406,16 @@ class DTCNPrerankingStage(PrerankingStage):
                     full_loss = full_loss + self.full_model.regularization_loss()
             full_loss_val = full_loss.item()
 
-        # Extract full logits for CL loss
-        full_logit = full_output.get('logit', full_output['y_pred'])
+        # Extract appropriate targets for CL loss
+        if self.cl_use_logits:
+            cloud_cl_target = cloud_output.get('logit', cloud_output['y_pred'])
+            full_cl_target = full_output.get('logit', full_output['y_pred'])
+        else:
+            cloud_cl_target = cloud_output['y_pred']
+            full_cl_target = full_output['y_pred']
 
-        # --- CL loss (distance loss on logits) ---
-        cl_loss = self._compute_cl_loss(cloud_logit, full_logit)
+        # --- CL loss (distance loss) ---
+        cl_loss = self._compute_cl_loss(cloud_cl_target, full_cl_target)
 
         # --- Combined loss ---
         total_loss = (self.cloud_model_loss_weight * cloud_loss

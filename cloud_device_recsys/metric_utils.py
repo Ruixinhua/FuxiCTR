@@ -161,6 +161,42 @@ def compute_ranking_metrics(
     return metrics
 
 
+def compute_pool_diversity(item_features_arr: np.ndarray, sample_size: int = 30000) -> float:
+    """
+    Compute diversity for the entire item pool or a large set of candidates.
+    Diversity is calculated as 1 minus the average pairwise categorical similarity.
+    For large arrays, this computes similarity on a random sample to maintain performance.
+
+    Args:
+        item_features_arr: 2D array (num_items, num_features) of item categorical features.
+        sample_size: Maximum number of items to sample for calculation. O(N^2) complexity.
+
+    Returns:
+        Pool diversity score [0.0, 1.0]. Returns 0.0 if array is empty or 1 item.
+    """
+    n_items = item_features_arr.shape[0]
+    if n_items <= 1:
+        return 0.0
+
+    # Sample if too large
+    if n_items > sample_size:
+        idx = np.random.choice(n_items, sample_size, replace=False)
+        feats = item_features_arr[idx]
+        real_n = sample_size
+    else:
+        feats = item_features_arr
+        real_n = n_items
+
+    sim_matrix = np.zeros((real_n, real_n), dtype=np.float64)
+    for f in range(feats.shape[1]):
+        col = feats[:, f].reshape(-1, 1)
+        sim_matrix += (col == col.T).astype(np.float64)
+    sim_matrix /= feats.shape[1]
+
+    avg_sim = (sim_matrix.sum() - np.trace(sim_matrix)) / (real_n * (real_n - 1))
+    return float(1.0 - avg_sim)
+
+
 def process_and_rank_candidates(
         model: Any,
         feature_map: Any,
@@ -175,6 +211,7 @@ def process_and_rank_candidates(
         inference_batch_size: int = 100000,
         inject_cloud_score: bool = False,
         ranking_candidates_df: Optional[pd.DataFrame] = None,
+        evaluate_pool_diversity: bool = False,
         **kwargs
 ) -> Tuple[Optional[StageOutput], Dict[str, float]]:
     """
@@ -577,6 +614,9 @@ def process_and_rank_candidates(
         timing_stats['tensor_conversion'] += time.time() - t_tensor_start
 
         # ===== TIMING: Model forward pass =====
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
         t_forward_start = time.time()
         with torch.no_grad():
             if use_fp16:
@@ -584,14 +624,23 @@ def process_and_rank_candidates(
                     pred_dict = model(tensor_batch)
             else:
                 pred_dict = model(tensor_batch)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
         timing_stats['model_forward'] += time.time() - t_forward_start
 
         # ===== TIMING: Result transfer to CPU =====
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
         t_transfer_start = time.time()
         if 'logit' in pred_dict:
             chunk_scores = pred_dict['logit'].detach().cpu().numpy().flatten()
         else:
             chunk_scores = pred_dict['y_pred'].detach().cpu().numpy().flatten()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
         timing_stats['result_transfer'] += time.time() - t_transfer_start
 
         all_scores[chunk_start:chunk_end] = chunk_scores
@@ -628,6 +677,8 @@ def process_and_rank_candidates(
         total_metrics['gAUC'] = 0.0
         total_metrics[f'gAUC@{top_k}'] = 0.0
         total_metrics[f'MRR@{top_k}'] = 0.0
+        if evaluate_pool_diversity:
+            total_metrics['Candidate_Diversity'] = 0.0
         # Accumulators for global (non-grouped) AUC
         all_query_scores_list = []  # list of per-query score arrays
         all_query_labels_list = []  # list of per-query label arrays
@@ -770,6 +821,17 @@ def process_and_rank_candidates(
             if query_metrics:
                 for metric_name, value in query_metrics.items():
                     total_metrics[metric_name] += value
+            
+            # Compute Candidate_Diversity (diversity of ALL candidates for this query, regardless of K)
+            if evaluate_pool_diversity and req_item_feat_diversity is not None and len(req_item_feat_diversity) > 1:
+                feat_len = len(req_item_feat_diversity)
+                sim_matrix = np.zeros((feat_len, feat_len), dtype=np.float64)
+                for f in range(req_item_feat_diversity.shape[1]):
+                    col = req_item_feat_diversity[:, f].reshape(-1, 1)
+                    sim_matrix += (col == col.T).astype(np.float64)
+                sim_matrix /= req_item_feat_diversity.shape[1]
+                avg_sim = (sim_matrix.sum() - np.trace(sim_matrix)) / (feat_len * (feat_len - 1))
+                total_metrics['Candidate_Diversity'] += float(1.0 - avg_sim)
 
     # Finalize outputs using DataFrame-first API
     if return_output:
@@ -794,6 +856,8 @@ def process_and_rank_candidates(
                     metrics[metric_name] = total_metrics[metric_name] / valid_queries if valid_queries > 0 else 0.0
                 elif metric_name in gauc_metrics_at_k:
                     metrics[metric_name] = total_metrics[metric_name] / valid_queries_at_k if valid_queries_at_k > 0 else 0.0
+                elif metric_name == 'Candidate_Diversity':
+                    metrics[metric_name] = total_metrics[metric_name] / valid_queries if valid_queries > 0 else 0.0
                 else:
                     metrics[metric_name] = total_metrics[metric_name] / num_queries
 
@@ -829,5 +893,13 @@ def process_and_rank_candidates(
                     logger.warning(f"Failed to compute global AUC@{top_k}: {e}")
         else:
             logger.warning("No valid queries with positive labels for ranking evaluation.")
+        
+        # Calculate Pool Diversity
+        if evaluate_pool_diversity and item_feat_diversity_arr is not None and len(item_feat_diversity_arr) > 0:
+            try:
+                metrics['Pool_Diversity'] = compute_pool_diversity(item_feat_diversity_arr)
+            except Exception as e:
+                logger.warning(f"Failed to compute Pool_Diversity: {e}")
+                metrics['Pool_Diversity'] = 0.0
 
     return output, metrics
