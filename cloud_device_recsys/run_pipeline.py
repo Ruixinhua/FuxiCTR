@@ -37,7 +37,7 @@ from fuxictr.pytorch.dataloaders import RankDataLoader
 from fuxictr.pytorch.torch_utils import seed_everything
 
 from cloud_device_recsys.config.feature_groups import FeatureGroupManager, FeatureGroup
-from cloud_device_recsys.pipeline import RetrievalStage, PrerankingStage, RerankingStage
+from cloud_device_recsys.pipeline import RetrievalStage, PrerankingStage, RerankingStage, DTCNPrerankingStage
 from cloud_device_recsys.utils import (
     setup_logging, get_data_dir, get_data_paths,
     prepare_debug_paths, parse_pipeline_args,
@@ -575,6 +575,177 @@ def run_joint_training_stage(preranking_stage, reranking_stage, pipeline_config,
     return metrics
 
 
+def run_dtcn_preranking_stage(pipeline_config, dataset_config, fg_manager, feature_map,
+                              logger=None, run_test=True,
+                              prev_output_test=None, prev_output_valid=None, gpu=-1, **kwargs):
+    """
+    Run the DTCN preranking stage: dual-model (cloud + full) training with CL.
+
+    Creates two DataLoaders:
+      - Cloud DataLoader: FG1+FG2 features
+      - Full DataLoader:  FG1+FG2+FG3 features
+    Then creates a DTCNPrerankingStage and delegates training/evaluation.
+    """
+    if logger is None:
+        logger = logging.getLogger('PipelineRunner')
+
+    from cloud_device_recsys.utils import filter_feature_map
+
+    preranking_config = pipeline_config['stages']['preranking']
+    dtcn_config = pipeline_config['stages'].get('dtcn', {})
+    metrics = {}
+
+    # 1. Prepare Data Paths
+    paths = get_data_paths(dataset_config, pipeline_config, logger)
+    paths = prepare_debug_paths(paths, dataset_config, logger)
+
+    num_negatives = preranking_config.get('model_params', {}).get('num_negatives', 0)
+    label_col = dataset_config.get('label_col', {}).get('name', 'label')
+
+    # 2. Build feature maps
+    #    Cloud feature map: FG1 + FG2 (same as normal preranking)
+    cloud_features = [FeatureGroup.from_string(f) for f in preranking_config.get('features', ['FG1', 'FG2'])]
+    cloud_feature_map = filter_feature_map(
+        feature_map, fg_manager, cloud_features,
+        use_feature_encoder=preranking_config.get('model_params', {}).get('use_feature_encoder', False)
+    )
+    cloud_feature_map.default_emb_dim = preranking_config.get('model_params', {}).get('embedding_dim', 16)
+
+    #    Full feature map: FG1 + FG2 + FG3
+    full_features_list = [FeatureGroup.from_string(f) for f in dtcn_config.get('full_features', ['FG1', 'FG2', 'FG3'])]
+    full_feature_map = filter_feature_map(
+        feature_map, fg_manager, full_features_list,
+        use_feature_encoder=dtcn_config.get('full_model_params', {}).get('use_feature_encoder',
+                                            preranking_config.get('model_params', {}).get('use_feature_encoder', False))
+    )
+    full_feature_map.default_emb_dim = dtcn_config.get('full_model_params', {}).get(
+        'embedding_dim', preranking_config.get('model_params', {}).get('embedding_dim', 16)
+    )
+
+    logger.info(f"[DTCN] Cloud feature map: {len(cloud_feature_map.features)} features")
+    logger.info(f"[DTCN] Full feature map: {len(full_feature_map.features)} features")
+
+    # 3. Create DataLoaders
+    #    Cloud DataLoader (FG1+FG2)
+    cloud_loaders = _prepare_stage_data_loaders(
+        feature_map=cloud_feature_map,
+        stage_config=preranking_config,
+        paths=paths,
+        create_train=True,
+        create_test=False,
+        num_negatives=num_negatives,
+        label_col=label_col,
+        logger=logger
+    )
+
+    #    Full DataLoader (FG1+FG2+FG3)
+    full_loaders = _prepare_stage_data_loaders(
+        feature_map=full_feature_map,
+        stage_config=preranking_config,
+        paths=paths,
+        create_train=True,
+        create_test=False,
+        num_negatives=num_negatives,
+        label_col=label_col,
+        logger=logger
+    )
+
+    # 4. Ensure item pool exists and load it
+    cand_item_pool_path = ensure_item_pool(
+        data_paths={'item_pool_path': paths['item_pool_path'], 'valid_path': paths['valid_path'],
+                    'test_path': paths['test_path']},
+        dataset_config=dataset_config,
+        feature_group_manager=fg_manager,
+        logger=logger
+    )
+
+    # 5. Build model params
+    model_params = preranking_config.get('model_params', {}).copy()
+    model_params['gpu'] = gpu
+    model_params['model'] = preranking_config.get('model', 'DINRanker')
+    if 'metrics' in preranking_config:
+        model_params['metrics'] = preranking_config['metrics']
+
+    # 6. Create DTCNPrerankingStage
+    output_dir = kwargs.get('output_dir', './outputs/dtcn_preranking')
+    dtcn_stage = DTCNPrerankingStage(
+        feature_map=cloud_feature_map,
+        full_feature_map=full_feature_map,
+        feature_group_manager=fg_manager,
+        model_params=model_params,
+        dtcn_params=dtcn_config,
+        allowed_feature_groups=cloud_features,
+        output_dir=os.path.join(output_dir, 'preranking'),
+        top_k=preranking_config.get('top_k', 100),
+    )
+
+    # 7. Load item features for negative sampling
+    if num_negatives > 0 and fg_manager is not None:
+        neg_pool_mode = preranking_config.get('neg_sampling_pool', 'candidate')
+        if neg_pool_mode == 'full':
+            neg_pool_path = ensure_full_item_pool(
+                data_paths=paths,
+                dataset_config=dataset_config,
+                feature_group_manager=fg_manager,
+                logger=logger
+            )
+        else:
+            neg_pool_path = cand_item_pool_path
+        dtcn_stage.load_item_features(neg_pool_path)
+        logger.info(f"[DTCN] Negative sampling pool: '{neg_pool_mode}' -> {neg_pool_path} ({len(dtcn_stage.item_features_df)} items)")
+    else:
+        if os.path.exists(paths['item_pool_path']):
+            dtcn_stage.load_item_features(paths['item_pool_path'])
+        else:
+            logger.warning(f"Item pool not found at {paths['item_pool_path']}.")
+
+    # 8. Enrich stage outputs with FG3 user features
+    if fg_manager is not None:
+        impression_id_col = dataset_config.get('impression_id_col', 'impression_id')
+        prev_output_valid = enrich_stage_output_user_features(
+            prev_output_valid, paths['valid_path'], fg_manager, impression_id_col, logger
+        )
+        prev_output_test = enrich_stage_output_user_features(
+            prev_output_test, paths['test_path'], fg_manager, impression_id_col, logger
+        )
+
+    # 9. Train DTCN models
+    logger.info("[DTCN] Building models...")
+    dtcn_stage.build_model()
+
+    cloud_train_gen, _ = cloud_loaders['train_loader'].make_iterator()
+    full_train_gen, _ = full_loaders['train_loader'].make_iterator()
+
+    dtcn_stage.train(
+        train_data=cloud_train_gen,
+        full_train_data=full_train_gen,
+        valid_data=prev_output_valid,
+        epochs=preranking_config['training'].get('epochs', 10),
+        batch_size=preranking_config['training'].get('batch_size', 4096),
+    )
+
+    # 10. After training, switch to candidate item pool for evaluation
+    if num_negatives > 0 and os.path.exists(cand_item_pool_path):
+        dtcn_stage.load_item_features(cand_item_pool_path)
+        logger.info(f"[DTCN] Switched to eval item pool ({len(dtcn_stage.item_features_df)} items)")
+
+    # 11. Evaluate and process
+    logger.info("[DTCN] Processing pipeline candidates (cloud model only)...")
+    valid_output, valid_metrics = dtcn_stage.process(prev_output_valid, compute_metrics=True)
+    metrics.update({f"preranking_valid_{k}": v for k, v in valid_metrics.items()})
+
+    test_output = None
+    if run_test:
+        if prev_output_test is None:
+            logger.warning("[DTCN] No previous test output provided, cannot run test evaluation.")
+        else:
+            test_output, test_metrics = dtcn_stage.process(prev_output_test, compute_metrics=True)
+            metrics.update({f"preranking_test_{k}": v for k, v in test_metrics.items()})
+    else:
+        logger.info("Skipping DTCN preranking test evaluation.")
+
+    return metrics, valid_output, test_output
+
 
 def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_manager=None, run_test=True, logger=None,
                         prev_output_path=None, preranking_model=None,  prev_output_test=None, prev_output_valid=None):
@@ -961,7 +1132,27 @@ def main():
             prev_output_valid=prev_output_valid, prev_output_test=prev_output_test
         )
         all_metrics.update(j_metrics)
-        
+
+    elif args.mode == 'dtcn_preranking':
+        logger.info("Running DTCN Cloud-Side Preranking")
+        if 'preranking' not in stages:
+            raise RuntimeError("No preranking stage found in config.")
+
+        if args.prev_output_path:
+            prev_output_valid, prev_output_test = load_stage_outputs_from_dir(
+                args.prev_output_path, 'retrieval', logger, load_test=bool(args.run_preranking_test)
+            )
+        else:
+            raise RuntimeError("Previous stage outputs (from retrieval) must be provided via --prev_output_path.")
+
+        d_metrics, _, _ = run_dtcn_preranking_stage(
+            pipeline_config, dataset_config, fg_manager, feature_map,
+            logger=logger, run_test=bool(args.run_preranking_test),
+            prev_output_valid=prev_output_valid, prev_output_test=prev_output_test,
+            gpu=args.gpu, output_dir=run_output_dir,
+        )
+        all_metrics.update(d_metrics)
+
     else:
         raise ValueError(f"Unknown mode: {args.mode}")
 

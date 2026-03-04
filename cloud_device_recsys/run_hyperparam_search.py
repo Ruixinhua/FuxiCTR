@@ -62,7 +62,7 @@ def parse_args():
     parser.add_argument('--gpu', nargs='+', type=int, default=[-1],
                         help='GPU device ID (-1 for CPU)')
     parser.add_argument('--mode', type=str, default='full',
-                        choices=['full', 'retrieval', 'preranking', 'reranking', 'joint_train'],
+                        choices=['full', 'retrieval', 'preranking', 'reranking', 'joint_train', 'dtcn_preranking'],
                         help='Pipeline execution mode')
     parser.add_argument('--n_rows', type=int, default=None,
                         help='Override debug n_rows for quick testing')
@@ -367,7 +367,7 @@ def save_results(
     # Reorder columns: experiment_id, status, timestamp, params..., metrics...
     if len(df) > 0:
         meta_cols = ['experiment_id', 'seed', 'status', 'timestamp']
-        param_cols = sorted([c for c in df.columns if c.startswith(('retrieval.', 'preranking.', 'reranking.'))])
+        param_cols = sorted([c for c in df.columns if c.startswith(('retrieval.', 'preranking.', 'reranking.', 'dtcn.'))])
         metric_cols = sorted([c for c in df.columns if c not in meta_cols + param_cols])
         df = df[meta_cols + param_cols + metric_cols]
     
