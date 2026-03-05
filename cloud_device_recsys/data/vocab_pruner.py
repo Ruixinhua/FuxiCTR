@@ -37,7 +37,7 @@ class FeaturePruneInfo:
     original_vocab_size: int
     compact_vocab_size: int  # includes padding at index 0
     # Tensor of shape [original_vocab_size]: old_idx -> new_compact_idx
-    remap_table: torch.LongTensor = None
+    remap_table: torch.IntTensor = None
     reduction_ratio: float = 0.0
 
 
@@ -222,7 +222,7 @@ def build_vocab_mapping(
         # Unknown indices (not in used_values) also map to 0
         compact_vocab_size = actual_count + 1  # +1 for padding at index 0
 
-        remap = torch.zeros(orig_vocab_size, dtype=torch.long)
+        remap = torch.zeros(orig_vocab_size, dtype=torch.int32)
         sorted_vals = sorted(used_values)
         for new_idx, old_idx in enumerate(sorted_vals, start=1):
             if old_idx < orig_vocab_size:

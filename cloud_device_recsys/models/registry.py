@@ -162,5 +162,10 @@ def build_model(
     # Log parameter count if available
     if hasattr(model, 'count_parameters'):
         model.count_parameters()
-    
+
+    # Set FP16 saving flag if configured
+    if getattr(feature_map, '_save_fp16', False):
+        model._save_fp16 = True
+        logger.info("[FP16] Model weights will be saved in half-precision (FP16)")
+
     return model

@@ -45,7 +45,7 @@ from cloud_device_recsys.utils import (
     enrich_stage_output_user_features
 )
 from cloud_device_recsys.data.item_pool import ensure_item_pool, ensure_full_item_pool
-from cloud_device_recsys.data.positive_data import get_train_path_for_mode, ensure_positive_train_data
+from cloud_device_recsys.data.positive_data import get_train_path_for_mode
 from cloud_device_recsys.config.config_parser import ConfigParser
 import pandas as pd
 
@@ -959,7 +959,35 @@ def main():
         # Reduces embedding size by scanning data for actually-used feature values.
         # Scans train + valid + test to ensure no feature value is lost during evaluation.
         vocab_pruning_config = pipeline_config.get('vocab_pruning', {})
-        if vocab_pruning_config.get('enabled', False):
+        vocab_pruning_mode = vocab_pruning_config.get('mode', 'runtime')  # 'runtime' or 'offline'
+        save_fp16 = vocab_pruning_config.get('save_fp16', False)
+
+        if vocab_pruning_config.get('enabled', False) and vocab_pruning_mode == 'offline':
+            # Offline mode: use pre-mapped data from mapped/ subdirectory
+            mapped_dir = os.path.join(data_dir, 'mapped')
+            mapped_feature_map_json = os.path.join(mapped_dir, 'feature_map.json')
+            if os.path.exists(mapped_feature_map_json):
+                logger.info(f"[VocabPruner] Offline mode: using pre-mapped data from {mapped_dir}")
+                # Reload feature_map from mapped directory with compact vocab sizes
+                data_dir = mapped_dir
+                feature_map = FeatureMap(pipeline_config['dataset_id'], mapped_dir)
+                feature_map.load(mapped_feature_map_json, dataset_config)
+                feature_map.dataset_config = dataset_config
+                impression_id_col = dataset_config.get('impression_id_col', 'impression_id')
+                if impression_id_col not in feature_map.labels:
+                    feature_map.labels.append(impression_id_col)
+                # No runtime remapping needed — data is already compact
+                feature_map._vocab_prune_info = None
+                # Override processed_data_root so all downstream get_data_paths() use mapped dir
+                dataset_config['processed_data_root'] = mapped_dir
+                logger.info(f"[VocabPruner] Offline mode: loaded mapped feature_map with {len(feature_map.features)} features")
+            else:
+                logger.warning(f"[VocabPruner] Offline mode requested but {mapped_feature_map_json} not found. "
+                               f"Run `python -m cloud_device_recsys.data.remap_vocab_data --data_dir {data_dir}` first.")
+                feature_map._vocab_prune_info = None
+
+        elif vocab_pruning_config.get('enabled', False):
+            # Runtime mode: current behavior with RemappedEmbedding
             from cloud_device_recsys.data.vocab_pruner import compute_vocab_pruning
             # Collect all data paths to scan (train + valid + test)
             train_positive_path = os.path.join(data_dir, 'train_positive.parquet')
@@ -982,6 +1010,9 @@ def main():
             logger.info(f"[VocabPruner] Pruning complete. {len(prune_info.features)} features pruned.")
         else:
             feature_map._vocab_prune_info = None
+
+        # Propagate FP16 saving flag to feature_map for registry.py to pick up
+        feature_map._save_fp16 = save_fp16
 
     else:
         logger.warning(f"Feature map not found at {feature_map_json}")

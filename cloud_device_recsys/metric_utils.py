@@ -208,7 +208,7 @@ def process_and_rank_candidates(
         metrics_k: List[int] = None,
         top_k: int = 100,
         logger: logging.Logger = None,
-        inference_batch_size: int = 100000,
+        inference_batch_size: int = 50000,
         inject_cloud_score: bool = False,
         ranking_candidates_df: Optional[pd.DataFrame] = None,
         evaluate_pool_diversity: bool = False,
@@ -241,6 +241,8 @@ def process_and_rank_candidates(
     Returns:
         Tuple of (StageOutput or None, metrics_dict)
     """
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     if logger is None:
         logger = logging.getLogger(stage_name)
 
@@ -614,9 +616,6 @@ def process_and_rank_candidates(
         timing_stats['tensor_conversion'] += time.time() - t_tensor_start
 
         # ===== TIMING: Model forward pass =====
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-
         t_forward_start = time.time()
         with torch.no_grad():
             if use_fp16:
@@ -624,29 +623,23 @@ def process_and_rank_candidates(
                     pred_dict = model(tensor_batch)
             else:
                 pred_dict = model(tensor_batch)
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-
         timing_stats['model_forward'] += time.time() - t_forward_start
 
         # ===== TIMING: Result transfer to CPU =====
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
 
         t_transfer_start = time.time()
         if 'logit' in pred_dict:
             chunk_scores = pred_dict['logit'].detach().cpu().numpy().flatten()
         else:
             chunk_scores = pred_dict['y_pred'].detach().cpu().numpy().flatten()
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-
         timing_stats['result_transfer'] += time.time() - t_transfer_start
 
         all_scores[chunk_start:chunk_end] = chunk_scores
 
         # Clean up to free memory
         del tensor_batch
+        del pred_dict
+        del chunk_scores
 
     total_inference_time = time.time() - inference_all_start
 

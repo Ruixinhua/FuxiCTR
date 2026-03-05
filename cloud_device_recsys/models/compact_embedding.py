@@ -38,7 +38,7 @@ class RemappedEmbedding(nn.Module):
     def __init__(
         self,
         compact_embedding: nn.Embedding,
-        remap_table: torch.LongTensor,
+        remap_table: torch.IntTensor,
         original_vocab_size: int,
     ):
         super().__init__()
