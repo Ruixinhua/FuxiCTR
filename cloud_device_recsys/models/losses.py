@@ -882,6 +882,11 @@ def wrap_model_with_diversity(
         # Call original forward
         return_dict = original_forward(inputs)
         
+        # Optimization: Skip extraction during inference or when diversity is disabled
+        if not getattr(model, '_diversity_enabled', True) or not model.training:
+            model._diversity_item_embeddings = None
+            return return_dict
+            
         # Extract item embeddings via the FeatureEmbeddingDict layer
         # We need to get the input features (X) and pass through the dict layer
         try:
