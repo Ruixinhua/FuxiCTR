@@ -386,12 +386,18 @@ class BaseModel(nn.Module):
         return evaluate_metrics(y_true, y_pred, metrics, group_id, feature_group_id)
 
     def save_weights(self, checkpoint):
-        torch.save(self.state_dict(), checkpoint)
+        state_dict = self.state_dict()
+        if getattr(self, '_save_fp16', False):
+            state_dict = {k: v.half() if v.is_floating_point() else v
+                          for k, v in state_dict.items()}
+        torch.save(state_dict, checkpoint)
     
     def load_weights(self, checkpoint):
         self.to(self.device)
         state_dict = torch.load(checkpoint, map_location="cpu")
-        self.load_state_dict(state_dict)
+        # Use strict=False to handle missing keys (e.g., _diversity_emb_dict_layer
+        # which is excluded from save to avoid duplicate weights)
+        self.load_state_dict(state_dict, strict=False)
 
     def get_output_activation(self, task):
         if task == "binary_classification":

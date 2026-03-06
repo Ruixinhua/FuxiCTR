@@ -33,6 +33,7 @@ def seed_everything(seed=1029):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 def get_device(gpu=-1):
     if gpu >= 0 and torch.cuda.is_available():

@@ -569,7 +569,6 @@ def process_and_rank_candidates(
         'item_feature_extract': 0.0,
         'tensor_conversion': 0.0,
         'model_forward': 0.0,
-        'result_transfer': 0.0,
     }
     inference_all_start = time.time()
     num_batches = 0
@@ -623,16 +622,14 @@ def process_and_rank_candidates(
                     pred_dict = model(tensor_batch)
             else:
                 pred_dict = model(tensor_batch)
-        timing_stats['model_forward'] += time.time() - t_forward_start
 
         # ===== TIMING: Result transfer to CPU =====
 
-        t_transfer_start = time.time()
         if 'logit' in pred_dict:
             chunk_scores = pred_dict['logit'].detach().cpu().numpy().flatten()
         else:
             chunk_scores = pred_dict['y_pred'].detach().cpu().numpy().flatten()
-        timing_stats['result_transfer'] += time.time() - t_transfer_start
+        timing_stats['model_forward'] += time.time() - t_forward_start
 
         all_scores[chunk_start:chunk_end] = chunk_scores
 
@@ -652,8 +649,6 @@ def process_and_rank_candidates(
         f"  Tensor conversion:    {timing_stats['tensor_conversion']:8.2f}s ({100 * timing_stats['tensor_conversion'] / total_inference_time:5.1f}%)")
     logger.info(
         f"  Model forward:        {timing_stats['model_forward']:8.2f}s ({100 * timing_stats['model_forward'] / total_inference_time:5.1f}%)")
-    logger.info(
-        f"  Result transfer:      {timing_stats['result_transfer']:8.2f}s ({100 * timing_stats['result_transfer'] / total_inference_time:5.1f}%)")
     logger.info(f"  Loop total:           {total_inference_time:8.2f}s")
     logger.info(f"  Overall total:        {precompute_time + total_inference_time:8.2f}s")
     logger.info("Finish model inference for all valid candidates.")

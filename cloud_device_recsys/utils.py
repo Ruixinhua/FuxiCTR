@@ -7,8 +7,9 @@ import pandas as pd
 import torch
 from datetime import datetime
 import argparse
-from typing import Tuple, List, Dict, Any, Optional
-from .pipeline.stage_output import StageOutput
+from typing import Tuple, List, Dict, Any, Optional, TYPE_CHECKING
+if TYPE_CHECKING:
+    from .pipeline.stage_output import StageOutput
 
 
 def filter_feature_map(feature_map, fg_manager, allowed_feature_groups, use_feature_encoder=False):
