@@ -135,6 +135,137 @@ def softmax_cross_entropy_loss(
     
     return loss
 
+
+# =============================================================================
+# Knowledge Distillation Loss Functions
+# =============================================================================
+
+def kd_mse_loss(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    reduction: str = 'mean',
+) -> torch.Tensor:
+    """
+    MSE-based knowledge distillation loss between student and teacher logits.
+
+    Args:
+        student_logits: Student model logits, shape [B, 1] or [B]
+        teacher_logits: Teacher model logits (detached), shape [B, 1] or [B]
+        reduction: 'mean', 'sum', or 'none'
+
+    Returns:
+        MSE loss value
+    """
+    return torch.nn.functional.mse_loss(
+        student_logits.view(-1), teacher_logits.view(-1), reduction=reduction
+    )
+
+
+def kd_kl_div_loss(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    temperature: float = 1.0,
+    reduction: str = 'batchmean',
+) -> torch.Tensor:
+    """
+    KL-divergence knowledge distillation loss with temperature scaling.
+
+    Softens both student and teacher distributions with temperature, then
+    computes KL(teacher || student). Loss is scaled by T^2 to keep gradients
+    comparable across different temperatures (Hinton et al., 2015).
+
+    Args:
+        student_logits: Student model logits, shape [B, 1] or [B]
+        teacher_logits: Teacher model logits (detached), shape [B, 1] or [B]
+        temperature: Temperature for softening distributions (default 1.0)
+        reduction: KL-div reduction mode (default 'batchmean')
+
+    Returns:
+        KL-divergence loss scaled by T^2
+    """
+    student_logits = student_logits.view(-1)
+    teacher_logits = teacher_logits.view(-1)
+
+    # For binary classification: convert logit to 2-class distribution [1-p, p]
+    student_probs = torch.sigmoid(student_logits / temperature)
+    teacher_probs = torch.sigmoid(teacher_logits / temperature)
+
+    # Stack into [B, 2] distributions
+    student_dist = torch.stack([1 - student_probs, student_probs], dim=-1)
+    teacher_dist = torch.stack([1 - teacher_probs, teacher_probs], dim=-1)
+
+    # KL(teacher || student) — note: kl_div expects log-input
+    loss = torch.nn.functional.kl_div(
+        torch.log(student_dist + 1e-8),
+        teacher_dist,
+        reduction=reduction,
+    )
+    return loss * (temperature ** 2)
+
+
+def kd_cosine_loss(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    reduction: str = 'mean',
+) -> torch.Tensor:
+    """
+    Cosine embedding loss for knowledge distillation.
+
+    Encourages student logit direction to align with teacher logit direction.
+
+    Args:
+        student_logits: Student model logits, shape [B, 1] or [B]
+        teacher_logits: Teacher model logits (detached), shape [B, 1] or [B]
+        reduction: 'mean', 'sum', or 'none'
+
+    Returns:
+        Cosine embedding loss (0 = perfectly aligned, 2 = opposite)
+    """
+    student_logits = student_logits.view(-1)
+    teacher_logits = teacher_logits.view(-1)
+
+    # Cosine similarity: 1 = aligned, -1 = opposite
+    cos_sim = torch.nn.functional.cosine_similarity(
+        student_logits.unsqueeze(0), teacher_logits.unsqueeze(0), dim=-1
+    )
+    # Loss: 1 - cos_sim (0 when perfectly aligned)
+    loss = 1 - cos_sim
+
+    if reduction == 'mean':
+        return loss.mean()
+    elif reduction == 'sum':
+        return loss.sum()
+    return loss
+
+
+def compute_kd_loss(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    kd_loss_type: str = 'mse',
+    temperature: float = 1.0,
+) -> torch.Tensor:
+    """
+    Dispatcher for knowledge distillation loss functions.
+
+    Args:
+        student_logits: Student model logits [B, 1] or [B]
+        teacher_logits: Teacher model logits (detached) [B, 1] or [B]
+        kd_loss_type: 'mse', 'kl_div', or 'cosine'
+        temperature: Temperature for KL-div softening (only used with 'kl_div')
+
+    Returns:
+        KD loss scalar
+    """
+    if kd_loss_type == 'mse':
+        return kd_mse_loss(student_logits, teacher_logits)
+    elif kd_loss_type == 'kl_div':
+        return kd_kl_div_loss(student_logits, teacher_logits, temperature=temperature)
+    elif kd_loss_type == 'cosine':
+        return kd_cosine_loss(student_logits, teacher_logits)
+    else:
+        raise ValueError(f"Unknown kd_loss_type: {kd_loss_type}. Choices: mse, kl_div, cosine")
+
+
 def compute_diversity_loss(
     item_embeddings: torch.Tensor,
     y_pred: torch.Tensor,

@@ -748,15 +748,73 @@ def run_dtcn_preranking_stage(pipeline_config, dataset_config, fg_manager, featu
 
 
 def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_manager=None, run_test=True, logger=None,
-                        prev_output_path=None, preranking_model=None,  prev_output_test=None, prev_output_valid=None):
+                        prev_output_path=None, preranking_model=None, prev_output_test=None, prev_output_valid=None,
+                        retrieval_output_valid=None, retrieval_output_test=None,
+                        feature_map=None):
+    """Run reranking stage with optional cloud teacher and evaluation scope alignment.
+
+    Args:
+        reranking_stage: RerankingStage instance (lazily instantiated)
+        pipeline_config: Full pipeline configuration dict
+        dataset_config: Dataset configuration dict
+        fg_manager: FeatureGroupManager instance
+        run_test: Whether to evaluate on test set
+        logger: Logger instance
+        prev_output_path: Path to load previous stage outputs from disk
+        preranking_model: Pre-ranking model for legacy cloud_score injection
+        prev_output_test: Preranking test output (StageOutput)
+        prev_output_valid: Preranking valid output (StageOutput)
+        retrieval_output_valid: Optional retrieval valid output for eval scope alignment.
+            When provided, AUC/gAUC/MRR are computed on this larger pool (~1000 candidates)
+            instead of the preranking subset (~100), aligning with preranking evaluation.
+        retrieval_output_test: Optional retrieval test output for eval scope alignment.
+        feature_map: Base FeatureMap (needed for cloud_teacher feature map construction)
+    """
     if logger is None:
         logger = logging.getLogger('PipelineRunner')
     if prev_output_path is not None:
-        prev_output_valid, prev_output_test = load_stage_outputs_from_dir(prev_output_path, "preranking",logger)
+        prev_output_valid, prev_output_test = load_stage_outputs_from_dir(prev_output_path, "preranking", logger)
     reranking_config = pipeline_config['stages']['reranking']
     metrics = {}
 
-    # 1. Prepare Data Loaders for reranking stage
+    # 1. Parse cloud_teacher config and build teacher feature map
+    cloud_teacher_config = pipeline_config['stages'].get('cloud_teacher', {})
+    cloud_teacher_feature_map = None
+
+    if cloud_teacher_config.get('mode') and feature_map is not None and fg_manager is not None:
+        from cloud_device_recsys.utils import filter_feature_map
+        teacher_features_str = cloud_teacher_config.get('cloud_teacher_features', ['FG1', 'FG2'])
+        teacher_feature_groups = [FeatureGroup.from_string(f) for f in teacher_features_str]
+        cloud_teacher_feature_map = filter_feature_map(
+            feature_map, fg_manager, teacher_feature_groups,
+            use_feature_encoder=cloud_teacher_config.get('cloud_teacher_model_params', {}).get(
+                'use_feature_encoder',
+                reranking_config.get('model_params', {}).get('use_feature_encoder', False)
+            )
+        )
+        cloud_teacher_feature_map.default_emb_dim = cloud_teacher_config.get(
+            'cloud_teacher_model_params', {}).get(
+            'embedding_dim',
+            reranking_config.get('model_params', {}).get('embedding_dim', 16)
+        )
+        logger.info(f"[Reranking] Cloud teacher feature map: {len(cloud_teacher_feature_map.features)} features "
+                     f"({teacher_features_str})")
+
+        # Inject into reranking_stage
+        reranking_stage.cloud_teacher_params = cloud_teacher_config
+        reranking_stage.cloud_teacher_feature_map = cloud_teacher_feature_map
+        reranking_stage.cloud_teacher_mode = cloud_teacher_config.get('mode')
+
+        # Update cloud_score injection flag based on mode
+        if reranking_stage.cloud_teacher_mode == 'inject':
+            reranking_stage.use_cloud_score = True
+        elif reranking_stage.cloud_teacher_mode == 'distill':
+            reranking_stage.use_cloud_score = False
+            reranking_stage.kd_loss_weight = cloud_teacher_config.get('kd_loss_weight', 0.1)
+            reranking_stage.kd_loss_type = cloud_teacher_config.get('kd_loss_type', 'mse')
+            reranking_stage.kd_temperature = cloud_teacher_config.get('kd_temperature', 1.0)
+
+    # 2. Prepare Data Loaders for reranking stage
     paths = get_data_paths(dataset_config, pipeline_config, logger)
     paths = prepare_debug_paths(paths, dataset_config, logger)
 
@@ -800,8 +858,8 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_man
             )
         else:
             neg_pool_path = paths['item_pool_path']
-        reranking_stage.load_item_features(neg_pool_mode)
-        logger.info(f"[Reranking] Negative sampling pool: '{neg_pool_mode}' → {neg_pool_path} ({len(reranking_config.item_features_df)} items) for negative sampling")
+        reranking_stage.load_item_features(neg_pool_path)
+        logger.info(f"[Reranking] Negative sampling pool: '{neg_pool_mode}' → {neg_pool_path} ({len(reranking_stage.item_features_df)} items) for negative sampling")
     else:
         # Pointwise mode: load test/valid-only pool directly for evaluation
         if os.path.exists(paths['item_pool_path']):
@@ -817,15 +875,16 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_man
             prev_output_test, paths['test_path'], fg_manager, impression_id_col, logger
         )
 
-    # 2. Train Reranking Model
+    # 3. Train Reranking Model
     logger.info("[Reranking] Training model...")
     
-    # Set cloud score teacher if enabled
-    use_cloud_score = reranking_config.get('model_params', {}).get('use_cloud_score', False)
-    if use_cloud_score and preranking_model is not None:
-        reranking_stage.set_cloud_score_teacher(preranking_model)
-    elif use_cloud_score and preranking_model is None:
-        logger.warning("[Reranking] use_cloud_score=True but no preranking model is loaded. Cloud score disabled.")
+    # Set cloud score teacher if enabled (legacy path — only if no cloud_teacher config)
+    if not cloud_teacher_config.get('mode'):
+        use_cloud_score = reranking_config.get('model_params', {}).get('use_cloud_score', False)
+        if use_cloud_score and preranking_model is not None:
+            reranking_stage.set_cloud_score_teacher(preranking_model)
+        elif use_cloud_score and preranking_model is None:
+            logger.warning("[Reranking] use_cloud_score=True but no preranking model is loaded. Cloud score disabled.")
     
     reranking_stage.build_model()
     reranking_stage.train(
@@ -839,22 +898,30 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_man
     if num_negatives > 0 and os.path.exists(paths['item_pool_path']):
         reranking_stage.load_item_features(paths['item_pool_path'])
         logger.info(f"[Reranking] Switched to eval item pool ({len(reranking_stage.item_features_df)} items) for processing")
-    valid_metrics = reranking_stage.evaluate(prev_output_valid)
+
+    # 4. Evaluate with optional evaluation scope alignment
+    valid_metrics = reranking_stage.evaluate(
+        prev_output_valid,
+        retrieval_output=retrieval_output_valid,
+    )
     metrics.update({f"reranking_valid_{k}": v for k, v in valid_metrics.items()})
 
-    # 3. Evaluate Reranking Model (List-wise if prev_output available)
     if run_test:
         if prev_output_test is None:
              logger.warning("[Reranking] No previous test output provided, cannot run test evaluation.")
         else:
             logger.info("[Reranking] Evaluating on test set...")
-            test_metrics = reranking_stage.evaluate(prev_output_test)
+            test_metrics = reranking_stage.evaluate(
+                prev_output_test,
+                retrieval_output=retrieval_output_test,
+            )
             logger.info(f"Test (Ranking): {test_metrics}")
             metrics.update({f"reranking_test_{k}": v for k, v in test_metrics.items()})
     else:
         logger.info("Skipping reranking test evaluation as requested.")
         
     return metrics
+
 
 def main():
     print("DEBUG: main() started", flush=True)
@@ -1080,7 +1147,9 @@ def main():
         d_metrics = run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_manager=fg_manager,
                                         logger=logger, run_test=bool(args.run_reranking_test),
                                         prev_output_path=args.prev_output_path, preranking_model=preranking_stage.model,
-                                        prev_output_valid=p_valid, prev_output_test=p_test)
+                                        prev_output_valid=p_valid, prev_output_test=p_test,
+                                        retrieval_output_valid=r_valid, retrieval_output_test=r_test,
+                                        feature_map=feature_map)
         all_metrics.update(d_metrics)
 
     elif args.mode == 'retrieval':
@@ -1139,7 +1208,8 @@ def main():
         reranking_stage = stages['reranking']()
         d_metrics = run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_manager=fg_manager,
                                         logger=logger, run_test=bool(args.run_reranking_test),
-                                        prev_output_path=args.prev_output_path)
+                                        prev_output_path=args.prev_output_path,
+                                        feature_map=feature_map)
         all_metrics.update(d_metrics)
         
     elif args.mode == 'joint_train':

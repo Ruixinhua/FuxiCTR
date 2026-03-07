@@ -96,6 +96,8 @@ class PrerankingStage(BaseStage):
         self.loss_type = model_params.get('loss_type', 'bpr')  # 'bpr', 'margin', 'softmax'
         self.margin = model_params.get('margin', 1.0)
         self.negative_sampler: Optional[NegativeSampler] = None
+        # Inference batch size for process_and_rank_candidates
+        self.inference_batch_size = model_params.get('inference_batch_size', 50000)
         # Item features storage for lookups during evaluation/processing
         self.item_features_df = None
 
@@ -581,6 +583,7 @@ class PrerankingStage(BaseStage):
             logger=self.logger,
             metrics_k=self.metrics_k,
             evaluate_pool_diversity=evaluate_pool_diversity,
+            inference_batch_size=self.inference_batch_size,
             **kwargs
         )
 
@@ -615,6 +618,7 @@ class PrerankingStage(BaseStage):
             metrics_k=metrics_k or self.metrics_k,
             logger=self.logger,
             evaluate_pool_diversity=evaluate_pool_diversity,
+            inference_batch_size=self.inference_batch_size,
             **kwargs
         )
         return metrics

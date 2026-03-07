@@ -6,10 +6,14 @@
 Re-ranking Stage Implementation
 
 This module wraps the DeviceReranker model as a pipeline stage.
+Supports configurable cloud teacher model for:
+  - inject mode: cloud score (logit) injected as numeric feature
+  - distill mode: KD loss between student and teacher logits
 """
 import torch
 import os
 import csv
+import copy
 import numpy as np
 from typing import Dict, List, Optional, Any, Tuple
 
@@ -18,7 +22,7 @@ from ..pipeline.stage_output import StageOutput
 from ..config.feature_groups import FeatureGroupManager, FeatureGroup
 from ..models import build_model as registry_build_model
 from ..models import DeviceReranker  # For type hints
-from ..models.losses import bpr_loss, margin_ranking_loss, softmax_cross_entropy_loss
+from ..models.losses import bpr_loss, margin_ranking_loss, softmax_cross_entropy_loss, compute_kd_loss
 from ..data.negative_sampler import NegativeSampler
 from ..utils import filter_feature_map
 
@@ -31,6 +35,10 @@ class RerankingStage(BaseStage):
     
     Runs on device with access to all features including FG3 (private).
     Produces final top-K recommendations.
+    
+    Supports optional cloud teacher model via `cloud_teacher_params`:
+      - inject: Teacher logits → z-score normalized → cloud_score feature
+      - distill: KD loss(student_logit, teacher_logit) added to total loss
     """
     
     def __init__(self,
@@ -40,6 +48,8 @@ class RerankingStage(BaseStage):
                  output_dir: str = "./outputs/reranking",
                  top_k: int = 10,
                  support_distillation: bool = False,
+                 cloud_teacher_params: Optional[Dict[str, Any]] = None,
+                 cloud_teacher_feature_map: Optional[FeatureMap] = None,
                  **kwargs):
         """
         Initialize re-ranking stage.
@@ -50,7 +60,17 @@ class RerankingStage(BaseStage):
             model_params: Parameters for DeviceReranker model
             output_dir: Output directory
             top_k: Number of final recommendations
-            support_distillation: Whether to enable distillation
+            support_distillation: Whether to enable distillation (legacy)
+            cloud_teacher_params: Cloud teacher config dict with keys:
+                - cloud_teacher_model: model architecture name
+                - cloud_teacher_model_params: model hyperparameters
+                - cloud_teacher_model_path: path to pre-trained weights (required)
+                - cloud_teacher_features: feature groups list (e.g., ["FG1", "FG2"])
+                - mode: "inject" or "distill"
+                - kd_loss_weight: weight for distillation loss (default 0.1)
+                - kd_loss_type: "mse", "kl_div", or "cosine" (default "mse")
+                - kd_temperature: temperature for KL-div (default 1.0)
+            cloud_teacher_feature_map: Pre-built feature map for teacher model
         """
         # Re-ranking uses ALL feature groups
         self.allowed_feature_groups = kwargs.pop('allowed_feature_groups', [FeatureGroup.FG1, FeatureGroup.FG2, FeatureGroup.FG3])
@@ -80,12 +100,38 @@ class RerankingStage(BaseStage):
         self.margin = model_params.get('margin', 1.0)
         self.negative_sampler: Optional[NegativeSampler] = None
 
-        # Cloud score feature injection
-        self.use_cloud_score = model_params.get('use_cloud_score', False)
-        self.cloud_score_teacher = None  # Pre-ranking model reference
+        # Cloud teacher configuration (new config-driven approach)
+        self.cloud_teacher_params = cloud_teacher_params or {}
+        self.cloud_teacher_feature_map = cloud_teacher_feature_map
+        self.cloud_teacher_model = None
+        self.cloud_teacher_mode = self.cloud_teacher_params.get('mode', None)  # 'inject' or 'distill'
 
+        # Legacy cloud score injection (backward compatibility)
+        self.use_cloud_score = model_params.get('use_cloud_score', False)
+        self.cloud_score_teacher = None  # Pre-ranking model reference (legacy)
+
+        # Determine effective cloud score injection
+        # New config takes precedence over legacy use_cloud_score
+        if self.cloud_teacher_mode == 'inject':
+            self.use_cloud_score = True
+        elif self.cloud_teacher_mode == 'distill':
+            self.use_cloud_score = False  # Distill mode does not inject cloud_score feature
+
+        # KD parameters (distill mode only)
+        self.kd_loss_weight = self.cloud_teacher_params.get('kd_loss_weight', 0.1)
+        self.kd_loss_type = self.cloud_teacher_params.get('kd_loss_type', 'mse')
+        self.kd_temperature = self.cloud_teacher_params.get('kd_temperature', 1.0)
+
+        # Inference batch size for process_and_rank_candidates
+        self.inference_batch_size = model_params.get('inference_batch_size', 50000)
         # Item features storage for lookups
         self.item_features_df = None
+
+        if self.cloud_teacher_mode:
+            self.logger.info(f"Cloud teacher configured: mode={self.cloud_teacher_mode}")
+            if self.cloud_teacher_mode == 'distill':
+                self.logger.info(f"  KD: loss_type={self.kd_loss_type}, weight={self.kd_loss_weight}, "
+                                 f"temperature={self.kd_temperature}")
 
     def load_item_features(self, item_pool_path: str):
         """Load item features from parquet file for inference lookup"""
@@ -103,7 +149,9 @@ class RerankingStage(BaseStage):
             raise
     
     def set_cloud_score_teacher(self, teacher_model):
-        """Set pre-ranking model to generate cloud scores during training.
+        """Set pre-ranking model to generate cloud scores during training (legacy).
+        
+        DEPRECATED: Use cloud_teacher YAML config section instead.
         
         The teacher model (pre-ranking, FG1+FG2 only) provides cloud_score
         as a numeric feature for the reranking model. This does NOT violate
@@ -117,7 +165,65 @@ class RerankingStage(BaseStage):
         self.cloud_score_teacher.eval()
         for param in self.cloud_score_teacher.parameters():
             param.requires_grad = False
-        self.logger.info("Cloud score teacher model set (frozen, eval mode)")
+        self.logger.info("Cloud score teacher model set (frozen, eval mode) [legacy]")
+
+    def _build_cloud_teacher(self):
+        """Build and load the cloud teacher model from YAML config.
+
+        The teacher model is always frozen (pre-trained weights required).
+        Used in both 'inject' and 'distill' modes.
+        """
+        if not self.cloud_teacher_params or not self.cloud_teacher_mode:
+            return
+
+        teacher_model_path = self.cloud_teacher_params.get('cloud_teacher_model_path')
+        if not teacher_model_path:
+            self.logger.warning("cloud_teacher_model_path not specified. Cloud teacher disabled.")
+            self.cloud_teacher_mode = None
+            return
+
+        if not os.path.exists(teacher_model_path):
+            self.logger.warning(f"Cloud teacher model file not found: {teacher_model_path}. Cloud teacher disabled.")
+            self.cloud_teacher_mode = None
+            return
+
+        if self.cloud_teacher_feature_map is None:
+            self.logger.warning("Cloud teacher feature map not provided. Cloud teacher disabled.")
+            self.cloud_teacher_mode = None
+            return
+
+        # Merge base model params with teacher-specific params
+        teacher_model_name = self.cloud_teacher_params.get('cloud_teacher_model',
+                                                            self.model_params.get('model', 'DeviceReranker'))
+        teacher_params = copy.deepcopy(self.model_params)
+        teacher_specific = self.cloud_teacher_params.get('cloud_teacher_model_params', {})
+        teacher_params.update(teacher_specific)
+        teacher_params['model'] = teacher_model_name
+
+        # Build teacher model
+        teacher_output_dir = os.path.join(self.output_dir, 'cloud_teacher')
+        self.cloud_teacher_model = registry_build_model(
+            model_name=teacher_model_name,
+            feature_map=self.cloud_teacher_feature_map,
+            model_params=teacher_params,
+            output_dir=teacher_output_dir,
+        )
+
+        # Load pre-trained weights
+        self.cloud_teacher_model.load_weights(teacher_model_path)
+        self.logger.info(f"Loaded cloud teacher weights from: {teacher_model_path}")
+
+        # Freeze teacher (always frozen — pre-trained only)
+        for param in self.cloud_teacher_model.parameters():
+            param.requires_grad = False
+        self.cloud_teacher_model.eval()
+
+        self.logger.info(f"Cloud teacher built: {teacher_model_name} "
+                         f"({sum(p.numel() for p in self.cloud_teacher_model.parameters())} params, frozen)")
+
+        # For inject mode, set the legacy cloud_score_teacher reference
+        if self.cloud_teacher_mode == 'inject':
+            self.cloud_score_teacher = self.cloud_teacher_model
 
     def build_model(self) -> DeviceReranker:
         """Build and initialize the re-ranking model using unified registry"""
@@ -146,6 +252,10 @@ class RerankingStage(BaseStage):
             support_distillation=self.support_distillation,
         )
         self.logger.info(f"Built {model_name} model, saving to {model_dir}")
+
+        # Build cloud teacher model (if configured)
+        self._build_cloud_teacher()
+
         return self.model
     
     def train(self,
@@ -159,7 +269,7 @@ class RerankingStage(BaseStage):
         Args:
             train_data: Training data generator (positive examples only for negative sampling)
             valid_data: Validation data generator
-            teacher_model: Optional teacher model for distillation
+            teacher_model: Optional teacher model for distillation (legacy)
             **kwargs: Training parameters including:
                 - epochs: Number of training epochs
                 - patience: Early stopping patience
@@ -213,9 +323,9 @@ class RerankingStage(BaseStage):
         
         item_id_col = getattr(self.feature_map, 'dataset_config', {}).get('item_id_col', 'cand_item_id')
         
-        # Distillation training if teacher provided
+        # Distillation training if teacher provided (legacy path)
         if teacher_model is not None and self.support_distillation:
-            self.logger.info("Using knowledge distillation training")
+            self.logger.info("Using knowledge distillation training (legacy)")
             metrics = self.model.distill_from_teacher(
                 train_data, teacher_model, **kwargs
             )
@@ -230,35 +340,26 @@ class RerankingStage(BaseStage):
                 
                 self.model.train()
                 total_loss = 0.0
+                total_kd_loss = 0.0
                 steps = 0
                 
                 for batch_data in train_data:
                     if use_negative_sampling:
-                        loss = self._train_step_with_negatives(batch_data, item_id_col)
+                        loss, kd_loss_val = self._train_step_with_negatives(batch_data, item_id_col)
                     else:
-                        # Inject cloud_score for standard training (non-negative-sampling)
-                        if self.use_cloud_score and self.cloud_score_teacher is not None:
-                            batch_dict = dict(batch_data)
-                            with torch.no_grad():
-                                teacher_out = self.cloud_score_teacher.forward(batch_dict)
-                                # Logit + z-score: recover discrimination, control magnitude
-                                logit_score = torch.logit(
-                                    teacher_out['y_pred'].detach().squeeze(-1), eps=1e-7
-                                )
-                                batch_dict['cloud_score'] = (
-                                    (logit_score - logit_score.mean()) / (logit_score.std() + 1e-8)
-                                )
-                            loss = self.model.train_step(batch_dict)
-                        else:
-                            loss = self.model.train_step(batch_data)
+                        loss, kd_loss_val = self._train_step_standard(batch_data)
                     total_loss += loss.item()
+                    total_kd_loss += kd_loss_val
                     steps += 1
                 
                 avg_loss = total_loss / steps if steps > 0 else 0.0
+                loss_msg = f"Train Loss: {avg_loss:.6f}"
                 if use_negative_sampling:
-                    self.logger.info(f"Train Loss ({self.loss_type}): {avg_loss:.6f}")
-                else:
-                    self.logger.info(f"Train Loss: {avg_loss:.6f}")
+                    loss_msg = f"Train Loss ({self.loss_type}): {avg_loss:.6f}"
+                if self.cloud_teacher_mode == 'distill' and total_kd_loss > 0:
+                    avg_kd = total_kd_loss / steps if steps > 0 else 0.0
+                    loss_msg += f" | KD Loss: {avg_kd:.6f}"
+                self.logger.info(loss_msg)
                 
                 if valid_data is not None:
                     self.logger.info(f"Evaluating epoch {epoch + 1}...")
@@ -305,8 +406,92 @@ class RerankingStage(BaseStage):
                 writer.writerow([name, f"{value:.6f}" if isinstance(value, float) else value])
         
         return metrics
+
+    def _get_teacher_logits(self, batch_dict: dict) -> Optional[torch.Tensor]:
+        """Get teacher logits for a batch (used in both inject and distill modes).
+
+        Uses the cloud_teacher_model (new config-driven) or cloud_score_teacher (legacy).
+        Returns raw logits after applying torch.logit() to sigmoid output.
+        """
+        teacher = self.cloud_teacher_model or self.cloud_score_teacher
+        if teacher is None:
+            return None
+
+        with torch.no_grad():
+            teacher_out = teacher.forward(batch_dict)
+            logit_score = torch.logit(
+                teacher_out['y_pred'].detach().squeeze(-1), eps=1e-7
+            )
+        return logit_score
+
+    def _inject_cloud_score(self, batch_dict: dict, teacher_logits: torch.Tensor):
+        """Inject z-score normalized cloud_score into batch_dict (inject mode)."""
+        batch_dict['cloud_score'] = (
+            (teacher_logits - teacher_logits.mean()) / (teacher_logits.std() + 1e-8)
+        )
+
+    def _train_step_standard(self, batch_data) -> Tuple[torch.Tensor, float]:
+        """Standard training step (no negative sampling).
+
+        Returns:
+            Tuple of (loss_tensor, kd_loss_value_for_logging)
+        """
+        kd_loss_val = 0.0
+
+        # Inject mode: add cloud_score to batch
+        if self.cloud_teacher_mode == 'inject' and (self.cloud_teacher_model or self.cloud_score_teacher):
+            batch_dict = dict(batch_data)
+            teacher_logits = self._get_teacher_logits(batch_dict)
+            if teacher_logits is not None:
+                self._inject_cloud_score(batch_dict, teacher_logits)
+            loss = self.model.train_step(batch_dict)
+
+        # Distill mode: compute task loss + KD loss
+        elif self.cloud_teacher_mode == 'distill' and self.cloud_teacher_model is not None:
+            batch_dict = dict(batch_data)
+            teacher_logits = self._get_teacher_logits(batch_dict)
+
+            # Forward pass through student
+            self.model.train()
+            student_out = self.model.forward(batch_dict)
+            student_logit = student_out.get('logit', student_out['y_pred']).squeeze(-1)
+
+            # Task loss (BCE)
+            y_true = self.model.get_labels(batch_dict)
+            task_loss = self.model.loss_fn(student_out['y_pred'], y_true, reduction='mean')
+            if hasattr(self.model, 'regularization_loss'):
+                task_loss = task_loss + self.model.regularization_loss()
+
+            # KD loss
+            kd_loss = compute_kd_loss(
+                student_logit, teacher_logits.detach(),
+                kd_loss_type=self.kd_loss_type,
+                temperature=self.kd_temperature,
+            )
+            kd_loss_val = kd_loss.item()
+
+            loss = task_loss + self.kd_loss_weight * kd_loss
+
+            # Backprop manually
+            self.model.optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.model._max_gradient_norm)
+            self.model.optimizer.step()
+
+        # Legacy cloud_score injection (use_cloud_score without cloud_teacher config)
+        elif self.use_cloud_score and self.cloud_score_teacher is not None:
+            batch_dict = dict(batch_data)
+            teacher_logits = self._get_teacher_logits(batch_dict)
+            if teacher_logits is not None:
+                self._inject_cloud_score(batch_dict, teacher_logits)
+            loss = self.model.train_step(batch_dict)
+
+        else:
+            loss = self.model.train_step(batch_data)
+
+        return loss, kd_loss_val
     
-    def _train_step_with_negatives(self, batch_data, item_id_col: str):
+    def _train_step_with_negatives(self, batch_data, item_id_col: str) -> Tuple[torch.Tensor, float]:
         """
         Single training step with negative sampling for pairwise ranking.
         
@@ -318,8 +503,9 @@ class RerankingStage(BaseStage):
             item_id_col: Name of item ID column
 
         Returns:
-            Loss tensor
+            Tuple of (loss_tensor, kd_loss_value_for_logging)
         """
+        kd_loss_val = 0.0
         batch_dict = dict(batch_data)
         batch_size = len(batch_dict[item_id_col])
         
@@ -357,17 +543,20 @@ class RerankingStage(BaseStage):
                     neg_batch_dict[key] = val
         
         # === Cloud Score Injection (positive + negative, jointly normalized) ===
-        if self.use_cloud_score and self.cloud_score_teacher is not None:
-            with torch.no_grad():
-                teacher_pos_out = self.cloud_score_teacher.forward(batch_dict)
-                pos_logit = torch.logit(
-                    teacher_pos_out['y_pred'].detach().squeeze(-1), eps=1e-7
-                )
-                teacher_neg_out = self.cloud_score_teacher.forward(neg_batch_dict)
-                neg_logit = torch.logit(
-                    teacher_neg_out['y_pred'].detach().squeeze(-1), eps=1e-7
-                )
+        if self.cloud_teacher_mode == 'inject' and (self.cloud_teacher_model or self.cloud_score_teacher):
+            pos_logit = self._get_teacher_logits(batch_dict)
+            neg_logit = self._get_teacher_logits(neg_batch_dict)
+            if pos_logit is not None and neg_logit is not None:
                 # Joint z-score normalization (pos + neg for consistent scale)
+                all_logits = torch.cat([pos_logit, neg_logit])
+                mean, std = all_logits.mean(), all_logits.std() + 1e-8
+                batch_dict['cloud_score'] = (pos_logit - mean) / std
+                neg_batch_dict['cloud_score'] = (neg_logit - mean) / std
+        elif self.use_cloud_score and self.cloud_score_teacher is not None:
+            # Legacy path
+            pos_logit = self._get_teacher_logits(batch_dict)
+            neg_logit = self._get_teacher_logits(neg_batch_dict)
+            if pos_logit is not None and neg_logit is not None:
                 all_logits = torch.cat([pos_logit, neg_logit])
                 mean, std = all_logits.mean(), all_logits.std() + 1e-8
                 batch_dict['cloud_score'] = (pos_logit - mean) / std
@@ -395,6 +584,19 @@ class RerankingStage(BaseStage):
             loss = softmax_cross_entropy_loss(pos_scores, neg_scores)
         else:
             raise ValueError(f"Unknown loss_type: {self.loss_type}")
+
+        # === Distillation loss (distill mode with negatives) ===
+        if self.cloud_teacher_mode == 'distill' and self.cloud_teacher_model is not None:
+            teacher_pos_logit = self._get_teacher_logits(batch_dict)
+            if teacher_pos_logit is not None:
+                student_pos_logit = pos_output.get('logit', pos_output['y_pred']).squeeze(-1)
+                kd_loss = compute_kd_loss(
+                    student_pos_logit, teacher_pos_logit.detach(),
+                    kd_loss_type=self.kd_loss_type,
+                    temperature=self.kd_temperature,
+                )
+                kd_loss_val = kd_loss.item()
+                loss = loss + self.kd_loss_weight * kd_loss
             
         # Add diversity loss if enabled (only on positive samples for recommendation diversity)
         if getattr(self.model, 'use_diversity_loss', False):
@@ -418,7 +620,7 @@ class RerankingStage(BaseStage):
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.model._max_gradient_norm)
         self.model.optimizer.step()
         
-        return loss
+        return loss, kd_loss_val
 
     def process(self,
                 input_data: StageOutput,
@@ -459,6 +661,7 @@ class RerankingStage(BaseStage):
             metrics_k=self.metrics_k,
             inject_cloud_score=self.use_cloud_score,
             ranking_candidates_df=kwargs.pop('preranking_candidates_df', None),
+            inference_batch_size=self.inference_batch_size,
             **kwargs
         )
 
@@ -466,6 +669,7 @@ class RerankingStage(BaseStage):
                  input_data: StageOutput,
                  metrics_k: List[int] = None,
                  preranking_output: Optional[StageOutput] = None,
+                 retrieval_output: Optional[StageOutput] = None,
                  **kwargs) -> Dict[str, float]:
         """
         Evaluate re-ranking model with list-wise metrics (nDCG, Recall).
@@ -476,6 +680,10 @@ class RerankingStage(BaseStage):
             preranking_output: Optional StageOutput with preranking-filtered candidates (e.g. top-100).
                                When provided, Recall@K/nDCG@K are computed within this filtered subset,
                                while AUC/gAUC use the full input_data pool for fair cross-stage comparison.
+            retrieval_output: Optional StageOutput with retrieval candidates (e.g. top-1000).
+                              When provided, this is used as the scoring pool for AUC/gAUC/MRR
+                              to align with preranking evaluation scope. Recall@K/nDCG@K still
+                              use the preranking-filtered subset (or input_data).
             **kwargs: Additional parameters
             
         Returns:
@@ -486,17 +694,29 @@ class RerankingStage(BaseStage):
         if self.item_features_df is None:
             self.logger.error("Item features not loaded. Call load_item_features() first.")
             return {}
-        
+
+        # Determine scoring pool for AUC/gAUC/MRR:
+        # Priority: retrieval_output > input_data
+        scoring_input = retrieval_output if retrieval_output is not None else input_data
+
+        # Determine ranking pool for Recall@K/nDCG@K:
+        # Priority: preranking_output > input_data
         ranking_candidates_df = None
         if preranking_output is not None:
             ranking_candidates_df = preranking_output.candidates_df
-            self.logger.info(f"Fair eval: scoring on {input_data.get_total_candidates()} candidates, "
+            self.logger.info(f"Fair eval: scoring on {scoring_input.get_total_candidates()} candidates, "
+                             f"ranking restricted to {len(ranking_candidates_df)} preranking candidates")
+        elif retrieval_output is not None:
+            # If retrieval_output is the scoring pool but no preranking_output,
+            # use input_data (preranking output) as ranking candidates
+            ranking_candidates_df = input_data.candidates_df
+            self.logger.info(f"Fair eval: scoring on {scoring_input.get_total_candidates()} retrieval candidates, "
                              f"ranking restricted to {len(ranking_candidates_df)} preranking candidates")
 
         _, metrics = process_and_rank_candidates(
             model=self.model,
             feature_map=self.feature_map,
-            input_data=input_data,
+            input_data=scoring_input,
             item_features_df=self.item_features_df,
             stage_name=self.stage_name,
             return_output=False,
@@ -505,6 +725,7 @@ class RerankingStage(BaseStage):
             logger=self.logger,
             inject_cloud_score=self.use_cloud_score,
             ranking_candidates_df=ranking_candidates_df,
+            inference_batch_size=self.inference_batch_size,
             **kwargs
         )
         return metrics

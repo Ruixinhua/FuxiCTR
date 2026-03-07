@@ -384,6 +384,7 @@ def process_and_rank_candidates(
 
     # Pre-convert cloud_score for valid items
     cloud_score_array = None
+    cloud_score_tensor = None
     if inject_cloud_score and all_cloud_scores is not None:
         cloud_score_array = all_cloud_scores[valid_mask].astype(np.float32)
         # Logit transform: undo sigmoid to recover discriminative logits
@@ -398,6 +399,9 @@ def process_and_rank_candidates(
         cloud_score_array = (cloud_score_array - cs_mean) / cs_std
         if not cloud_score_array.flags['C_CONTIGUOUS']:
             cloud_score_array = np.ascontiguousarray(cloud_score_array)
+        cloud_score_tensor = torch.from_numpy(cloud_score_array)
+        if device.type == 'cuda':
+            cloud_score_tensor = cloud_score_tensor.pin_memory()
         logger.info(f"Injecting cloud_score feature ({len(cloud_score_array)} items, "
                     f"logit range: [{cloud_score_array.min():.2f}, {cloud_score_array.max():.2f}])")
     # ========== Phase 4: Chunked model inference (OPTIMIZED) ==========
@@ -482,7 +486,10 @@ def process_and_rank_candidates(
             # Ensure contiguous for torch.from_numpy
             if not arr.flags['C_CONTIGUOUS']:
                 arr = np.ascontiguousarray(arr)
-            request_user_features[feat_name] = arr
+            t = torch.from_numpy(arr)
+            if device.type == 'cuda':
+                t = t.pin_memory()
+            request_user_features[feat_name] = t
 
     # --- Step 3: Pre-convert item features (29M rows, from DataFrame to numpy arrays) ---
     # Convert DataFrame columns to pre-typed numpy arrays ONCE
@@ -534,7 +541,10 @@ def process_and_rank_candidates(
 
         if not arr.flags['C_CONTIGUOUS']:
             arr = np.ascontiguousarray(arr)
-        item_feature_arrays[col] = arr
+        t = torch.from_numpy(arr)
+        if device.type == 'cuda':
+            t = t.pin_memory()
+        item_feature_arrays[col] = t
 
     # Pre-convert item_id if needed
     if item_id_col not in item_feature_arrays and item_id_col in feature_map.features:
@@ -542,7 +552,10 @@ def process_and_rank_candidates(
         item_id_arr = valid_item_ids.astype(target_dtype) if valid_item_ids.dtype != target_dtype else valid_item_ids
         if not item_id_arr.flags['C_CONTIGUOUS']:
             item_id_arr = np.ascontiguousarray(item_id_arr)
-        item_feature_arrays[item_id_col] = item_id_arr
+        t = torch.from_numpy(item_id_arr)
+        if device.type == 'cuda':
+            t = t.pin_memory()
+        item_feature_arrays[item_id_col] = t
         item_feature_names_in_model.append(item_id_col)
 
     # Pre-convert user_id
@@ -555,6 +568,10 @@ def process_and_rank_candidates(
                 pass
         if not request_user_ids.flags['C_CONTIGUOUS']:
             request_user_ids = np.ascontiguousarray(request_user_ids)
+        t_user_ids = torch.from_numpy(request_user_ids)
+        if device.type == 'cuda':
+            t_user_ids = t_user_ids.pin_memory()
+        request_user_ids = t_user_ids
 
     # Determine which user features are in the model's feature_map
     user_feature_names_in_model = [f for f in user_feature_names if f in feature_map.features]
@@ -570,6 +587,9 @@ def process_and_rank_candidates(
         'tensor_conversion': 0.0,
         'model_forward': 0.0,
     }
+    # Pre-convert request_idx_for_valid to tensor for indexing user features
+    request_idx_for_valid_tensor = torch.from_numpy(request_idx_for_valid).long()
+
     inference_all_start = time.time()
     num_batches = 0
 
@@ -579,38 +599,32 @@ def process_and_rank_candidates(
 
         # ===== TIMING: User feature preparation (numpy advanced indexing) =====
         t_user_start = time.time()
-        chunk_req_indices = request_idx_for_valid[chunk_start:chunk_end]
+        chunk_req_indices = request_idx_for_valid_tensor[chunk_start:chunk_end]
         timing_stats['user_feature_prep'] += time.time() - t_user_start
 
         # ===== TIMING: Tensor conversion (NOW JUST slice + from_numpy + to_device) =====
         t_tensor_start = time.time()
         tensor_batch = {}
 
-        # User features: numpy advanced indexing → torch tensor
+        # User features: tensor advanced indexing (already pinned if from cuda)
         for feat_name in user_feature_names_in_model:
-            chunk_arr = request_user_features[feat_name][chunk_req_indices]
-            # chunk_arr is already correct dtype and contiguous after indexing creates a copy
-            tensor_batch[feat_name] = torch.from_numpy(np.ascontiguousarray(chunk_arr)).to(device, non_blocking=True)
+            chunk_tensor = request_user_features[feat_name][chunk_req_indices]
+            tensor_batch[feat_name] = chunk_tensor.to(device, non_blocking=True)
 
         # User ID
         if request_user_ids is not None and 'user_id' in feature_map.features:
             chunk_uid = request_user_ids[chunk_req_indices]
-            tensor_batch['user_id'] = torch.from_numpy(np.ascontiguousarray(chunk_uid)).to(device, non_blocking=True)
+            tensor_batch['user_id'] = chunk_uid.to(device, non_blocking=True)
 
-        # Item features: simple slicing → torch tensor
+        # Item features: tensor slicing (zero copy view)
         for col in item_feature_names_in_model:
-            chunk_arr = item_feature_arrays[col][chunk_start:chunk_end]
-            # Slicing may return a view; ensure contiguous for from_numpy
-            if not chunk_arr.flags['C_CONTIGUOUS']:
-                chunk_arr = np.ascontiguousarray(chunk_arr)
-            tensor_batch[col] = torch.from_numpy(chunk_arr).to(device, non_blocking=True)
+            chunk_tensor = item_feature_arrays[col][chunk_start:chunk_end]
+            tensor_batch[col] = chunk_tensor.to(device, non_blocking=True)
 
         # Cloud score injection
         if inject_cloud_score and cloud_score_array is not None:
-            chunk_cloud = cloud_score_array[chunk_start:chunk_end]
-            if not chunk_cloud.flags['C_CONTIGUOUS']:
-                chunk_cloud = np.ascontiguousarray(chunk_cloud)
-            tensor_batch['cloud_score'] = torch.from_numpy(chunk_cloud).to(device, non_blocking=True)
+            chunk_cloud = cloud_score_tensor[chunk_start:chunk_end]
+            tensor_batch['cloud_score'] = chunk_cloud.to(device, non_blocking=True)
 
         timing_stats['tensor_conversion'] += time.time() - t_tensor_start
 
