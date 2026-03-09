@@ -367,7 +367,7 @@ def save_results(
     # Reorder columns: experiment_id, status, timestamp, params..., metrics...
     if len(df) > 0:
         meta_cols = ['experiment_id', 'seed', 'status', 'timestamp']
-        param_cols = sorted([c for c in df.columns if c.startswith(('retrieval.', 'preranking.', 'reranking.', 'dtcn.'))])
+        param_cols = sorted([c for c in df.columns if c.startswith(('retrieval.', 'preranking.', 'reranking.', 'dtcn.', 'cloud_teacher.'))])
         metric_cols = sorted([c for c in df.columns if c not in meta_cols + param_cols])
         df = df[meta_cols + param_cols + metric_cols]
     

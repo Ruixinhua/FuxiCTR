@@ -28,7 +28,7 @@ from typing import Dict, List, Optional, Any
 from .preranking_stage import PrerankingStage
 from ..config.feature_groups import FeatureGroupManager, FeatureGroup
 from ..models import build_model as registry_build_model
-from ..models.losses import bpr_loss, margin_ranking_loss, softmax_cross_entropy_loss
+from ..models.losses import bpr_loss, margin_ranking_loss, softmax_cross_entropy_loss, compute_diversity_loss_per_user
 
 from fuxictr.features import FeatureMap
 
@@ -213,6 +213,10 @@ class DTCNPrerankingStage(PrerankingStage):
         """
         Train the DTCN pre-ranking models with custom joint training loop.
 
+        Supports two-phase training when use_diversity_loss is enabled:
+        - Phase 1: Train without diversity loss until early stopping
+        - Phase 2: Load best weights, enable diversity loss, fine-tune
+
         Args:
             train_data: Training data generator for cloud model (FG1+FG2)
             full_train_data: Training data generator for full model (FG1+FG2+FG3)
@@ -233,7 +237,7 @@ class DTCNPrerankingStage(PrerankingStage):
         epochs = kwargs.pop('epochs', 1)
         patience = kwargs.pop('patience', self.patience)
         mode = kwargs.pop('mode', 'max')
-        kwargs.pop('learning_rate', None)  # consumed but not used here (LR comes from optimizer)
+        initial_lr = kwargs.pop('learning_rate', self.model_params.get('learning_rate', 1e-3))
         metrics = {}
 
         # Create joint optimizer
@@ -261,82 +265,98 @@ class DTCNPrerankingStage(PrerankingStage):
         self.model._epoch_index = 0
 
         best_metric = -np.inf if mode == "max" else np.inf
-        stopping_steps = 0
 
-        for epoch in range(epochs):
-            self.model._epoch_index = epoch
-            self.logger.info(f"*** [DTCN] Epoch {epoch + 1}/{epochs} ***")
+        # ======================================================================
+        # Determine training strategy: two-phase if diversity loss is enabled
+        # ======================================================================
+        use_two_phase = self.use_diversity_loss
 
-            # Training loop
-            self.model.train()
-            if not self.freeze_full_model:
-                self.full_model.train()
+        if use_two_phase:
+            # --- Phase 1: Train WITHOUT diversity loss ---
+            self._set_diversity_enabled(False)
+            self.use_diversity_loss = False
 
-            total_loss = 0.0
-            total_cloud_loss = 0.0
-            total_full_loss = 0.0
-            total_cl_loss = 0.0
-            steps = 0
-
-            # Iterate both data loaders in lockstep
-            for cloud_batch, full_batch in zip(train_data, full_train_data):
-                loss, cloud_loss, full_loss, cl_loss = self._dtcn_train_step(
-                    cloud_batch, full_batch,
-                    joint_optimizer, max_gradient_norm,
-                    use_negative_sampling, item_id_col
+            if self.diversity_start_epoch != 0:
+                phase1_epochs = self.diversity_start_epoch if self.diversity_start_epoch > 0 else epochs
+                self.logger.info(
+                    f"=== [DTCN] Phase 1: Base Training (no diversity) ==="
+                    f" epochs={phase1_epochs}, monitor={self.monitor}, patience={patience}"
                 )
+                best_metric = self._run_dtcn_training_phase(
+                    phase_name="Phase 1",
+                    train_data=train_data,
+                    full_train_data=full_train_data,
+                    valid_data=valid_data,
+                    joint_optimizer=joint_optimizer,
+                    epochs=phase1_epochs,
+                    patience=patience,
+                    mode=mode,
+                    max_gradient_norm=max_gradient_norm,
+                    use_negative_sampling=use_negative_sampling,
+                    item_id_col=item_id_col,
+                    best_metric=best_metric,
+                    metrics=metrics,
+                    **kwargs
+                )
+                # Restore best weights from Phase 1 as starting point for Phase 2
+                if os.path.exists(self.best_weights_path):
+                    self.model.load_weights(self.best_weights_path)
+                    self.logger.info(f"[DTCN] Phase 1 complete. Best {self.monitor}={best_metric:.6f}. Loaded best weights.")
 
-                total_loss += loss.item()
-                total_cloud_loss += cloud_loss
-                total_full_loss += full_loss
-                total_cl_loss += cl_loss
-                steps += 1
+            # --- Phase 2: Fine-tune WITH diversity loss ---
+            self.use_diversity_loss = True
+            self._set_diversity_enabled(True)
 
-            avg_loss = total_loss / steps if steps > 0 else 0.0
-            avg_cloud = total_cloud_loss / steps if steps > 0 else 0.0
-            avg_full = total_full_loss / steps if steps > 0 else 0.0
-            avg_cl = total_cl_loss / steps if steps > 0 else 0.0
+            # Reset learning rate for Phase 2
+            for pg in joint_optimizer.param_groups:
+                pg['lr'] = initial_lr
+            self.logger.info(f"[DTCN] Reset learning rate to {initial_lr} for Phase 2")
+
+            target_lambda = self.model_params.get('diversity_lambda', 0.7)
+            lr_decay_factor = kwargs.pop("lr_decay_factor", 0.5)
             self.logger.info(
-                f"[DTCN] Total Loss: {avg_loss:.6f} | "
-                f"Cloud Loss: {avg_cloud:.6f} | "
-                f"Full Loss: {avg_full:.6f} | "
-                f"CL Loss: {avg_cl:.6f}"
+                f"=== [DTCN] Phase 2: Diversity Fine-tuning ==="
+                f" epochs={self.diversity_epochs}, monitor={self.monitor}, patience={patience},"
+                f" warmup={self.diversity_warmup_epochs}"
             )
-
-            # Validation — use cloud model only
-            self.logger.info(f"[DTCN] Evaluating epoch {epoch + 1}...")
-            valid_metrics = self.evaluate(valid_data, evaluate_pool_diversity=self.model_params.get('evaluate_pool_diversity', False))
-            metrics.update(valid_metrics)
-            self.logger.info(f"[DTCN] Validation: {valid_metrics}")
-
-            # Monitor-based best model saving
-            curr_val = valid_metrics.get(self.monitor, 0.0)
-            is_best = (curr_val > best_metric) if mode == "max" else (curr_val < best_metric)
-
-            if is_best:
-                best_metric = curr_val
-                stopping_steps = 0
-                self.model.save_weights(self.best_weights_path)
-                if not self.freeze_full_model:
-                    self.full_model.save_weights(self.full_best_weights_path)
-                self.logger.info(f"[DTCN] New Best {self.monitor}={curr_val:.6f}! Model Saved.")
-            else:
-                stopping_steps += 1
-                self.logger.info(f"[DTCN] No improvement. Patience {stopping_steps}/{patience}")
-
-                # Decay LR on plateau
-                if kwargs.get("reduce_lr_on_plateau", True):
-                    factor = kwargs.get("lr_decay_factor", 0.1)
-                    for pg in joint_optimizer.param_groups:
-                        old_lr = pg['lr']
-                        pg['lr'] = old_lr * factor
-                    self.logger.info(
-                        f"[DTCN] LR decay: {old_lr:.6f} -> {old_lr * factor:.6f}"
-                    )
-
-                if stopping_steps >= patience:
-                    self.logger.info(f"[DTCN] Early Stopping at epoch {epoch + 1}.")
-                    break
+            best_metric = self._run_dtcn_training_phase(
+                phase_name="Phase 2 (Diversity)",
+                train_data=train_data,
+                full_train_data=full_train_data,
+                valid_data=valid_data,
+                joint_optimizer=joint_optimizer,
+                epochs=self.diversity_epochs,
+                patience=patience,
+                mode=mode,
+                max_gradient_norm=max_gradient_norm,
+                use_negative_sampling=use_negative_sampling,
+                item_id_col=item_id_col,
+                best_metric=best_metric,
+                metrics=metrics,
+                diversity_warmup_epochs=self.diversity_warmup_epochs,
+                target_diversity_lambda=target_lambda,
+                lr_decay_factor=lr_decay_factor,
+                **kwargs
+            )
+        else:
+            # --- Single-phase training (no diversity) ---
+            self.logger.info(f"[DTCN] Start Training: epochs={epochs}, monitor={self.monitor}, patience={patience}")
+            best_metric = self._run_dtcn_training_phase(
+                phase_name="Training",
+                train_data=train_data,
+                full_train_data=full_train_data,
+                valid_data=valid_data,
+                joint_optimizer=joint_optimizer,
+                epochs=epochs,
+                patience=patience,
+                mode=mode,
+                max_gradient_norm=max_gradient_norm,
+                use_negative_sampling=use_negative_sampling,
+                item_id_col=item_id_col,
+                best_metric=best_metric,
+                metrics=metrics,
+                **kwargs
+            )
 
         self.logger.info(f"[DTCN] Training complete. Best {self.monitor}={best_metric:.6f}")
 
@@ -356,11 +376,121 @@ class DTCNPrerankingStage(PrerankingStage):
 
         return metrics
 
+    def _run_dtcn_training_phase(self, phase_name, train_data, full_train_data,
+                                  valid_data, joint_optimizer, epochs, patience,
+                                  mode, max_gradient_norm, use_negative_sampling,
+                                  item_id_col, best_metric, metrics,
+                                  diversity_warmup_epochs=0, target_diversity_lambda=0.01,
+                                  **kwargs):
+        """
+        Run a single DTCN training phase (used by both Phase 1 and Phase 2).
+
+        Returns:
+            Updated best_metric value
+        """
+        stopping_steps = 0
+
+        for epoch in range(epochs):
+            self.model._epoch_index = epoch
+
+            # --- Diversity Warmup Logic ---
+            if diversity_warmup_epochs > 0 and self.use_diversity_loss:
+                if epoch < diversity_warmup_epochs:
+                    warmup_lambda = (epoch + 1) / diversity_warmup_epochs * target_diversity_lambda
+                    current_lambda = min(warmup_lambda, target_diversity_lambda)
+                    self._set_diversity_lambda(current_lambda)
+                    self.logger.info(f"[{phase_name}] Diversity Warmup: lambda={current_lambda:.6f} (Epoch {epoch+1}/{diversity_warmup_epochs})")
+                else:
+                    if getattr(self.model, '_diversity_lambda', 0) != target_diversity_lambda:
+                        self._set_diversity_lambda(target_diversity_lambda)
+                        self.logger.info(f"[{phase_name}] Diversity Warmup Complete: lambda={target_diversity_lambda}")
+
+            self.logger.info(f"*** [{phase_name}] Epoch {epoch + 1}/{epochs} ***")
+
+            # Training loop
+            self.model.train()
+            if not self.freeze_full_model:
+                self.full_model.train()
+
+            total_loss = 0.0
+            total_cloud_loss = 0.0
+            total_full_loss = 0.0
+            total_cl_loss = 0.0
+            total_div_loss = 0.0
+            steps = 0
+
+            # Iterate both data loaders in lockstep
+            for cloud_batch, full_batch in zip(train_data, full_train_data):
+                loss, cloud_loss, full_loss, cl_loss, div_loss = self._dtcn_train_step(
+                    cloud_batch, full_batch,
+                    joint_optimizer, max_gradient_norm,
+                    use_negative_sampling, item_id_col
+                )
+
+                total_loss += loss.item()
+                total_cloud_loss += cloud_loss
+                total_full_loss += full_loss
+                total_cl_loss += cl_loss
+                total_div_loss += div_loss
+                steps += 1
+
+            avg_loss = total_loss / steps if steps > 0 else 0.0
+            avg_cloud = total_cloud_loss / steps if steps > 0 else 0.0
+            avg_full = total_full_loss / steps if steps > 0 else 0.0
+            avg_cl = total_cl_loss / steps if steps > 0 else 0.0
+            avg_div = total_div_loss / steps if steps > 0 else 0.0
+            log_msg = (
+                f"[{phase_name}] Total Loss: {avg_loss:.6f} | "
+                f"Cloud Loss: {avg_cloud:.6f} | "
+                f"Full Loss: {avg_full:.6f} | "
+                f"CL Loss: {avg_cl:.6f}"
+            )
+            if self.use_diversity_loss:
+                log_msg += f" | Div Loss: {avg_div:.6f}"
+            self.logger.info(log_msg)
+
+            # Validation — use cloud model only
+            self.logger.info(f"[{phase_name}] Evaluating epoch {epoch + 1}...")
+            valid_metrics = self.evaluate(valid_data, evaluate_pool_diversity=self.model_params.get('evaluate_pool_diversity', False))
+            metrics.update(valid_metrics)
+            self.logger.info(f"[{phase_name}] Validation: {valid_metrics}")
+
+            # Monitor-based best model saving
+            curr_val = valid_metrics.get(self.monitor, 0.0)
+            is_best = (curr_val > best_metric) if mode == "max" else (curr_val < best_metric)
+
+            if is_best:
+                best_metric = curr_val
+                stopping_steps = 0
+                self.model.save_weights(self.best_weights_path)
+                if not self.freeze_full_model:
+                    self.full_model.save_weights(self.full_best_weights_path)
+                self.logger.info(f"[{phase_name}] New Best {self.monitor}={curr_val:.6f}! Model Saved.")
+            else:
+                stopping_steps += 1
+                self.logger.info(f"[{phase_name}] No improvement. Patience {stopping_steps}/{patience}")
+
+                # Decay LR on plateau
+                if kwargs.get("reduce_lr_on_plateau", True):
+                    factor = kwargs.get("lr_decay_factor", 0.1)
+                    for pg in joint_optimizer.param_groups:
+                        old_lr = pg['lr']
+                        pg['lr'] = old_lr * factor
+                    self.logger.info(
+                        f"[{phase_name}] LR decay: {old_lr:.6f} -> {old_lr * factor:.6f}"
+                    )
+
+                if stopping_steps >= patience:
+                    self.logger.info(f"[{phase_name}] Early Stopping at epoch {epoch + 1}.")
+                    break
+
+        return best_metric
+
     def _dtcn_train_step(self, cloud_batch, full_batch,
                          optimizer, max_gradient_norm,
                          use_negative_sampling, item_id_col):
         """
-        Single DTCN training step: compute cloud loss + full loss + CL loss.
+        Single DTCN training step: compute cloud loss + full loss + CL loss + diversity loss.
 
         Args:
             cloud_batch: Batch data for cloud model (FG1+FG2)
@@ -371,7 +501,7 @@ class DTCNPrerankingStage(PrerankingStage):
             item_id_col: Item ID column name
 
         Returns:
-            Tuple of (total_loss, cloud_loss_val, full_loss_val, cl_loss_val)
+            Tuple of (total_loss, cloud_loss_val, full_loss_val, cl_loss_val, div_loss_val)
         """
         # --- Cloud model forward + loss ---
         if use_negative_sampling and self.num_negatives > 0:
@@ -422,6 +552,34 @@ class DTCNPrerankingStage(PrerankingStage):
                       + self.full_model_loss_weight * full_loss
                       + self.cl_loss_weight * cl_loss)
 
+        # --- Diversity loss (cloud model only) ---
+        div_loss_val = 0.0
+        if self.use_diversity_loss and use_negative_sampling and self.num_negatives > 0:
+            # _last_neg_batch_dict is set by _compute_pairwise_loss when is_cloud=True
+            neg_batch_dict = getattr(self, '_last_cloud_neg_batch_dict', None)
+            pos_scores = getattr(self, '_last_cloud_pos_scores', None)
+            neg_scores_flat = getattr(self, '_last_cloud_neg_scores_flat', None)
+            if neg_batch_dict is not None and pos_scores is not None:
+                diversity_theta = self.model_params.get('diversity_theta', 0.7)
+                diversity_lambda = getattr(self.model, '_diversity_lambda',
+                                           self.model_params.get('diversity_lambda', 0.01))
+                diversity_kernel = self.model_params.get('diversity_kernel', 'gram')
+                diversity_gamma = self.model_params.get('diversity_gamma', 1.0)
+                diversity_delta = compute_diversity_loss_per_user(
+                    model=self.model,
+                    pos_inputs=cloud_batch,
+                    neg_inputs=neg_batch_dict,
+                    pos_scores=pos_scores,
+                    neg_scores_flat=neg_scores_flat,
+                    num_negatives=self.num_negatives,
+                    theta=diversity_theta,
+                    lambda_=diversity_lambda,
+                    kernel=diversity_kernel,
+                    gamma=diversity_gamma,
+                )
+                total_loss = total_loss + diversity_delta
+                div_loss_val = diversity_delta.item()
+
         # Backpropagation
         optimizer.zero_grad()
         total_loss.backward()
@@ -431,7 +589,7 @@ class DTCNPrerankingStage(PrerankingStage):
             torch.nn.utils.clip_grad_norm_(self.full_model.parameters(), max_gradient_norm)
         optimizer.step()
 
-        return total_loss, cloud_loss.item(), full_loss_val, cl_loss.item()
+        return total_loss, cloud_loss.item(), full_loss_val, cl_loss.item(), div_loss_val
 
     def _compute_pairwise_loss(self, model, batch_data, item_id_col, is_cloud=True):
         """
@@ -499,6 +657,12 @@ class DTCNPrerankingStage(PrerankingStage):
             loss = softmax_cross_entropy_loss(pos_scores, neg_scores)
         else:
             raise ValueError(f"Unknown loss_type: {self.loss_type}")
+
+        # Store intermediate data for diversity loss (cloud model only)
+        if is_cloud:
+            self._last_cloud_neg_batch_dict = neg_batch_dict
+            self._last_cloud_pos_scores = pos_scores
+            self._last_cloud_neg_scores_flat = neg_scores_flat
 
         # Add regularization
         if hasattr(model, 'regularization_loss'):

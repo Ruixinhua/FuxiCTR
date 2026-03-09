@@ -579,7 +579,7 @@ def process_and_rank_candidates(
     precompute_time = time.time() - t_precompute_start
     logger.info(f"Pre-converted {len(request_user_features)} user + {len(item_feature_arrays)} item feature arrays "
                 f"to tensor-ready dtypes in {precompute_time:.2f}s")
-
+                
     # Fine-grained timing for bottleneck analysis
     timing_stats = {
         'user_feature_prep': 0.0,
@@ -587,6 +587,16 @@ def process_and_rank_candidates(
         'tensor_conversion': 0.0,
         'model_forward': 0.0,
     }
+
+    # Pre-move user features to device, since they only span ~num_requests rows (very small)
+    request_user_features_device = {}
+    for feat_name in user_feature_names_in_model:
+        request_user_features_device[feat_name] = request_user_features[feat_name].to(device)
+
+    request_user_ids_device = None
+    if request_user_ids is not None and 'user_id' in feature_map.features:
+        request_user_ids_device = request_user_ids.to(device)
+
     # Pre-convert request_idx_for_valid to tensor for indexing user features
     request_idx_for_valid_tensor = torch.from_numpy(request_idx_for_valid).long()
 
@@ -599,22 +609,22 @@ def process_and_rank_candidates(
 
         # ===== TIMING: User feature preparation (numpy advanced indexing) =====
         t_user_start = time.time()
-        chunk_req_indices = request_idx_for_valid_tensor[chunk_start:chunk_end]
+        chunk_req_indices_cpu = request_idx_for_valid_tensor[chunk_start:chunk_end]
         timing_stats['user_feature_prep'] += time.time() - t_user_start
 
         # ===== TIMING: Tensor conversion (NOW JUST slice + from_numpy + to_device) =====
         t_tensor_start = time.time()
         tensor_batch = {}
 
-        # User features: tensor advanced indexing (already pinned if from cuda)
+        chunk_req_indices_device = chunk_req_indices_cpu.to(device, non_blocking=True)
+
+        # User features: GPU advanced indexing (blazing fast, ~TB/s)
         for feat_name in user_feature_names_in_model:
-            chunk_tensor = request_user_features[feat_name][chunk_req_indices]
-            tensor_batch[feat_name] = chunk_tensor.to(device, non_blocking=True)
+            tensor_batch[feat_name] = request_user_features_device[feat_name][chunk_req_indices_device]
 
         # User ID
-        if request_user_ids is not None and 'user_id' in feature_map.features:
-            chunk_uid = request_user_ids[chunk_req_indices]
-            tensor_batch['user_id'] = chunk_uid.to(device, non_blocking=True)
+        if request_user_ids_device is not None:
+            tensor_batch['user_id'] = request_user_ids_device[chunk_req_indices_device]
 
         # Item features: tensor slicing (zero copy view)
         for col in item_feature_names_in_model:
