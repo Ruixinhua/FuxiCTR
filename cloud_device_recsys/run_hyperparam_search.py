@@ -68,6 +68,8 @@ def parse_args():
                         help='Override debug n_rows for quick testing')
     parser.add_argument('--prev_output_path', type=str, default=None,
                         help='Path to previous stage outputs (for preranking/reranking mode)')
+    parser.add_argument('--retrieval_output_path', type=str, default=None,
+                        help='Path to retrieval stage outputs (for reranking mode)')
     parser.add_argument('--dry_run', action='store_true',
                         help='Only show parameter combinations without running')
     parser.add_argument('--resume', action='store_true',
@@ -315,6 +317,9 @@ def build_run_pipeline_cmd(
 
     if args.prev_output_path:
         cmd.extend(['--prev_output_path', args.prev_output_path])
+
+    if args.retrieval_output_path:
+        cmd.extend(['--retrieval_output_path', args.retrieval_output_path])
 
     if args.run_reranking_test:
         cmd.extend(['--run_reranking_test', str(args.run_reranking_test)])

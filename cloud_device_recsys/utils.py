@@ -551,7 +551,7 @@ def parse_pipeline_args():
     parser.add_argument('--dataset_id', type=str, default=None,
                        help='Dataset ID from dataset_config.yaml')
     parser.add_argument('--mode', type=str, default='full',
-                       choices=['full', 'retrieval', 'preranking', 'reranking', 'train', 'evaluate', 'joint_train', 'dtcn_preranking'],
+                       choices=['full', 'retrieval', 'preranking', 'reranking', 'train', 'evaluate', 'joint_train', 'dtcn_preranking', 'save_preranking_outputs'],
                        help='Execution mode')
     parser.add_argument('--stage', type=str, default=None,
                        choices=['retrieval', 'preranking', 'reranking'],
@@ -563,6 +563,9 @@ def parse_pipeline_args():
     parser.add_argument('--prev_output_path', type=str, default=None,
                        help='Path to directory containing previous stage outputs (stage_outputs/). '
                             'Will auto-load {stage}_valid_stage_output.pkl and {stage}_test_stage_output.pkl')
+    parser.add_argument('--retrieval_output_path', type=str, default=None,
+                       help='Path to directory containing retrieval stage outputs (stage_outputs/). '
+                            'Used by reranking mode for evaluation scope alignment.')
     parser.add_argument('--experiment_id', type=str, default=None,
                        help='Unique identifier for the current experiment run')
     parser.add_argument('--seed', type=int, default=2024,
@@ -579,7 +582,8 @@ def parse_pipeline_args():
     parser.add_argument('--n_rows', type=int, default=None,
                        help='Override debug n_rows (set to small number for quick testing)')
     parser.add_argument('--save_stage_outputs', type=bool, default=False,
-                       help='Save intermediate stage outputs (StageOutput) to disk for later reuse')
+                        help='Save intermediate stage outputs (StageOutput) to disk for later reuse')
+    parser.add_argument('--model_weights_path', type=str, default=None,
+                        help='Path to pre-trained model weights (.model file). '
+                             'Used with --mode save_preranking_outputs to skip training.')
     return parser.parse_args()
-
-

@@ -562,7 +562,10 @@ class PrerankingStage(BaseStage):
             self.model.load_weights(self.best_weights_path)
             self.logger.info(f"Loaded best weights from {self.best_weights_path}")
         else:
-            self.logger.warning(f"No best weights found at {self.best_weights_path}. Using current model state.")
+            if not os.path.exists(self.best_weights_path):
+                self.logger.warning(f"No best weights found at {self.best_weights_path}. Using current model state.")
+            else:
+                self.logger.info(f"Skipping loading best weights as per argument. Using current model state.")
         
         # Ensure item features are loaded
         if self.item_features_df is None:

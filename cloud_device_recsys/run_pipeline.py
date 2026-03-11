@@ -874,6 +874,15 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_man
         prev_output_test = enrich_stage_output_user_features(
             prev_output_test, paths['test_path'], fg_manager, impression_id_col, logger
         )
+        
+        if retrieval_output_valid is not None:
+            retrieval_output_valid = enrich_stage_output_user_features(
+                retrieval_output_valid, paths['valid_path'], fg_manager, impression_id_col, logger
+            )
+        if retrieval_output_test is not None:
+            retrieval_output_test = enrich_stage_output_user_features(
+                retrieval_output_test, paths['test_path'], fg_manager, impression_id_col, logger
+            )
 
     # 3. Train Reranking Model
     logger.info("[Reranking] Training model...")
@@ -1204,12 +1213,27 @@ def main():
         logger.info("Running reranking stage only")
         if 'reranking' not in stages:
             raise RuntimeError("No reranking stage found. Please run preranking first")
+
+        # Load retrieval stage outputs for evaluation scope alignment
+        retrieval_output_valid, retrieval_output_test = None, None
+        if args.retrieval_output_path:
+            try:
+                retrieval_output_valid, retrieval_output_test = load_stage_outputs_from_dir(
+                    args.retrieval_output_path, 'retrieval', logger,
+                    load_test=bool(args.run_reranking_test)
+                )
+            except Exception as e:
+                logger.warning(f"Could not load retrieval outputs from {args.retrieval_output_path}: {e}. "
+                               "Evaluation scope alignment will be disabled.")
+
         # Instantiate Reranking Stage lazily
         reranking_stage = stages['reranking']()
         d_metrics = run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_manager=fg_manager,
                                         logger=logger, run_test=bool(args.run_reranking_test),
                                         prev_output_path=args.prev_output_path,
-                                        feature_map=feature_map)
+                                        feature_map=feature_map,
+                                        retrieval_output_valid=retrieval_output_valid,
+                                        retrieval_output_test=retrieval_output_test)
         all_metrics.update(d_metrics)
         
     elif args.mode == 'joint_train':
@@ -1253,6 +1277,80 @@ def main():
             gpu=args.gpu, output_dir=run_output_dir,
         )
         all_metrics.update(d_metrics)
+
+    elif args.mode == 'save_preranking_outputs':
+        logger.info("Running save_preranking_outputs: loading pre-trained model and generating stage outputs")
+
+        if 'preranking' not in stages:
+            raise RuntimeError("No preranking stage found in config.")
+
+        if not args.model_weights_path:
+            raise RuntimeError("--model_weights_path is required for save_preranking_outputs mode.")
+
+        if not args.prev_output_path:
+            raise RuntimeError("--prev_output_path (retrieval stage outputs) is required for save_preranking_outputs mode.")
+
+        # 1. Load retrieval stage outputs
+        prev_output_valid, prev_output_test = load_stage_outputs_from_dir(
+            args.prev_output_path, 'retrieval', logger, load_test=bool(args.run_preranking_test)
+        )
+
+        # 2. Instantiate preranking stage and build model architecture
+        preranking_stage = stages['preranking']()
+        preranking_stage.build_model()
+
+        # 3. Load pre-trained weights (following _build_cloud_teacher pattern)
+        preranking_stage.model.load_weights(args.model_weights_path)
+        preranking_stage.best_weights_path = args.model_weights_path
+        logger.info(f"Loaded pre-trained weights from: {args.model_weights_path}")
+
+        # 4. Prepare data paths and load item features
+        paths = get_data_paths(dataset_config, pipeline_config, logger)
+        paths = prepare_debug_paths(paths, dataset_config, logger)
+
+        cand_item_pool_path = ensure_item_pool(
+            data_paths={'item_pool_path': paths['item_pool_path'], 'valid_path': paths['valid_path'],
+                        'test_path': paths['test_path']},
+            dataset_config=dataset_config,
+            feature_group_manager=fg_manager,
+            logger=logger
+        )
+
+        if os.path.exists(cand_item_pool_path):
+            preranking_stage.load_item_features(cand_item_pool_path)
+        elif os.path.exists(paths['item_pool_path']):
+            preranking_stage.load_item_features(paths['item_pool_path'])
+        else:
+            raise RuntimeError(f"Item pool not found. Checked: {cand_item_pool_path}, {paths['item_pool_path']}")
+
+        # 5. Enrich stage outputs with FG3 user features (backward compatibility)
+        if fg_manager is not None:
+            impression_id_col = dataset_config.get('impression_id_col', 'impression_id')
+            prev_output_valid = enrich_stage_output_user_features(
+                prev_output_valid, paths['valid_path'], fg_manager, impression_id_col, logger
+            )
+            prev_output_test = enrich_stage_output_user_features(
+                prev_output_test, paths['test_path'], fg_manager, impression_id_col, logger
+            )
+
+        # 6. Run process (inference only, no training)
+        logger.info("[save_preranking_outputs] Processing valid set...")
+        p_valid, valid_metrics = preranking_stage.process(prev_output_valid, compute_metrics=True, load_best_model=False)
+        logger.info(f"Valid (Preranking): {valid_metrics}")
+        all_metrics.update({f"preranking_valid_{k}": v for k, v in valid_metrics.items()})
+
+        p_test = None
+        if args.run_preranking_test and prev_output_test is not None:
+            logger.info("[save_preranking_outputs] Processing test set...")
+            p_test, test_metrics = preranking_stage.process(prev_output_test, compute_metrics=True, load_best_model=False)
+            all_metrics.update({f"preranking_test_{k}": v for k, v in test_metrics.items()})
+            logger.info(f"Valid (Preranking): {test_metrics}")
+
+        # 7. Save stage outputs
+        save_stage_output(p_valid, stage_output_dir, 'preranking_valid', logger)
+        if p_test is not None:
+            save_stage_output(p_test, stage_output_dir, 'preranking_test', logger)
+        logger.info(f"[save_preranking_outputs] Stage outputs saved to {stage_output_dir}")
 
     else:
         raise ValueError(f"Unknown mode: {args.mode}")
