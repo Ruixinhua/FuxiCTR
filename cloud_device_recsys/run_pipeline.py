@@ -896,7 +896,9 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_man
     # original unmapped item IDs. The reranking model expects mapped IDs. We must translate them here.
     vocab_pruning_config = pipeline_config.get('vocab_pruning', {})
     if vocab_pruning_config.get('enabled', False) and vocab_pruning_config.get('mode', 'runtime') == 'offline':
-        remap_dict_path = os.path.join(dataset_config['data_root'], dataset_config['dataset_id'], 'mapped', 'remap_dict.pkl')
+        from cloud_device_recsys.utils import get_data_dir
+        data_dir = get_data_dir(dataset_config)
+        remap_dict_path = os.path.join(data_dir, 'remap_dict.pkl')
         if os.path.exists(remap_dict_path):
             import pickle
             from cloud_device_recsys.data.remap_vocab_data import remap_stage_output
