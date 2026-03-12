@@ -388,9 +388,29 @@ class BaseModel(nn.Module):
     def save_weights(self, checkpoint):
         state_dict = self.state_dict()
         if getattr(self, '_save_fp16', False):
+            # FP16 conversion: .half() creates NEW tensors, breaking shared data_ptr.
+            # Detect shared tensors first, convert, then re-share to preserve dedup.
+            ptr_to_key = {}
+            shared_groups = {}  # master_key -> [alias_keys]
+            for k, v in state_dict.items():
+                ptr = v.data_ptr()
+                if ptr in ptr_to_key:
+                    master = ptr_to_key[ptr]
+                    shared_groups.setdefault(master, []).append(k)
+                else:
+                    ptr_to_key[ptr] = k
+
+            # Convert all to FP16
             state_dict = {k: v.half() if v.is_floating_point() else v
                           for k, v in state_dict.items()}
+
+            # Re-share: point aliases to the same converted tensor
+            for master, aliases in shared_groups.items():
+                for alias in aliases:
+                    state_dict[alias] = state_dict[master]
+
         torch.save(state_dict, checkpoint)
+
     
     def load_weights(self, checkpoint):
         self.to(self.device)

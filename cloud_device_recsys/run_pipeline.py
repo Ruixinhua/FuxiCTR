@@ -109,6 +109,9 @@ def create_stages(
             model_params['model'] = stage_config.get('model')  # Pass model name from config
             if 'metrics' in stage_config:
                 model_params['metrics'] = stage_config['metrics']
+            # Explicitly pass save_fp16 down to the stage through model_params
+            vocab_pruning_config = config.get('vocab_pruning', {})
+            model_params['save_fp16'] = vocab_pruning_config.get('save_fp16', False)
 
             # Prepare stage-specific keyword arguments for the constructor
             stage_kwargs = {
@@ -749,7 +752,7 @@ def run_dtcn_preranking_stage(pipeline_config, dataset_config, fg_manager, featu
 def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_manager=None, run_test=True, logger=None,
                         prev_output_path=None, preranking_model=None, prev_output_test=None, prev_output_valid=None,
                         retrieval_output_valid=None, retrieval_output_test=None,
-                        feature_map=None):
+                        feature_map=None, original_feature_map=None):
     """Run reranking stage with optional cloud teacher and evaluation scope alignment.
 
     Args:
@@ -768,6 +771,7 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_man
             instead of the preranking subset (~100), aligning with preranking evaluation.
         retrieval_output_test: Optional retrieval test output for eval scope alignment.
         feature_map: Base FeatureMap (needed for cloud_teacher feature map construction)
+        original_feature_map: The original, unpruned FeatureMap before any filtering for stage-specific features.
     """
     if logger is None:
         logger = logging.getLogger('PipelineRunner')
@@ -784,8 +788,12 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_man
         from cloud_device_recsys.utils import filter_feature_map
         teacher_features_str = cloud_teacher_config.get('cloud_teacher_features', ['FG1', 'FG2'])
         teacher_feature_groups = [FeatureGroup.from_string(f) for f in teacher_features_str]
+        # Use original (unpruned) feature_map for teacher model construction.
+        # The teacher checkpoint was saved with original vocab sizes, so building
+        # the teacher from a pruned feature_map causes size mismatches on load.
+        teacher_base_fm = original_feature_map if original_feature_map is not None else feature_map
         cloud_teacher_feature_map = filter_feature_map(
-            feature_map, fg_manager, teacher_feature_groups,
+            teacher_base_fm, fg_manager, teacher_feature_groups,
             use_feature_encoder=cloud_teacher_config.get('cloud_teacher_model_params', {}).get(
                 'use_feature_encoder',
                 reranking_config.get('model_params', {}).get('use_feature_encoder', False)
@@ -883,7 +891,33 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_man
                 retrieval_output_test, paths['test_path'], fg_manager, impression_id_col, logger
             )
 
-    # 3. Train Reranking Model
+    # 2.5 Offline Vocab Pruning Mismatch Fix
+    # If vocab pruning is in offline mode, the preranking/retrieval StageOutputs contain 
+    # original unmapped item IDs. The reranking model expects mapped IDs. We must translate them here.
+    vocab_pruning_config = pipeline_config.get('vocab_pruning', {})
+    if vocab_pruning_config.get('enabled', False) and vocab_pruning_config.get('mode', 'runtime') == 'offline':
+        remap_dict_path = os.path.join(dataset_config['data_root'], dataset_config['dataset_id'], 'mapped', 'remap_dict.pkl')
+        if os.path.exists(remap_dict_path):
+            import pickle
+            from cloud_device_recsys.data.remap_vocab_data import remap_stage_output
+            try:
+                with open(remap_dict_path, 'rb') as f:
+                    remap_dicts = pickle.load(f)
+                logger.info(f"[VocabPruner] Offline Mode: Loaded remap_dicts from {remap_dict_path}. Applying to evaluation data.")
+                
+                # Apply remapping only if data exists
+                if prev_output_valid is not None:
+                    prev_output_valid = remap_stage_output(prev_output_valid, remap_dicts, feature_map)
+                if prev_output_test is not None:
+                    prev_output_test = remap_stage_output(prev_output_test, remap_dicts, feature_map)
+                if retrieval_output_valid is not None:
+                    retrieval_output_valid = remap_stage_output(retrieval_output_valid, remap_dicts, feature_map)
+                if retrieval_output_test is not None:
+                    retrieval_output_test = remap_stage_output(retrieval_output_test, remap_dicts, feature_map)
+            except Exception as e:
+                logger.warning(f"[VocabPruner] Failed to load or apply remap_dict.pkl: {e}")
+        else:
+            logger.warning(f"[VocabPruner] Offline mode enabled but {remap_dict_path} not found. Evaluation metrics may break.")
     logger.info("[Reranking] Training model...")
     
     # Set cloud score teacher if enabled (legacy path — only if no cloud_teacher config)
@@ -1033,6 +1067,9 @@ def main():
         # --- Vocabulary Pruning (optional) ---
         # Reduces embedding size by scanning data for actually-used feature values.
         # Scans train + valid + test to ensure no feature value is lost during evaluation.
+        # Preserve the original feature_map before pruning may replace it.
+        # The cloud teacher model needs unpruned vocab sizes to match its checkpoint.
+        original_feature_map = copy.deepcopy(feature_map)
         vocab_pruning_config = pipeline_config.get('vocab_pruning', {})
         vocab_pruning_mode = vocab_pruning_config.get('mode', 'runtime')  # 'runtime' or 'offline'
         save_fp16 = vocab_pruning_config.get('save_fp16', False)
@@ -1088,6 +1125,7 @@ def main():
 
         # Propagate FP16 saving flag to feature_map for registry.py to pick up
         feature_map._save_fp16 = save_fp16
+        logger.info(f"Using save_fp16={save_fp16} for embedding weights based on config")
 
     else:
         logger.warning(f"Feature map not found at {feature_map_json}")
@@ -1157,7 +1195,7 @@ def main():
                                         prev_output_path=args.prev_output_path, preranking_model=preranking_stage.model,
                                         prev_output_valid=p_valid, prev_output_test=p_test,
                                         retrieval_output_valid=r_valid, retrieval_output_test=r_test,
-                                        feature_map=feature_map)
+                                        feature_map=feature_map, original_feature_map=original_feature_map)
         all_metrics.update(d_metrics)
 
     elif args.mode == 'retrieval':
@@ -1230,7 +1268,7 @@ def main():
         d_metrics = run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_manager=fg_manager,
                                         logger=logger, run_test=bool(args.run_reranking_test),
                                         prev_output_path=args.prev_output_path,
-                                        feature_map=feature_map,
+                                        feature_map=feature_map, original_feature_map=original_feature_map,
                                         retrieval_output_valid=retrieval_output_valid,
                                         retrieval_output_test=retrieval_output_test)
         all_metrics.update(d_metrics)

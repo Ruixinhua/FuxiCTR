@@ -111,8 +111,6 @@ class RerankingStage(BaseStage):
         # New config takes precedence over legacy use_cloud_score
         if self.cloud_teacher_mode == 'inject':
             self.use_cloud_score = True
-        elif self.cloud_teacher_mode == 'distill':
-            self.use_cloud_score = False  # Distill mode does not inject cloud_score feature
 
         # KD parameters (distill mode only)
         self.kd_loss_weight = self.cloud_teacher_params.get('kd_loss_weight', 0.1)
@@ -247,6 +245,13 @@ class RerankingStage(BaseStage):
             model_params=self.model_params,
             output_dir=self.output_dir,
         )
+        
+        # Ensure _save_fp16 is set on the model (more robust than relying on feature_map propagation)
+        save_fp16 = self.model_params.get('save_fp16', getattr(self.feature_map, '_save_fp16', False))
+        if save_fp16:
+            self.model._save_fp16 = True
+            self.logger.info("[FP16] Model weights will be saved in half-precision (FP16)")
+
         self.logger.info(f"Built {model_name} model, saving to {model_dir}")
 
         # Build cloud teacher model (if configured)
