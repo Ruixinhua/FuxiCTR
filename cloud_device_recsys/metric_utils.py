@@ -15,6 +15,8 @@ def compute_ranking_metrics(
         top_k_for_metrics: Optional[int] = None,
         item_features_arr: Optional[np.ndarray] = None,
         sorted_order: Optional[np.ndarray] = None,
+        full_pool_scores: Optional[np.ndarray] = None,
+        full_pool_labels: Optional[np.ndarray] = None,
 ) -> Dict[str, float]:
     """
     Compute ranking metrics for a single query/user.
@@ -29,7 +31,9 @@ def compute_ranking_metrics(
         - gAUC@<top_k_for_metrics>: Group AUC restricted to top-K items
 
     Args:
-        scores: Predicted scores for each item (1D array/list)
+        scores: Predicted scores for each item (1D array/list).
+                Used for Recall@K/nDCG@K. Also used for gAUC/MRR unless
+                full_pool_scores/full_pool_labels are provided.
         labels: Ground truth labels (1 for relevant, 0 otherwise, 1D array/list)
         metrics_k: List of K values for Recall@K, nDCG@K and Diversity@K metrics
         pre_sorted: If True, scores and labels are already sorted by descending score
@@ -45,6 +49,11 @@ def compute_ranking_metrics(
                            Required to compute Diversity@K.
         sorted_order: Permutation array mapping sorted positions to original indices in
                       item_features_arr. Required when item_features_arr is provided.
+        full_pool_scores: Optional pre-sorted scores from the full scoring pool (e.g. retrieval
+                          ~1000 candidates). When provided, gAUC/MRR/gAUC@K/MRR@K are computed
+                          on these instead of on ``scores``.
+        full_pool_labels: Corresponding labels for full_pool_scores. Required when
+                          full_pool_scores is provided.
 
     Returns:
         Dict of metric names to values
@@ -91,22 +100,45 @@ def compute_ranking_metrics(
         return 1.0 / (pos_positions[0] + 1)
 
     # ========== MRR & gAUC over ALL items ==========
-    metrics['MRR'] = _compute_mrr(sorted_labels)
+    # When full_pool_scores/labels are provided, use them for gAUC/MRR
+    # (full scoring pool e.g. retrieval ~1000) instead of scores/labels
+    # (which may be a filtered subset e.g. preranking ~100).
+    if full_pool_scores is not None and full_pool_labels is not None:
+        fp_scores = np.asarray(full_pool_scores, dtype=np.float64)
+        fp_labels = np.asarray(full_pool_labels)
+        if pre_sorted:
+            fp_sorted_labels = fp_labels
+            fp_sorted_scores = fp_scores
+        else:
+            fp_order = np.lexsort((fp_labels, -fp_scores))
+            fp_sorted_labels = fp_labels[fp_order]
+            fp_sorted_scores = fp_scores[fp_order]
+        gauc_scores = fp_scores
+        gauc_labels = fp_labels
+        gauc_sorted_labels = fp_sorted_labels
+        gauc_sorted_scores = fp_sorted_scores
+    else:
+        gauc_scores = scores
+        gauc_labels = labels
+        gauc_sorted_labels = sorted_labels
+        gauc_sorted_scores = sorted_scores
 
-    num_positive = int(true_relevant_count)
-    num_negative = len(labels) - num_positive
-    if num_positive > 0 and num_negative > 0:
+    metrics['MRR'] = _compute_mrr(gauc_sorted_labels)
+
+    gauc_num_positive = int(np.sum(gauc_labels))
+    gauc_num_negative = len(gauc_labels) - gauc_num_positive
+    if gauc_num_positive > 0 and gauc_num_negative > 0:
         metrics['gAUC'] = _compute_gauc(
-            scores[labels == 1], scores[labels == 0]
+            gauc_scores[gauc_labels == 1], gauc_scores[gauc_labels == 0]
         )
     else:
         metrics['gAUC'] = 0.0
 
     # ========== MRR@K & gAUC@K restricted to top-K items ==========
-    if top_k_for_metrics is not None and top_k_for_metrics < len(sorted_labels):
+    if top_k_for_metrics is not None and top_k_for_metrics <= len(gauc_sorted_labels):
         k = top_k_for_metrics
-        topk_labels = sorted_labels[:k]
-        topk_scores = sorted_scores[:k]
+        topk_labels = gauc_sorted_labels[:k]
+        topk_scores = gauc_sorted_scores[:k]
         # Fair comparison: only output metrics if the top-K subset has at least one positive
         if np.sum(topk_labels) > 0:
             metrics[f'MRR@{k}'] = _compute_mrr(topk_labels)
@@ -806,11 +838,17 @@ def process_and_rank_candidates(
             # req_valid_idx maps query candidates into that global valid array.
             req_item_feat_diversity = item_feat_diversity_arr[req_valid_idx]  # (num_cands, num_feats)
 
+            # When ranking_item_sets restricts Recall/nDCG to a filtered subset,
+            # pass the full-pool sorted arrays for gAUC/MRR computation.
+            fp_scores_arg = sorted_scores if ranking_item_sets is not None else None
+            fp_labels_arg = sorted_labels if ranking_item_sets is not None else None
             query_metrics = compute_ranking_metrics(
                 recall_sorted_scores, recall_sorted_labels, metrics_k,
                 pre_sorted=True, top_k_for_metrics=top_k,
                 item_features_arr=req_item_feat_diversity,
                 sorted_order=sorted_order,
+                full_pool_scores=fp_scores_arg,
+                full_pool_labels=fp_labels_arg,
             )
             # Detailed debugging for first 3 queries
             if num_queries < 3:
@@ -862,6 +900,7 @@ def process_and_rank_candidates(
         if num_queries > 0:
             gauc_metrics = {'gAUC', 'MRR'}
             gauc_metrics_at_k = {f'gAUC@{top_k}', f'MRR@{top_k}'}
+            logger.info(f"Valid queries with positive labels: {valid_queries}/{num_queries} ({100 * valid_queries / num_queries:.1f}%)")
             for metric_name in total_metrics:
                 if metric_name in gauc_metrics:
                     # gAUC / MRR averaged only over queries that have at least one positive

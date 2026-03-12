@@ -11,7 +11,6 @@ It uses ALL feature groups (FG1 + FG2 + FG3) including private features.
 
 import torch
 from torch import nn
-import torch.nn.functional as F
 import numpy as np
 from typing import Dict, List, Optional, Any, Tuple
 import logging
@@ -44,9 +43,6 @@ class DeviceReranker(DiversityLossMixin, BaseModel):
                  hidden_activations="ReLU",
                  dropout_rates=0.0,  # Less dropout for smaller model
                  batch_norm=False,  # Avoid BN for easier mobile deployment
-                 support_distillation=False,
-                 distillation_alpha=0.5,
-                 distillation_temperature=2.0,
                  embedding_regularizer=None,
                  net_regularizer=None,
                  use_diversity_loss=False,
@@ -66,9 +62,6 @@ class DeviceReranker(DiversityLossMixin, BaseModel):
             hidden_activations: Activation function
             dropout_rates: Dropout rate
             batch_norm: Whether to use batch normalization
-            support_distillation: Whether to enable distillation training
-            distillation_alpha: Balance between hard and soft labels
-            distillation_temperature: Temperature for soft labels
             use_diversity_loss: Whether to use diversity loss
             diversity_lambda: Weight of diversity loss
             diversity_theta: Weight between prediction sum and diversity term
@@ -92,10 +85,6 @@ class DeviceReranker(DiversityLossMixin, BaseModel):
             **kwargs
         )
         
-        self.support_distillation = support_distillation
-        self.distillation_alpha = distillation_alpha
-        self.distillation_temperature = distillation_temperature
-        self.teacher_model = None
         self.logger = logging.getLogger(self.__class__.__name__)
         
         # Feature embedding layer
@@ -173,7 +162,7 @@ class DeviceReranker(DiversityLossMixin, BaseModel):
         
         return_dict = {
             "y_pred": y_pred,
-            "logits": logits
+            "logit": logits
         }
         
         # Add embedding dict for diversity loss
@@ -182,20 +171,9 @@ class DeviceReranker(DiversityLossMixin, BaseModel):
             
         return return_dict
     
-    def set_teacher_model(self, teacher_model: BaseModel):
-        """
-        Set teacher model for distillation.
-        
-        Args:
-            teacher_model: Pre-trained teacher model (typically larger)
-        """
-        self.teacher_model = teacher_model
-        self.teacher_model.eval()
-        self.logger.info("Set teacher model for distillation")
-    
     def compute_loss(self, return_dict, y_true):
         """
-        Compute loss with optional knowledge distillation and diversity.
+        Compute loss with optional diversity regularization.
         
         Args:
             return_dict: Output from forward pass
@@ -204,37 +182,9 @@ class DeviceReranker(DiversityLossMixin, BaseModel):
         Returns:
             Total loss
         """
-        # 1. Compute Base Loss (Hard Label + Distillation)
-        if not self.support_distillation or self.teacher_model is None:
-            base_loss = super().compute_loss(return_dict, y_true)
-        else:
-            # Hard label loss (standard BCE)
-            hard_loss = super().compute_loss(return_dict, y_true)
-            
-            # Soft label loss (distillation from teacher)
-            student_logits = return_dict["logits"]
-            
-            # Get teacher predictions (assumes teacher_logits passed or recomputed)
-            # In simple implementation we might not have teacher logits here 
-            # unless passed in return_dict or we run teacher here?
-            # Existing code: teacher_logits = return_dict.get("teacher_logits", student_logits)
-            # This implies teacher logits should have been put in return_dict 
-            # OR we accept student_logits as dummy (which computes 0 KL div).
-            # We keep existing logic.
-            teacher_logits = return_dict.get("teacher_logits", student_logits)
-            
-            # KL divergence for soft labels
-            soft_loss = F.kl_div(
-                F.log_softmax(student_logits / self.distillation_temperature, dim=-1),
-                F.softmax(teacher_logits / self.distillation_temperature, dim=-1),
-                reduction='batchmean'
-            ) * (self.distillation_temperature ** 2)
-            
-            # Combined loss
-            base_loss = (1 - self.distillation_alpha) * hard_loss + \
-                         self.distillation_alpha * soft_loss
+        base_loss = super().compute_loss(return_dict, y_true)
         
-        # 2. Add Diversity Regularization
+        # Add Diversity Regularization
         diversity_loss = None
         if self.use_diversity_loss and "feat_emb_dict" in return_dict:
             diversity_loss = self.compute_diversity_regularization(
@@ -248,33 +198,6 @@ class DeviceReranker(DiversityLossMixin, BaseModel):
         )
         
         return total_loss
-    
-    def distill_from_teacher(self,
-                             train_data: Any,
-                             teacher_model: BaseModel,
-                             epochs: int = 10,
-                             **kwargs) -> Dict[str, float]:
-        """
-        Train student model via knowledge distillation.
-        
-        Args:
-            train_data: Training data generator
-            teacher_model: Pre-trained teacher model
-            epochs: Number of training epochs
-            **kwargs: Additional training parameters
-            
-        Returns:
-            Training metrics
-        """
-        self.set_teacher_model(teacher_model)
-        self.support_distillation = True
-        
-        self.logger.info(f"Starting knowledge distillation for {epochs} epochs")
-        
-        # Use standard fit with distillation loss
-        self.fit(train_data, epochs=epochs, **kwargs)
-        
-        return {"distillation_complete": 1.0}
     
     def rerank(self,
                candidates_scores: np.ndarray,

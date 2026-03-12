@@ -95,7 +95,6 @@ def create_stages(
             'kwargs_map': {
                 'features': 'allowed_feature_groups',
                 'top_k': 'top_k',
-                'distillation': 'support_distillation'  # config 'distillation' maps to class 'support_distillation'
             }
         },
     }

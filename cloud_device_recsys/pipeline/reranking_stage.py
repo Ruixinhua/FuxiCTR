@@ -47,7 +47,6 @@ class RerankingStage(BaseStage):
                  model_params: Dict[str, Any],
                  output_dir: str = "./outputs/reranking",
                  top_k: int = 10,
-                 support_distillation: bool = False,
                  cloud_teacher_params: Optional[Dict[str, Any]] = None,
                  cloud_teacher_feature_map: Optional[FeatureMap] = None,
                  **kwargs):
@@ -60,7 +59,6 @@ class RerankingStage(BaseStage):
             model_params: Parameters for DeviceReranker model
             output_dir: Output directory
             top_k: Number of final recommendations
-            support_distillation: Whether to enable distillation (legacy)
             cloud_teacher_params: Cloud teacher config dict with keys:
                 - cloud_teacher_model: model architecture name
                 - cloud_teacher_model_params: model hyperparameters
@@ -88,7 +86,6 @@ class RerankingStage(BaseStage):
         self.feature_map.default_emb_dim = model_params['embedding_dim']
         self.use_logit = model_params.get('use_logit', True)
         self.top_k = top_k
-        self.support_distillation = support_distillation
         self.model_params = model_params
         self.metrics_k = model_params['metrics_k']
         self.model: Optional[DeviceReranker] = None
@@ -249,7 +246,6 @@ class RerankingStage(BaseStage):
             feature_map=self.feature_map,
             model_params=self.model_params,
             output_dir=self.output_dir,
-            support_distillation=self.support_distillation,
         )
         self.logger.info(f"Built {model_name} model, saving to {model_dir}")
 
@@ -323,79 +319,69 @@ class RerankingStage(BaseStage):
         
         item_id_col = getattr(self.feature_map, 'dataset_config', {}).get('item_id_col', 'cand_item_id')
         
-        # Distillation training if teacher provided (legacy path)
-        if teacher_model is not None and self.support_distillation:
-            self.logger.info("Using knowledge distillation training (legacy)")
-            metrics = self.model.distill_from_teacher(
-                train_data, teacher_model, **kwargs
-            )
-            # Save after distillation
-            self.model.save_weights(self.best_weights_path)
-            self.logger.info(f"Saved distillation model checkpoint to {self.best_weights_path}")
-        else:
-            # Standard training (Manual Loop) with monitor
-            for epoch in range(epochs):
-                self.model._epoch_index = epoch
-                self.logger.info(f"*** Epoch {epoch + 1}/{epochs} ***")
-                
-                self.model.train()
-                total_loss = 0.0
-                total_kd_loss = 0.0
-                steps = 0
-                
-                for batch_data in train_data:
-                    if use_negative_sampling:
-                        loss, kd_loss_val = self._train_step_with_negatives(batch_data, item_id_col)
-                    else:
-                        loss, kd_loss_val = self._train_step_standard(batch_data)
-                    total_loss += loss.item()
-                    total_kd_loss += kd_loss_val
-                    steps += 1
-                
-                avg_loss = total_loss / steps if steps > 0 else 0.0
-                loss_msg = f"Train Loss: {avg_loss:.6f}"
-                if use_negative_sampling:
-                    loss_msg = f"Train Loss ({self.loss_type}): {avg_loss:.6f}"
-                if self.cloud_teacher_mode == 'distill' and total_kd_loss > 0:
-                    avg_kd = total_kd_loss / steps if steps > 0 else 0.0
-                    loss_msg += f" | KD Loss: {avg_kd:.6f}"
-                self.logger.info(loss_msg)
-                
-                if valid_data is not None:
-                    self.logger.info(f"Evaluating epoch {epoch + 1}...")
-                    
-                    # List-wise metrics (nDCG/Recall)
-                    valid_metrics = self.evaluate(valid_data)
-                    metrics.update(valid_metrics)
-                    self.logger.info(f"Validation (Ranking): {valid_metrics}")
-                    
-                    # Monitor-based best model saving
-                    curr_val = valid_metrics.get(self.monitor, 0.0)
-                    is_best = (curr_val > best_metric) if mode == "max" else (curr_val < best_metric)
-                    
-                    if is_best:
-                        best_metric = curr_val
-                        stopping_steps = 0
-                        self.model.save_weights(self.best_weights_path)
-                        self.logger.info(f"New Best {self.monitor}={curr_val:.6f}! Model Saved.")
-                    else:
-                        stopping_steps += 1
-                        self.logger.info(f"No improvement. Patience {stopping_steps}/{patience}")
-                        
-                        # Decay LR on plateau
-                        if kwargs.get("reduce_lr_on_plateau", True):
-                            old_lr = self.model.optimizer.param_groups[0]['lr']
-                            new_lr = self.model.lr_decay(factor=kwargs.get("lr_decay_factor", 0.1))
-                            self.logger.info(f"Decay LR: {old_lr:.6f} -> {new_lr:.6f}")
-                        
-                        if stopping_steps >= patience:
-                            self.logger.info("Early Stopping.")
-                            break
+        # Standard training (Manual Loop) with monitor
+        for epoch in range(epochs):
+            self.model._epoch_index = epoch
+            self.logger.info(f"*** Epoch {epoch + 1}/{epochs} ***")
             
-            # Restore best weights
-            if os.path.exists(self.best_weights_path):
-                self.model.load_weights(self.best_weights_path)
-                self.logger.info(f"Restored best weights from {self.best_weights_path}")
+            self.model.train()
+            total_loss = 0.0
+            total_kd_loss = 0.0
+            steps = 0
+            
+            for batch_data in train_data:
+                if use_negative_sampling:
+                    loss, kd_loss_val = self._train_step_with_negatives(batch_data, item_id_col)
+                else:
+                    loss, kd_loss_val = self._train_step_standard(batch_data)
+                total_loss += loss.item()
+                total_kd_loss += kd_loss_val
+                steps += 1
+            
+            avg_loss = total_loss / steps if steps > 0 else 0.0
+            loss_msg = f"Train Loss: {avg_loss:.6f}"
+            if use_negative_sampling:
+                loss_msg = f"Train Loss ({self.loss_type}): {avg_loss:.6f}"
+            if self.cloud_teacher_mode == 'distill' and total_kd_loss > 0:
+                avg_kd = total_kd_loss / steps if steps > 0 else 0.0
+                loss_msg += f" | KD Loss: {avg_kd:.6f}"
+            self.logger.info(loss_msg)
+            
+            if valid_data is not None:
+                self.logger.info(f"Evaluating epoch {epoch + 1}...")
+                
+                # List-wise metrics (nDCG/Recall)
+                valid_metrics = self.evaluate(valid_data)
+                metrics.update(valid_metrics)
+                self.logger.info(f"Validation (Ranking): {valid_metrics}")
+                
+                # Monitor-based best model saving
+                curr_val = valid_metrics.get(self.monitor, 0.0)
+                is_best = (curr_val > best_metric) if mode == "max" else (curr_val < best_metric)
+                
+                if is_best:
+                    best_metric = curr_val
+                    stopping_steps = 0
+                    self.model.save_weights(self.best_weights_path)
+                    self.logger.info(f"New Best {self.monitor}={curr_val:.6f}! Model Saved.")
+                else:
+                    stopping_steps += 1
+                    self.logger.info(f"No improvement. Patience {stopping_steps}/{patience}")
+                    
+                    # Decay LR on plateau
+                    if kwargs.get("reduce_lr_on_plateau", True):
+                        old_lr = self.model.optimizer.param_groups[0]['lr']
+                        new_lr = self.model.lr_decay(factor=kwargs.get("lr_decay_factor", 0.1))
+                        self.logger.info(f"Decay LR: {old_lr:.6f} -> {new_lr:.6f}")
+                    
+                    if stopping_steps >= patience:
+                        self.logger.info("Early Stopping.")
+                        break
+        
+        # Restore best weights
+        if os.path.exists(self.best_weights_path):
+            self.model.load_weights(self.best_weights_path)
+            self.logger.info(f"Restored best weights from {self.best_weights_path}")
         
         # Save metrics to CSV
         metrics_path = os.path.join(self.output_dir, "training_metrics.csv")
@@ -471,6 +457,16 @@ class RerankingStage(BaseStage):
             kd_loss_val = kd_loss.item()
 
             loss = task_loss + self.kd_loss_weight * kd_loss
+
+            # Diversity loss (if enabled)
+            if getattr(self.model, 'use_diversity_loss', False):
+                feat_emb_dict = student_out.get('feat_emb_dict')
+                if feat_emb_dict is not None:
+                    div_loss = self.model.compute_diversity_regularization(
+                        feat_emb_dict, student_out['y_pred']
+                    )
+                    if div_loss is not None:
+                        loss = self.model.add_diversity_to_loss(loss, div_loss)
 
             # Backprop manually
             self.model.optimizer.zero_grad()
@@ -668,22 +664,22 @@ class RerankingStage(BaseStage):
     def evaluate(self,
                  input_data: StageOutput,
                  metrics_k: List[int] = None,
-                 preranking_output: Optional[StageOutput] = None,
                  retrieval_output: Optional[StageOutput] = None,
                  **kwargs) -> Dict[str, float]:
         """
         Evaluate re-ranking model with list-wise metrics (nDCG, Recall).
         
         Args:
-            input_data: StageOutput containing candidate sets with labels (full pool, e.g. 1000 candidates)
+            input_data: StageOutput from previous stage (preranking), containing
+                        candidate sets with labels (e.g. top-100 candidates).
+                        Used for Recall@K/nDCG@K computation.
             metrics_k: List of K values for Recall@K and nDCG@K
-            preranking_output: Optional StageOutput with preranking-filtered candidates (e.g. top-100).
-                               When provided, Recall@K/nDCG@K are computed within this filtered subset,
-                               while AUC/gAUC use the full input_data pool for fair cross-stage comparison.
             retrieval_output: Optional StageOutput with retrieval candidates (e.g. top-1000).
-                              When provided, this is used as the scoring pool for AUC/gAUC/MRR
-                              to align with preranking evaluation scope. Recall@K/nDCG@K still
-                              use the preranking-filtered subset (or input_data).
+                              When provided, model scores ALL retrieval candidates and
+                              gAUC/MRR are computed on this larger pool to align with
+                              preranking evaluation scope. Recall@K/nDCG@K are still
+                              restricted to the input_data (preranking) subset.
+                              When absent, all metrics use input_data only.
             **kwargs: Additional parameters
             
         Returns:
@@ -695,23 +691,21 @@ class RerankingStage(BaseStage):
             self.logger.error("Item features not loaded. Call load_item_features() first.")
             return {}
 
-        # Determine scoring pool for AUC/gAUC/MRR:
-        # Priority: retrieval_output > input_data
-        scoring_input = retrieval_output if retrieval_output is not None else input_data
-
-        # Determine ranking pool for Recall@K/nDCG@K:
-        # Priority: preranking_output > input_data
+        # When retrieval_output is provided:
+        #   - scoring_input = retrieval_output (score ALL ~1000 retrieval candidates)
+        #   - ranking_candidates_df = input_data (restrict Recall/nDCG to preranking ~100)
+        #   - gAUC/MRR use the full retrieval pool (via full_pool_scores in compute_ranking_metrics)
+        # When absent:
+        #   - scoring_input = input_data (preranking candidates only)
+        #   - ranking_candidates_df = None (no filtering)
         ranking_candidates_df = None
-        if preranking_output is not None:
-            ranking_candidates_df = preranking_output.candidates_df
-            self.logger.info(f"Fair eval: scoring on {scoring_input.get_total_candidates()} candidates, "
-                             f"ranking restricted to {len(ranking_candidates_df)} preranking candidates")
-        elif retrieval_output is not None:
-            # If retrieval_output is the scoring pool but no preranking_output,
-            # use input_data (preranking output) as ranking candidates
+        if retrieval_output is not None:
+            scoring_input = retrieval_output
             ranking_candidates_df = input_data.candidates_df
             self.logger.info(f"Fair eval: scoring on {scoring_input.get_total_candidates()} retrieval candidates, "
                              f"ranking restricted to {len(ranking_candidates_df)} preranking candidates")
+        else:
+            scoring_input = input_data
 
         _, metrics = process_and_rank_candidates(
             model=self.model,

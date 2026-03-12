@@ -209,9 +209,11 @@ def kd_cosine_loss(
     reduction: str = 'mean',
 ) -> torch.Tensor:
     """
-    Cosine embedding loss for knowledge distillation.
+    Cosine-style knowledge distillation loss (per-sample).
 
-    Encourages student logit direction to align with teacher logit direction.
+    L2-normalizes both student and teacher logit vectors, then computes
+    per-sample MSE between the normalized values. This encourages the
+    student to match the teacher's relative ranking across samples.
 
     Args:
         student_logits: Student model logits, shape [B, 1] or [B]
@@ -219,17 +221,17 @@ def kd_cosine_loss(
         reduction: 'mean', 'sum', or 'none'
 
     Returns:
-        Cosine embedding loss (0 = perfectly aligned, 2 = opposite)
+        Per-sample MSE loss on L2-normalized logits
     """
     student_logits = student_logits.view(-1)
     teacher_logits = teacher_logits.view(-1)
 
-    # Cosine similarity: 1 = aligned, -1 = opposite
-    cos_sim = torch.nn.functional.cosine_similarity(
-        student_logits.unsqueeze(0), teacher_logits.unsqueeze(0), dim=-1
-    )
-    # Loss: 1 - cos_sim (0 when perfectly aligned)
-    loss = 1 - cos_sim
+    # L2-normalize each vector so loss focuses on directional alignment
+    student_norm = torch.nn.functional.normalize(student_logits, p=2, dim=0)
+    teacher_norm = torch.nn.functional.normalize(teacher_logits, p=2, dim=0)
+
+    # Per-sample squared difference on normalized logits
+    loss = (student_norm - teacher_norm) ** 2
 
     if reduction == 'mean':
         return loss.mean()
