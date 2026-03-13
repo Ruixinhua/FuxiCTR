@@ -74,7 +74,11 @@ def compute_ranking_metrics(
         sorted_labels = labels[sorted_indices]
         sorted_scores = scores[sorted_indices]
 
-    true_relevant_count = np.sum(sorted_labels)
+    if full_pool_labels is not None:
+        true_relevant_count = np.sum(full_pool_labels)
+    else:
+        true_relevant_count = np.sum(sorted_labels)
+    
     if true_relevant_count == 0:
         return {}
 
@@ -244,6 +248,8 @@ def process_and_rank_candidates(
         inject_cloud_score: bool = False,
         ranking_candidates_df: Optional[pd.DataFrame] = None,
         evaluate_pool_diversity: bool = False,
+        cloud_teacher_model: Any = None,
+        cloud_teacher_unmap_tensors: Optional[Dict[str, torch.Tensor]] = None,
         **kwargs
 ) -> Tuple[Optional[StageOutput], Dict[str, float]]:
     """
@@ -333,11 +339,15 @@ def process_and_rank_candidates(
     all_item_ids = candidates_df['item_id'].values
     all_labels = candidates_df['label'].fillna(0).astype(int).values
 
-    # Extract cloud scores from previous stage (if available)
-    all_cloud_scores = None
-    if inject_cloud_score and 'score' in candidates_df.columns:
-        all_cloud_scores = candidates_df['score'].values
-        logger.info(f"Cloud score injection enabled: extracting scores from {len(all_cloud_scores)} candidates")
+    # Cloud score injection: compute teacher logits on-the-fly per batch
+    # (replaces old approach that used preranking scores from candidates_df['score'],
+    # which caused a train/eval mismatch since training used actual teacher logits)
+    use_teacher_for_cloud_score = inject_cloud_score and cloud_teacher_model is not None
+    if use_teacher_for_cloud_score:
+        logger.info("Cloud score injection enabled: will compute teacher logits per batch")
+    elif inject_cloud_score:
+        logger.warning("Cloud score injection requested but no cloud_teacher_model provided. "
+                       "cloud_score feature will NOT be injected.")
 
     # Use np.unique to count occurrences of each request_id
     # Since we sorted, unique_request_ids will be sorted
@@ -414,28 +424,8 @@ def process_and_rank_candidates(
     user_feature_names = list(request_metadata[0][2].keys()) if request_metadata and request_metadata[0][2] else []
     logger.info("Finish preparing user feature metadata for valid candidates.")
 
-    # Pre-convert cloud_score for valid items
-    cloud_score_array = None
-    cloud_score_tensor = None
-    if inject_cloud_score and all_cloud_scores is not None:
-        cloud_score_array = all_cloud_scores[valid_mask].astype(np.float32)
-        # Logit transform: undo sigmoid to recover discriminative logits
-        # Pre-ranking model outputs sigmoid probabilities (~0.9999 for most items).
-        # During training, we apply torch.logit() on teacher output. Here we do
-        # the same with numpy to keep training/inference cloud_score consistent.
-        eps = 1e-7
-        cloud_score_array = np.clip(cloud_score_array, eps, 1.0 - eps)
-        cloud_score_array = np.log(cloud_score_array / (1.0 - cloud_score_array))
-        # Z-score normalization: prevents extreme logit values from saturating the model
-        cs_mean, cs_std = cloud_score_array.mean(), cloud_score_array.std() + 1e-8
-        cloud_score_array = (cloud_score_array - cs_mean) / cs_std
-        if not cloud_score_array.flags['C_CONTIGUOUS']:
-            cloud_score_array = np.ascontiguousarray(cloud_score_array)
-        cloud_score_tensor = torch.from_numpy(cloud_score_array)
-        if device.type == 'cuda':
-            cloud_score_tensor = cloud_score_tensor.pin_memory()
-        logger.info(f"Injecting cloud_score feature ({len(cloud_score_array)} items, "
-                    f"logit range: [{cloud_score_array.min():.2f}, {cloud_score_array.max():.2f}])")
+    # Cloud score: teacher model will compute logits per chunk in Phase 4.
+    # No pre-computation needed here.
     # ========== Phase 4: Chunked model inference (OPTIMIZED) ==========
     all_scores = np.zeros(num_valid, dtype=np.float32)
 
@@ -663,10 +653,25 @@ def process_and_rank_candidates(
             chunk_tensor = item_feature_arrays[col][chunk_start:chunk_end]
             tensor_batch[col] = chunk_tensor.to(device, non_blocking=True)
 
-        # Cloud score injection
-        if inject_cloud_score and cloud_score_array is not None:
-            chunk_cloud = cloud_score_tensor[chunk_start:chunk_end]
-            tensor_batch['cloud_score'] = chunk_cloud.to(device, non_blocking=True)
+        # Cloud score injection: run teacher model per chunk
+        if use_teacher_for_cloud_score:
+            # Build teacher batch: unmap compact IDs back to original IDs
+            teacher_batch = dict(tensor_batch)
+            if cloud_teacher_unmap_tensors:
+                for feat, unmap_tensor in cloud_teacher_unmap_tensors.items():
+                    if feat in teacher_batch and teacher_batch[feat] is not None:
+                        feat_tensor = teacher_batch[feat]
+                        if isinstance(feat_tensor, torch.Tensor):
+                            max_valid_idx = unmap_tensor.size(0) - 1
+                            safe_indices = torch.clamp(feat_tensor.long(), min=0, max=max_valid_idx)
+                            teacher_batch[feat] = unmap_tensor[safe_indices].to(feat_tensor.dtype)
+
+            with torch.no_grad():
+                teacher_out = cloud_teacher_model.forward(teacher_batch)
+                # teacher_logits = torch.logit(
+                #     teacher_out['y_pred'].detach().squeeze(-1), eps=1e-7
+                # )
+            tensor_batch['cloud_score'] = teacher_out['logit']
 
         timing_stats['tensor_conversion'] += time.time() - t_tensor_start
 

@@ -102,6 +102,10 @@ class RerankingStage(BaseStage):
         self.cloud_teacher_feature_map = cloud_teacher_feature_map
         self.cloud_teacher_model = None
         self.cloud_teacher_mode = self.cloud_teacher_params.get('mode', None)  # 'inject' or 'distill'
+        
+        # Vocab Pruning variables
+        self.remap_dicts = None
+        self._unmap_tensors = None
 
         # Legacy cloud score injection (backward compatibility)
         self.use_cloud_score = model_params.get('use_cloud_score', False)
@@ -398,6 +402,24 @@ class RerankingStage(BaseStage):
         
         return metrics
 
+    def _ensure_unmap_tensors(self, device):
+        if hasattr(self, '_unmap_tensors') and self._unmap_tensors is not None:
+            return
+        self._unmap_tensors = {}
+        if not hasattr(self, 'remap_dicts') or not self.remap_dicts:
+            return
+
+        for feat, mapping in self.remap_dicts.items():
+            if not mapping:
+                continue
+            max_new_id = max(mapping.values())
+            # Initialize with 0 (padding)
+            unmap_tensor = torch.zeros(max_new_id + 1, dtype=torch.long, device=device)
+            # mapping: old_id -> new_id
+            for old_id, new_id in mapping.items():
+                unmap_tensor[new_id] = old_id
+            self._unmap_tensors[feat] = unmap_tensor
+
     def _get_teacher_logits(self, batch_dict: dict) -> Optional[torch.Tensor]:
         """Get teacher logits for a batch (used in both inject and distill modes).
 
@@ -408,18 +430,41 @@ class RerankingStage(BaseStage):
         if teacher is None:
             return None
 
+        device = next(teacher.parameters()).device if hasattr(teacher, 'parameters') else torch.device('cpu')
+        self._ensure_unmap_tensors(device)
+
+        if hasattr(self, '_unmap_tensors') and self._unmap_tensors:
+            # self.logger.info("Unmapping compact feature IDs back to original IDs for teacher input...")
+            teacher_batch = dict(batch_dict)
+            for feat, unmap_tensor in self._unmap_tensors.items():
+                if feat in teacher_batch and teacher_batch[feat] is not None:
+                    feat_tensor = teacher_batch[feat]
+                    if isinstance(feat_tensor, torch.Tensor):
+                        # Use torch.clamp to avoid out-of-bounds index for unknown/new compact IDs
+                        max_valid = unmap_tensor.size(0) - 1
+                        safe_indices = torch.clamp(feat_tensor.long(), min=0, max=max_valid)
+                        
+                        # Preserve dtype (e.g., int32) if necessary, though FuxiCTR uses long/int internally.
+                        original_dtype = feat_tensor.dtype
+                        teacher_batch[feat] = unmap_tensor[safe_indices].to(original_dtype)
+        else:
+            teacher_batch = batch_dict
+
         with torch.no_grad():
-            teacher_out = teacher.forward(batch_dict)
+            teacher_out = teacher.forward(teacher_batch)
             logit_score = torch.logit(
                 teacher_out['y_pred'].detach().squeeze(-1), eps=1e-7
             )
         return logit_score
 
     def _inject_cloud_score(self, batch_dict: dict, teacher_logits: torch.Tensor):
-        """Inject z-score normalized cloud_score into batch_dict (inject mode)."""
-        batch_dict['cloud_score'] = (
-            (teacher_logits - teacher_logits.mean()) / (teacher_logits.std() + 1e-8)
-        )
+        """Inject cloud teacher logits as cloud_score into batch_dict (inject mode).
+
+        Uses raw logits (no z-score normalization) to avoid train/eval mismatch:
+        training normalizes per mini-batch but evaluation normalizes over all
+        candidates, producing inconsistent scales.
+        """
+        batch_dict['cloud_score'] = teacher_logits
 
     def _train_step_standard(self, batch_data) -> Tuple[torch.Tensor, float]:
         """Standard training step (no negative sampling).
@@ -543,25 +588,21 @@ class RerankingStage(BaseStage):
                 else:
                     neg_batch_dict[key] = val
         
-        # === Cloud Score Injection (positive + negative, jointly normalized) ===
+        # === Cloud Score Injection (positive + negative) ===
+        # Uses raw logits — no z-score normalization to avoid train/eval mismatch.
         if self.cloud_teacher_mode == 'inject' and (self.cloud_teacher_model or self.cloud_score_teacher):
             pos_logit = self._get_teacher_logits(batch_dict)
             neg_logit = self._get_teacher_logits(neg_batch_dict)
             if pos_logit is not None and neg_logit is not None:
-                # Joint z-score normalization (pos + neg for consistent scale)
-                all_logits = torch.cat([pos_logit, neg_logit])
-                mean, std = all_logits.mean(), all_logits.std() + 1e-8
-                batch_dict['cloud_score'] = (pos_logit - mean) / std
-                neg_batch_dict['cloud_score'] = (neg_logit - mean) / std
+                self._inject_cloud_score(batch_dict, pos_logit)
+                self._inject_cloud_score(neg_batch_dict, neg_logit)
         elif self.use_cloud_score and self.cloud_score_teacher is not None:
             # Legacy path
             pos_logit = self._get_teacher_logits(batch_dict)
             neg_logit = self._get_teacher_logits(neg_batch_dict)
             if pos_logit is not None and neg_logit is not None:
-                all_logits = torch.cat([pos_logit, neg_logit])
-                mean, std = all_logits.mean(), all_logits.std() + 1e-8
-                batch_dict['cloud_score'] = (pos_logit - mean) / std
-                neg_batch_dict['cloud_score'] = (neg_logit - mean) / std
+                self._inject_cloud_score(batch_dict, pos_logit)
+                self._inject_cloud_score(neg_batch_dict, neg_logit)
 
         # Forward passes
         pos_output = self.model.forward(batch_dict)
@@ -649,6 +690,14 @@ class RerankingStage(BaseStage):
             self.logger.error("Item features not loaded. Call load_item_features() first.")
             return StageOutput(stage_name=self.stage_name), {}
 
+        # Ensure _unmap_tensors are ready if using cloud teacher
+        cloud_teacher = self.cloud_teacher_model or self.cloud_score_teacher
+        unmap_tensors = None
+        if cloud_teacher is not None and self.use_cloud_score:
+            device = next(cloud_teacher.parameters()).device
+            self._ensure_unmap_tensors(device)
+            unmap_tensors = getattr(self, '_unmap_tensors', None)
+
         return process_and_rank_candidates(
             model=self.model,
             feature_map=self.feature_map,
@@ -663,6 +712,8 @@ class RerankingStage(BaseStage):
             inject_cloud_score=self.use_cloud_score,
             ranking_candidates_df=kwargs.pop('preranking_candidates_df', None),
             inference_batch_size=self.inference_batch_size,
+            cloud_teacher_model=cloud_teacher,
+            cloud_teacher_unmap_tensors=unmap_tensors,
             **kwargs
         )
 
@@ -712,6 +763,14 @@ class RerankingStage(BaseStage):
         else:
             scoring_input = input_data
 
+        # Ensure _unmap_tensors are ready if using cloud teacher
+        cloud_teacher = self.cloud_teacher_model or self.cloud_score_teacher
+        unmap_tensors = None
+        if cloud_teacher is not None and self.use_cloud_score:
+            device = next(cloud_teacher.parameters()).device
+            self._ensure_unmap_tensors(device)
+            unmap_tensors = getattr(self, '_unmap_tensors', None)
+
         _, metrics = process_and_rank_candidates(
             model=self.model,
             feature_map=self.feature_map,
@@ -725,6 +784,8 @@ class RerankingStage(BaseStage):
             inject_cloud_score=self.use_cloud_score,
             ranking_candidates_df=ranking_candidates_df,
             inference_batch_size=self.inference_batch_size,
+            cloud_teacher_model=cloud_teacher,
+            cloud_teacher_unmap_tensors=unmap_tensors,
             **kwargs
         )
         return metrics

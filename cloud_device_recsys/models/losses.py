@@ -209,35 +209,31 @@ def kd_cosine_loss(
     reduction: str = 'mean',
 ) -> torch.Tensor:
     """
-    Cosine-style knowledge distillation loss (per-sample).
+    Cosine similarity knowledge distillation loss.
 
-    L2-normalizes both student and teacher logit vectors, then computes
-    per-sample MSE between the normalized values. This encourages the
-    student to match the teacher's relative ranking across samples.
+    Computes 1 - cosine_similarity(student, teacher) to encourage the student's
+    logit vector to align directionally with the teacher's logit vector.
+    This focuses on relative ranking agreement across the batch.
+
+    Loss range: [0, 2], where 0 = identical direction, 2 = opposite direction.
 
     Args:
         student_logits: Student model logits, shape [B, 1] or [B]
         teacher_logits: Teacher model logits (detached), shape [B, 1] or [B]
-        reduction: 'mean', 'sum', or 'none'
+        reduction: 'mean', 'sum', or 'none' (only 'mean' is used for scalar output)
 
     Returns:
-        Per-sample MSE loss on L2-normalized logits
+        Cosine distance loss (scalar)
     """
     student_logits = student_logits.view(-1)
     teacher_logits = teacher_logits.view(-1)
 
-    # L2-normalize each vector so loss focuses on directional alignment
-    student_norm = torch.nn.functional.normalize(student_logits, p=2, dim=0)
-    teacher_norm = torch.nn.functional.normalize(teacher_logits, p=2, dim=0)
-
-    # Per-sample squared difference on normalized logits
-    loss = (student_norm - teacher_norm) ** 2
-
-    if reduction == 'mean':
-        return loss.mean()
-    elif reduction == 'sum':
-        return loss.sum()
-    return loss
+    # Cosine similarity between the two logit vectors
+    cos_sim = torch.nn.functional.cosine_similarity(
+        student_logits.unsqueeze(0), teacher_logits.unsqueeze(0)
+    )
+    # Loss: 1 - cos_sim (0 when perfectly aligned, 2 when opposed)
+    return 1.0 - cos_sim.squeeze()
 
 
 def compute_kd_loss(

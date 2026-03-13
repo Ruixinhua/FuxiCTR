@@ -1,0 +1,54 @@
+gpu: 0
+debug:
+  n_rows: null  # Set to integer (e.g., 100000) for quick testing, null for full data
+
+dataset_id: "TaobaoAd"
+vocab_pruning:
+  enabled: 1
+  min_vocab_size: 400000
+  min_reduction_ratio: 0.3
+  mode: "offline"           # "offline" = pre-mapped data, "runtime" = RemappedEmbedding
+  save_fp16: 1           # Save model weights in half-precision
+
+search_space:
+  seed: [2024]    # 搜索不同随机种子
+#  seed: [2024]    # 搜索不同随机种子
+  reranking:
+#    model: ["DCNv3", "DNN", "PNN"]
+    model: ["DCNv3"]
+    model_params.num_shallow_cross_layers: [ 1 ]
+    model_params.num_deep_cross_layers: [ 4, 3, 2 ]
+    model_params.num_heads: [ 1, 2 ]
+#    model_params.hidden_units:
+#      - [ 512, 256, 128, 64 ]
+#      - [ 512, 256]
+#      - [ 512, 256, 128 ]
+#      - [ 256, 128, 64, 32 ]
+#      - [ 1024, 512, 256, 128, 64 ]
+#      - [ 2048, 1024, 512, 256, 128 ]
+  cloud_teacher:
+    mode: ["base"]  # "distill" = KD loss only, "inject" = inject logits as feature, "none" = no teacher
+    model_params.use_cloud_score: [0]
+#    kd_loss_weight: [0.01, 0.1, 1]
+#    kd_loss_weight: [0, 1, 2, 5]
+#    kd_loss_type: ["kl_div", "cosine", "mse"]
+#    kd_loss_type: ["mse", "kl_div", "cosine"]
+#    model_params.num_deep_cross_layers: [1]
+#    model_params.num_shallow_cross_layers: [1]
+#    model_params.num_heads: [1, 2, 4]
+fixed_overrides:
+  preranking:
+    model: "DCNv3"
+    training.epochs: 30
+    model_params.patience: 2
+    model_params.embedding_dim: 32
+    model_params.use_feature_encoder: 1
+  reranking:
+    training.epochs: 30
+    model_params.metrics_k: [1, 10, 50, 100]
+    model_params.embedding_dim: 4
+#    model_params.use_diversity_loss: 1
+    model_params.use_feature_encoder: 1
+    model_params.use_cloud_score: 0
+    features: ["FG1", "FG2", "FG3"]
+    neg_sampling_pool: candidate  # candidate, full

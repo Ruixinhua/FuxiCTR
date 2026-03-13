@@ -907,6 +907,9 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_man
                     remap_dicts = pickle.load(f)
                 logger.info(f"[VocabPruner] Offline Mode: Loaded remap_dicts from {remap_dict_path}. Applying to evaluation data.")
                 
+                # Attach to reranking_stage so it can unmap IDs for the cloud teacher model
+                reranking_stage.remap_dicts = remap_dicts
+                
                 # Apply remapping only if data exists
                 if prev_output_valid is not None:
                     prev_output_valid = remap_stage_output(prev_output_valid, remap_dicts, feature_map)

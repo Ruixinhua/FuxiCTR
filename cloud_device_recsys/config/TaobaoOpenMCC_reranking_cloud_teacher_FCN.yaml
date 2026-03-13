@@ -1,0 +1,67 @@
+# Reranking with Cloud Teacher: DCNv3 (Reranking) + DCNv3 (Cloud Teacher) on TaobaoOpenMCC
+# Cloud teacher can operate in two mutually exclusive modes:
+#   - inject: Teacher logits → z-score normalized → injected as cloud_score feature
+#   - distill: KD loss(student_logit, teacher_logit) added to training loss
+dataset_id: "TaobaoOpenMCC"
+seed: 2024
+gpu: 0
+debug:
+  n_rows: null
+
+stages:
+  reranking:
+    enabled: true
+    model: "DCNv3"
+    features: ["FG1", "FG2", "FG3"]
+    top_k: 10
+    model_params:
+      num_negatives: 4
+      loss_type: "bpr"
+      use_feature_encoder: 1
+      metrics_k: [1, 10]
+      embedding_dim: 4
+      num_deep_cross_layers: 4
+      num_shallow_cross_layers: 1
+      num_heads: 1
+      embedding_regularizer: 1.0e-5
+      net_regularizer: 1.0e-5
+      max_gradient_norm: 5.0
+      learning_rate: 0.001
+      monitor: "Recall@1"
+
+    training:
+      epochs: 10
+      batch_size: 2048
+      optimizer: "adam"
+    metrics: ["nDCG", "Recall"]
+
+  # Cloud Teacher configuration for Reranking stage
+  # Teacher is always frozen (pre-trained weights required)
+  cloud_teacher:
+    # Teacher model architecture (can differ from reranking model)
+    cloud_teacher_model: "DCNv3"
+    # Feature groups the teacher uses (subset of reranking features)
+    cloud_teacher_features: ["FG1", "FG2"]
+    # Teacher model hyperparameters
+    cloud_teacher_model_params:
+      embedding_dim: 32
+      use_feature_encoder: 1
+      num_deep_cross_layers: 4
+      num_shallow_cross_layers: 1
+      num_heads: 16
+    # Path to pre-trained teacher weights (REQUIRED)
+    cloud_teacher_model_path: /scratch/dliu2/FuxiCTR/outputs/TaobaoOpenMCC/FCN_diversity_cand_v2/seed_2026__pmodel_DCNv3__pdiversity_kernel_rbf__pdiversity_lambda_0.01__pnum_deep_cross_layers_4__pnum_heads_16__pnum_negatives_4__pnum_shallow_cross_layers_1__pneg_sampling_pool_candidate__d5f3ad/preranking/TaobaoOpenMCC/DCNv3_20260307_134911.model
+    # Mode: "inject" (cloud_score feature) or "distill" (KD loss)
+    mode: "distill"
+    # === Distillation parameters (only used when mode=distill) ===
+    # KD loss weight in total loss: total = task_loss + kd_loss_weight * kd_loss
+    kd_loss_weight: 0.1
+    # KD loss type: "mse" | "kl_div" | "cosine"
+    kd_loss_type: "mse"
+    # Temperature for KL-div softening (only used with kd_loss_type=kl_div)
+    kd_temperature: 1.0
+
+output:
+  root: "/scratch/dliu2/FuxiCTR/outputs"
+  save_intermediate: true
+  save_csv: true
