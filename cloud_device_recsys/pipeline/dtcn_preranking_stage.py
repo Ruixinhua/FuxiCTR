@@ -118,8 +118,12 @@ class DTCNPrerankingStage(PrerankingStage):
         # Build cloud model (parent)
         super().build_model()
 
-        # Build full model
-        self._build_full_model()
+        # Only build full model when CL is enabled
+        if self.cl_loss_weight > 0:
+            self._build_full_model()
+        else:
+            self.logger.info("cl_loss_weight=0: Skipping full model build. "
+                             "Using standard preranking pipeline.")
 
         return self.model
 
@@ -183,13 +187,18 @@ class DTCNPrerankingStage(PrerankingStage):
         return F.mse_loss(cloud_target, full_target, reduction='mean')
 
     def _create_joint_optimizer(self):
-        """Create a joint optimizer for both models (when training from scratch)."""
+        """Create a joint optimizer for both models (when training from scratch).
+
+        When freeze_full_model=True, returns the cloud model's own optimizer
+        (created by model.compile) so that LR decay and other optimizer
+        behaviour matches the parent PrerankingStage exactly.
+        """
         if self.freeze_full_model:
-            # Only optimize cloud model
-            params = list(self.model.parameters())
-        else:
-            # Optimize both models jointly
-            params = list(self.model.parameters()) + list(self.full_model.parameters())
+            # Use the cloud model's native optimizer (from model.compile)
+            return self.model.optimizer
+
+        # Joint training: combine parameters of both models
+        params = list(self.model.parameters()) + list(self.full_model.parameters())
 
         optimizer_name = self.model_params.get('optimizer', 'adam')
         lr = self.model_params.get('learning_rate', 1e-3)
@@ -207,25 +216,39 @@ class DTCNPrerankingStage(PrerankingStage):
 
     def train(self,
               train_data: Any,
-              full_train_data: Any,
+              full_train_data: Any = None,
               valid_data: Optional[Any] = None,
               **kwargs) -> Dict[str, float]:
         """
-        Train the DTCN pre-ranking models with custom joint training loop.
+        Train the DTCN pre-ranking models.
 
-        Supports two-phase training when use_diversity_loss is enabled:
-        - Phase 1: Train without diversity loss until early stopping
-        - Phase 2: Load best weights, enable diversity loss, fine-tune
+        When cl_loss_weight=0, delegates entirely to the parent
+        PrerankingStage.train() so that the optimizer, LR decay, negative
+        sampling RNG, and diversity logic are identical to normal preranking.
+
+        When cl_loss_weight>0, runs a custom joint training loop with CL loss.
 
         Args:
             train_data: Training data generator for cloud model (FG1+FG2)
-            full_train_data: Training data generator for full model (FG1+FG2+FG3)
+            full_train_data: Training data generator for full model (FG1+FG2+FG3).
+                             Not required when cl_loss_weight=0.
             valid_data: Validation data (StageOutput) for evaluation
             **kwargs: Training parameters (epochs, patience, etc.)
 
         Returns:
             Training metrics
         """
+        # ======================================================================
+        # Fast path: when CL is disabled, delegate to parent PrerankingStage
+        # ======================================================================
+        if self.cl_loss_weight == 0:
+            self.logger.info("cl_loss_weight=0: Delegating to standard "
+                             "PrerankingStage.train() (no DTCN).")
+            return super().train(train_data, valid_data=valid_data, **kwargs)
+
+        # ======================================================================
+        # DTCN training path (cl_loss_weight > 0)
+        # ======================================================================
         if self.model is None:
             self.build_model()
 
@@ -239,6 +262,15 @@ class DTCNPrerankingStage(PrerankingStage):
         mode = kwargs.pop('mode', 'max')
         initial_lr = kwargs.pop('learning_rate', self.model_params.get('learning_rate', 1e-3))
         metrics = {}
+
+        # Ensure optimizer is initialized via model.compile (same as parent)
+        if not hasattr(self.model, 'optimizer') or self.model.optimizer is None:
+            self.logger.info("Initializing cloud model optimizer via model.compile...")
+            self.model.compile(
+                optimizer=kwargs.get("optimizer", self.model_params.get("optimizer", "adam")),
+                loss=self.model_params.get("loss", "binary_crossentropy"),
+                lr=initial_lr
+            )
 
         # Create joint optimizer
         joint_optimizer = self._create_joint_optimizer()
@@ -306,6 +338,9 @@ class DTCNPrerankingStage(PrerankingStage):
             # --- Phase 2: Fine-tune WITH diversity loss ---
             self.use_diversity_loss = True
             self._set_diversity_enabled(True)
+
+            # Update num_negatives for Phase 2 if specified
+            self.num_negatives = self.diversity_num_negatives
 
             # Reset learning rate for Phase 2
             for pg in joint_optimizer.param_groups:
@@ -470,14 +505,13 @@ class DTCNPrerankingStage(PrerankingStage):
                 stopping_steps += 1
                 self.logger.info(f"[{phase_name}] No improvement. Patience {stopping_steps}/{patience}")
 
-                # Decay LR on plateau
+                # Decay LR on plateau (use model.lr_decay for consistency)
                 if kwargs.get("reduce_lr_on_plateau", True):
                     factor = kwargs.get("lr_decay_factor", 0.1)
-                    for pg in joint_optimizer.param_groups:
-                        old_lr = pg['lr']
-                        pg['lr'] = old_lr * factor
+                    old_lr = joint_optimizer.param_groups[0]['lr']
+                    new_lr = self.model.lr_decay(factor=factor)
                     self.logger.info(
-                        f"[{phase_name}] LR decay: {old_lr:.6f} -> {old_lr * factor:.6f}"
+                        f"[{phase_name}] LR decay: {old_lr:.6f} -> {new_lr:.6f}"
                     )
 
                 if stopping_steps >= patience:
