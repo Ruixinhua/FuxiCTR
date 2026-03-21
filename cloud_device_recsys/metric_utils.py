@@ -687,8 +687,9 @@ def process_and_rank_candidates(
                                     f"First batch cloud_score mean: {tensor_batch['cloud_score'].mean().item():.4f}")
                 else:
                     tensor_batch['cloud_score'] = teacher_out['logit']
-            elif use_teacher_for_residual:
-                # Residual inject: save teacher logits for post-forward addition
+            
+            if use_teacher_for_residual:
+                # Residual inject or Hybrid inject: save teacher logits for post-forward addition
                 teacher_logits_chunk = teacher_out['logit'].detach()
 
         timing_stats['tensor_conversion'] += time.time() - t_tensor_start

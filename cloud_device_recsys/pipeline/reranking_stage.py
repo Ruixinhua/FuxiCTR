@@ -101,7 +101,7 @@ class RerankingStage(BaseStage):
         self.cloud_teacher_params = cloud_teacher_params or {}
         self.cloud_teacher_feature_map = cloud_teacher_feature_map
         self.cloud_teacher_model = None
-        self.cloud_teacher_mode = self.cloud_teacher_params.get('mode', None)  # 'inject', 'distill', or 'residual_inject'
+        self.cloud_teacher_mode = self.cloud_teacher_params.get('mode', None)  # 'inject', 'distill', 'residual_inject', 'hybrid_inject'
         
         # Vocab Pruning variables
         self.remap_dicts = None
@@ -117,6 +117,8 @@ class RerankingStage(BaseStage):
             self.use_cloud_score = True
         elif self.cloud_teacher_mode == 'residual_inject':
             self.use_cloud_score = False  # cloud_score NOT registered as feature
+        elif self.cloud_teacher_mode == 'hybrid_inject':
+            self.use_cloud_score = True   # cloud_score IS registered as feature
 
         # KD parameters (distill mode only)
         self.kd_loss_weight = self.cloud_teacher_params.get('kd_loss_weight', 0.1)
@@ -190,6 +192,10 @@ class RerankingStage(BaseStage):
                 self.logger.info(f"  [Residual Inject] residual_weight={self.residual_weight}, "
                                  f"cloud_score_scale={self.cloud_score_scale}")
                 self.logger.info(f"  Formula: final_logit = student_logit + {self.residual_weight} * (teacher_logit / {self.cloud_score_scale})")
+            elif self.cloud_teacher_mode == 'hybrid_inject':
+                self.logger.info(f"  [Hybrid Inject] residual_weight={self.residual_weight}, "
+                                 f"cloud_score_scale={self.cloud_score_scale}")
+                self.logger.info(f"  Formula: final_logit = student_logit(with cloud_score feature) + {self.residual_weight} * (teacher_logit / {self.cloud_score_scale})")
 
         if not self.cloud_teacher_params or not self.cloud_teacher_mode:
             return
@@ -239,8 +245,8 @@ class RerankingStage(BaseStage):
         self.logger.info(f"Cloud teacher built: {teacher_model_name} "
                          f"({sum(p.numel() for p in self.cloud_teacher_model.parameters())} params, frozen)")
 
-        # For inject/residual_inject mode, set the legacy cloud_score_teacher reference
-        if self.cloud_teacher_mode in ('inject', 'residual_inject'):
+        # For inject/residual_inject/hybrid_inject mode, set the legacy cloud_score_teacher reference
+        if self.cloud_teacher_mode in ('inject', 'residual_inject', 'hybrid_inject'):
             self.cloud_score_teacher = self.cloud_teacher_model
 
     def build_model(self) -> DeviceReranker:
@@ -505,6 +511,42 @@ class RerankingStage(BaseStage):
                 self._inject_cloud_score(batch_dict, teacher_logits)
             loss = self.model.train_step(batch_dict)
 
+        # Hybrid inject mode: add cloud_score to batch AND add as residual
+        elif self.cloud_teacher_mode == 'hybrid_inject' and (self.cloud_teacher_model or self.cloud_score_teacher):
+            batch_dict = dict(batch_data)
+            teacher_logits = self._get_teacher_logits(batch_dict)
+            if teacher_logits is not None:
+                self._inject_cloud_score(batch_dict, teacher_logits)
+
+            # Forward pass through student (WITH cloud_score feature)
+            self.model.train()
+            student_out = self.model.forward(batch_dict)
+            student_logit = student_out.get('logit', student_out['y_pred']).squeeze(-1)
+
+            # Add residual: final = student + weight * (teacher / scale)
+            scale = getattr(self, 'cloud_score_scale', 1.0)
+            weight = getattr(self, 'residual_weight', 1.0)
+            if teacher_logits is not None:
+                residual = weight * (teacher_logits.detach() / scale)
+                combined_logit = student_logit + residual
+            else:
+                combined_logit = student_logit
+
+            # Task loss (BCE) using combined logit
+            y_true = self.model.get_labels(batch_dict)
+            combined_pred = self.model.output_activation(combined_logit.unsqueeze(-1))
+            task_loss = self.model.loss_fn(combined_pred, y_true, reduction='mean')
+            if hasattr(self.model, 'regularization_loss'):
+                task_loss = task_loss + self.model.regularization_loss()
+
+            loss = task_loss
+
+            # Backprop manually
+            self.model.optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.model._max_gradient_norm)
+            self.model.optimizer.step()
+
         # Distill mode: compute task loss + KD loss
         elif self.cloud_teacher_mode == 'distill' and self.cloud_teacher_model is not None:
             batch_dict = dict(batch_data)
@@ -663,6 +705,13 @@ class RerankingStage(BaseStage):
             # Pre-compute teacher logits but do NOT inject into batch
             pos_teacher_logit = self._get_teacher_logits(batch_dict)
             neg_teacher_logit = self._get_teacher_logits(neg_batch_dict)
+        elif self.cloud_teacher_mode == 'hybrid_inject' and (self.cloud_teacher_model or self.cloud_score_teacher):
+            # Pre-compute teacher logits AND inject into batch
+            pos_teacher_logit = self._get_teacher_logits(batch_dict)
+            neg_teacher_logit = self._get_teacher_logits(neg_batch_dict)
+            if pos_teacher_logit is not None and neg_teacher_logit is not None:
+                self._inject_cloud_score(batch_dict, pos_teacher_logit)
+                self._inject_cloud_score(neg_batch_dict, neg_teacher_logit)
         elif self.use_cloud_score and self.cloud_score_teacher is not None:
             # Legacy path
             pos_logit = self._get_teacher_logits(batch_dict)
@@ -682,8 +731,8 @@ class RerankingStage(BaseStage):
             pos_scores = pos_output['y_pred']
             neg_scores_flat = neg_output['y_pred']  # [B * num_neg, 1]
 
-        # === Residual Inject: add teacher logit as residual to scores ===
-        if self.cloud_teacher_mode == 'residual_inject' and pos_teacher_logit is not None and neg_teacher_logit is not None:
+        # === Residual Inject / Hybrid Inject: add teacher logit as residual to scores ===
+        if self.cloud_teacher_mode in ('residual_inject', 'hybrid_inject') and pos_teacher_logit is not None and neg_teacher_logit is not None:
             scale = getattr(self, 'cloud_score_scale', 1.0)
             weight = getattr(self, 'residual_weight', 1.0)
             pos_residual = weight * (pos_teacher_logit.detach() / scale)
