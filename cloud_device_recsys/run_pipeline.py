@@ -820,6 +820,9 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_man
             reranking_stage.kd_loss_weight = cloud_teacher_config.get('kd_loss_weight', 0.1)
             reranking_stage.kd_loss_type = cloud_teacher_config.get('kd_loss_type', 'mse')
             reranking_stage.kd_temperature = cloud_teacher_config.get('kd_temperature', 1.0)
+        elif reranking_stage.cloud_teacher_mode == 'residual_inject':
+            reranking_stage.use_cloud_score = False  # cloud_score NOT registered as feature
+            reranking_stage.residual_weight = cloud_teacher_config.get('residual_weight', 1.0)
 
     # 2. Prepare Data Loaders for reranking stage
     paths = get_data_paths(dataset_config, pipeline_config, logger)

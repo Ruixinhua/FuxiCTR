@@ -343,8 +343,15 @@ def process_and_rank_candidates(
     # (replaces old approach that used preranking scores from candidates_df['score'],
     # which caused a train/eval mismatch since training used actual teacher logits)
     use_teacher_for_cloud_score = inject_cloud_score and cloud_teacher_model is not None
+    residual_inject = kwargs.get('residual_inject', False)
+    residual_weight = kwargs.get('residual_weight', 1.0)
+    use_teacher_for_residual = residual_inject and cloud_teacher_model is not None
     if use_teacher_for_cloud_score:
         logger.info("Cloud score injection enabled: will compute teacher logits per batch")
+    elif use_teacher_for_residual:
+        cloud_score_scale = kwargs.get('cloud_score_scale', 1.0)
+        logger.info(f"Residual inject enabled: residual_weight={residual_weight}, "
+                    f"cloud_score_scale={cloud_score_scale}")
     elif inject_cloud_score:
         logger.warning("Cloud score injection requested but no cloud_teacher_model provided. "
                        "cloud_score feature will NOT be injected.")
@@ -654,7 +661,8 @@ def process_and_rank_candidates(
             tensor_batch[col] = chunk_tensor.to(device, non_blocking=True)
 
         # Cloud score injection: run teacher model per chunk
-        if use_teacher_for_cloud_score:
+        teacher_logits_chunk = None
+        if use_teacher_for_cloud_score or use_teacher_for_residual:
             # Build teacher batch: unmap compact IDs back to original IDs
             teacher_batch = dict(tensor_batch)
             if cloud_teacher_unmap_tensors:
@@ -668,10 +676,20 @@ def process_and_rank_candidates(
 
             with torch.no_grad():
                 teacher_out = cloud_teacher_model.forward(teacher_batch)
-                # teacher_logits = torch.logit(
-                #     teacher_out['y_pred'].detach().squeeze(-1), eps=1e-7
-                # )
-            tensor_batch['cloud_score'] = teacher_out['logit']
+
+            if use_teacher_for_cloud_score:
+                # Inject mode: add teacher logits as cloud_score feature
+                cloud_score_scale = kwargs.get('cloud_score_scale', 1.0)
+                if cloud_score_scale != 1.0:
+                    tensor_batch['cloud_score'] = teacher_out['logit'] / cloud_score_scale
+                    if num_batches == 1:
+                        logger.info(f"[Inject Mode] Applied cloud_score_scale={cloud_score_scale}. "
+                                    f"First batch cloud_score mean: {tensor_batch['cloud_score'].mean().item():.4f}")
+                else:
+                    tensor_batch['cloud_score'] = teacher_out['logit']
+            elif use_teacher_for_residual:
+                # Residual inject: save teacher logits for post-forward addition
+                teacher_logits_chunk = teacher_out['logit'].detach()
 
         timing_stats['tensor_conversion'] += time.time() - t_tensor_start
 
@@ -690,6 +708,17 @@ def process_and_rank_candidates(
             chunk_scores = pred_dict['logit'].detach().cpu().numpy().flatten()
         else:
             chunk_scores = pred_dict['y_pred'].detach().cpu().numpy().flatten()
+
+        # Residual inject: add scaled teacher logits to student scores
+        if use_teacher_for_residual and teacher_logits_chunk is not None:
+            cloud_score_scale = kwargs.get('cloud_score_scale', 1.0)
+            teacher_scores = teacher_logits_chunk.cpu().numpy().flatten()
+            chunk_scores = chunk_scores + residual_weight * (teacher_scores / cloud_score_scale)
+            if num_batches == 1:
+                logger.info(f"[Residual Inject] First batch: student_mean={chunk_scores.mean():.4f}, "
+                            f"teacher_mean={teacher_scores.mean():.4f}, "
+                            f"residual_mean={residual_weight * (teacher_scores / cloud_score_scale).mean():.4f}")
+
         timing_stats['model_forward'] += time.time() - t_forward_start
 
         all_scores[chunk_start:chunk_end] = chunk_scores
