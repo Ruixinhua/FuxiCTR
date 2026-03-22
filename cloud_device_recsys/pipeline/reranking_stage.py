@@ -179,6 +179,8 @@ class RerankingStage(BaseStage):
         self.kd_loss_type = self.cloud_teacher_params.get('kd_loss_type', getattr(self, 'kd_loss_type', 'mse'))
         self.kd_temperature = self.cloud_teacher_params.get('kd_temperature', getattr(self, 'kd_temperature', 1.0))
         self.cloud_score_scale = self.cloud_teacher_params.get('cloud_score_scale', getattr(self, 'cloud_score_scale', 1.0))
+        self.cloud_feature_scale = self.cloud_teacher_params.get('cloud_feature_scale', getattr(self, 'cloud_feature_scale', self.cloud_score_scale))
+        self.cloud_residual_scale = self.cloud_teacher_params.get('cloud_residual_scale', getattr(self, 'cloud_residual_scale', self.cloud_score_scale))
         self.residual_weight = self.cloud_teacher_params.get('residual_weight', getattr(self, 'residual_weight', 1.0))
 
         if self.cloud_teacher_mode:
@@ -186,16 +188,16 @@ class RerankingStage(BaseStage):
             if self.cloud_teacher_mode == 'distill':
                 self.logger.info(f"  KD: loss_type={self.kd_loss_type}, weight={self.kd_loss_weight}, "
                                  f"temperature={self.kd_temperature}")
-            elif self.cloud_teacher_mode == 'inject' and self.cloud_score_scale != 1.0:
-                self.logger.info(f"  [Inject Mode] Cloud score will be divided by scale: {self.cloud_score_scale}")
+            elif self.cloud_teacher_mode == 'inject' and self.cloud_feature_scale != 1.0:
+                self.logger.info(f"  [Inject Mode] Cloud score will be divided by feature_scale: {self.cloud_feature_scale}")
             elif self.cloud_teacher_mode == 'residual_inject':
                 self.logger.info(f"  [Residual Inject] residual_weight={self.residual_weight}, "
-                                 f"cloud_score_scale={self.cloud_score_scale}")
-                self.logger.info(f"  Formula: final_logit = student_logit + {self.residual_weight} * (teacher_logit / {self.cloud_score_scale})")
+                                 f"cloud_residual_scale={self.cloud_residual_scale}")
+                self.logger.info(f"  Formula: final_logit = student_logit + {self.residual_weight} * (teacher_logit / {self.cloud_residual_scale})")
             elif self.cloud_teacher_mode == 'hybrid_inject':
                 self.logger.info(f"  [Hybrid Inject] residual_weight={self.residual_weight}, "
-                                 f"cloud_score_scale={self.cloud_score_scale}")
-                self.logger.info(f"  Formula: final_logit = student_logit(with cloud_score feature) + {self.residual_weight} * (teacher_logit / {self.cloud_score_scale})")
+                                 f"feature_scale={self.cloud_feature_scale}, residual_scale={self.cloud_residual_scale}")
+                self.logger.info(f"  Formula: final_logit = student_logit(feature / {self.cloud_feature_scale}) + {self.residual_weight} * (teacher_logit / {self.cloud_residual_scale})")
 
         if not self.cloud_teacher_params or not self.cloud_teacher_mode:
             return
@@ -482,16 +484,18 @@ class RerankingStage(BaseStage):
             )
         return logit_score
 
-    def _inject_cloud_score(self, batch_dict: dict, teacher_logits: torch.Tensor):
+    def _inject_cloud_score(self, batch_dict: dict, teacher_logits: torch.Tensor, scale=None):
         """Inject cloud teacher logits as cloud_score into batch_dict (inject mode).
 
         Uses raw logits (no z-score normalization) to avoid train/eval mismatch:
         training normalizes per mini-batch but evaluation normalizes over all
         candidates, producing inconsistent scales.
-        Optionally scales the logits down by `cloud_score_scale` to prevent numeric explosion.
+        Optionally scales the logits down by `cloud_feature_scale` to prevent numeric explosion.
         """
-        if hasattr(self, 'cloud_score_scale') and self.cloud_score_scale != 1.0:
-            batch_dict['cloud_score'] = teacher_logits / self.cloud_score_scale
+        if scale is None:
+            scale = getattr(self, 'cloud_feature_scale', getattr(self, 'cloud_score_scale', 1.0))
+        if scale != 1.0:
+            batch_dict['cloud_score'] = teacher_logits / scale
         else:
             batch_dict['cloud_score'] = teacher_logits
 
@@ -524,7 +528,7 @@ class RerankingStage(BaseStage):
             student_logit = student_out.get('logit', student_out['y_pred']).squeeze(-1)
 
             # Add residual: final = student + weight * (teacher / scale)
-            scale = getattr(self, 'cloud_score_scale', 1.0)
+            scale = getattr(self, 'cloud_residual_scale', getattr(self, 'cloud_score_scale', 1.0))
             weight = getattr(self, 'residual_weight', 1.0)
             if teacher_logits is not None:
                 residual = weight * (teacher_logits.detach() / scale)
@@ -604,7 +608,7 @@ class RerankingStage(BaseStage):
             student_logit = student_out.get('logit', student_out['y_pred']).squeeze(-1)
 
             # Add residual: final = student + weight * (teacher / scale)
-            scale = getattr(self, 'cloud_score_scale', 1.0)
+            scale = getattr(self, 'cloud_residual_scale', getattr(self, 'cloud_score_scale', 1.0))
             weight = getattr(self, 'residual_weight', 1.0)
             if teacher_logits is not None:
                 residual = weight * (teacher_logits.detach() / scale)
@@ -733,7 +737,7 @@ class RerankingStage(BaseStage):
 
         # === Residual Inject / Hybrid Inject: add teacher logit as residual to scores ===
         if self.cloud_teacher_mode in ('residual_inject', 'hybrid_inject') and pos_teacher_logit is not None and neg_teacher_logit is not None:
-            scale = getattr(self, 'cloud_score_scale', 1.0)
+            scale = getattr(self, 'cloud_residual_scale', getattr(self, 'cloud_score_scale', 1.0))
             weight = getattr(self, 'residual_weight', 1.0)
             pos_residual = weight * (pos_teacher_logit.detach() / scale)
             neg_residual = weight * (neg_teacher_logit.detach() / scale)

@@ -679,11 +679,11 @@ def process_and_rank_candidates(
 
             if use_teacher_for_cloud_score:
                 # Inject mode: add teacher logits as cloud_score feature
-                cloud_score_scale = kwargs.get('cloud_score_scale', 1.0)
-                if cloud_score_scale != 1.0:
-                    tensor_batch['cloud_score'] = teacher_out['logit'] / cloud_score_scale
+                cloud_feature_scale = kwargs.get('cloud_feature_scale', kwargs.get('cloud_score_scale', 1.0))
+                if cloud_feature_scale != 1.0:
+                    tensor_batch['cloud_score'] = teacher_out['logit'] / cloud_feature_scale
                     if num_batches == 1:
-                        logger.info(f"[Inject Mode] Applied cloud_score_scale={cloud_score_scale}. "
+                        logger.info(f"[Inject Mode] Applied cloud_feature_scale={cloud_feature_scale}. "
                                     f"First batch cloud_score mean: {tensor_batch['cloud_score'].mean().item():.4f}")
                 else:
                     tensor_batch['cloud_score'] = teacher_out['logit']
@@ -712,13 +712,13 @@ def process_and_rank_candidates(
 
         # Residual inject: add scaled teacher logits to student scores
         if use_teacher_for_residual and teacher_logits_chunk is not None:
-            cloud_score_scale = kwargs.get('cloud_score_scale', 1.0)
+            cloud_residual_scale = kwargs.get('cloud_residual_scale', kwargs.get('cloud_score_scale', 1.0))
             teacher_scores = teacher_logits_chunk.cpu().numpy().flatten()
-            chunk_scores = chunk_scores + residual_weight * (teacher_scores / cloud_score_scale)
+            chunk_scores = chunk_scores + residual_weight * (teacher_scores / cloud_residual_scale)
             if num_batches == 1:
                 logger.info(f"[Residual Inject] First batch: student_mean={chunk_scores.mean():.4f}, "
                             f"teacher_mean={teacher_scores.mean():.4f}, "
-                            f"residual_mean={residual_weight * (teacher_scores / cloud_score_scale).mean():.4f}")
+                            f"residual_mean={residual_weight * (teacher_scores / cloud_residual_scale).mean():.4f}")
 
         timing_stats['model_forward'] += time.time() - t_forward_start
 
