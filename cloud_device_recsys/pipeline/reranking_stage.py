@@ -181,6 +181,7 @@ class RerankingStage(BaseStage):
         self.cloud_score_scale = self.cloud_teacher_params.get('cloud_score_scale', getattr(self, 'cloud_score_scale', 1.0))
         self.cloud_feature_scale = self.cloud_teacher_params.get('cloud_feature_scale', getattr(self, 'cloud_feature_scale', self.cloud_score_scale))
         self.cloud_residual_scale = self.cloud_teacher_params.get('cloud_residual_scale', getattr(self, 'cloud_residual_scale', self.cloud_score_scale))
+        self.cloud_feature_dropout = self.cloud_teacher_params.get('cloud_feature_dropout', getattr(self, 'cloud_feature_dropout', 0.0))
         self.residual_weight = self.cloud_teacher_params.get('residual_weight', getattr(self, 'residual_weight', 1.0))
 
         if self.cloud_teacher_mode:
@@ -198,6 +199,8 @@ class RerankingStage(BaseStage):
                 self.logger.info(f"  [Hybrid Inject] residual_weight={self.residual_weight}, "
                                  f"feature_scale={self.cloud_feature_scale}, residual_scale={self.cloud_residual_scale}")
                 self.logger.info(f"  Formula: final_logit = student_logit(feature / {self.cloud_feature_scale}) + {self.residual_weight} * (teacher_logit / {self.cloud_residual_scale})")
+                if self.cloud_feature_dropout > 0.0:
+                    self.logger.info(f"  [Feature Dropout] Active: cloud_feature_dropout={self.cloud_feature_dropout}")
 
         if not self.cloud_teacher_params or not self.cloud_teacher_mode:
             return
@@ -494,10 +497,19 @@ class RerankingStage(BaseStage):
         """
         if scale is None:
             scale = getattr(self, 'cloud_feature_scale', getattr(self, 'cloud_score_scale', 1.0))
-        if scale != 1.0:
-            batch_dict['cloud_score'] = teacher_logits / scale
-        else:
-            batch_dict['cloud_score'] = teacher_logits
+        
+        feature_val = teacher_logits / scale if scale != 1.0 else teacher_logits
+
+        # Prevent Shortcut Learning via Feature Masking (Dropout)
+        # Randomly zeroes out the cloud_score feature during training so PNN
+        # is forced to learn robust representations instead of collapsing its weights.
+        if hasattr(self, 'model') and self.model.training:
+            dropout_p = getattr(self, 'cloud_feature_dropout', 0.0)
+            if dropout_p > 0.0:
+                mask = torch.empty_like(feature_val).bernoulli_(1 - dropout_p)
+                feature_val = feature_val * mask / (1 - dropout_p)
+                
+        batch_dict['cloud_score'] = feature_val
 
     def _train_step_standard(self, batch_data) -> Tuple[torch.Tensor, float]:
         """Standard training step (no negative sampling).

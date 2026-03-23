@@ -434,7 +434,10 @@ def process_and_rank_candidates(
     # Cloud score: teacher model will compute logits per chunk in Phase 4.
     # No pre-computation needed here.
     # ========== Phase 4: Chunked model inference (OPTIMIZED) ==========
+    # Pre-allocate numpy array for all predictions
     all_scores = np.zeros(num_valid, dtype=np.float32)
+    all_student_scores = np.zeros(num_valid, dtype=np.float32)
+    all_residual_scores = np.zeros(num_valid, dtype=np.float32)
 
     # Optimization 1: Pre-compute column type info to avoid repeated dtype detection
     col_type_info = {}  # {col: ('sequence'|'scalar'|'direct', target_dtype)}
@@ -710,15 +713,21 @@ def process_and_rank_candidates(
         else:
             chunk_scores = pred_dict['y_pred'].detach().cpu().numpy().flatten()
 
+        all_student_scores[chunk_start:chunk_end] = chunk_scores
+        
         # Residual inject: add scaled teacher logits to student scores
         if use_teacher_for_residual and teacher_logits_chunk is not None:
             cloud_residual_scale = kwargs.get('cloud_residual_scale', kwargs.get('cloud_score_scale', 1.0))
             teacher_scores = teacher_logits_chunk.cpu().numpy().flatten()
-            chunk_scores = chunk_scores + residual_weight * (teacher_scores / cloud_residual_scale)
+            residual_chunk = residual_weight * (teacher_scores / cloud_residual_scale)
+            chunk_scores = chunk_scores + residual_chunk
+            all_residual_scores[chunk_start:chunk_end] = residual_chunk
             if num_batches == 1:
-                logger.info(f"[Residual Inject] First batch: student_mean={chunk_scores.mean():.4f}, "
+                logger.info(f"[Residual Inject] First batch: student_mean={all_student_scores[chunk_start:chunk_end].mean():.4f}, "
                             f"teacher_mean={teacher_scores.mean():.4f}, "
-                            f"residual_mean={residual_weight * (teacher_scores / cloud_residual_scale).mean():.4f}")
+                            f"residual_mean={residual_chunk.mean():.4f}")
+        else:
+            all_residual_scores[chunk_start:chunk_end] = 0.0
 
         timing_stats['model_forward'] += time.time() - t_forward_start
 
@@ -889,10 +898,16 @@ def process_and_rank_candidates(
             if num_queries < 3:
                 pos_scores = req_scores[req_labels == 1]
                 neg_scores = req_scores[req_labels == 0]
+                
+                req_student = all_student_scores[req_valid_idx]
+                req_residual = all_residual_scores[req_valid_idx]
+                pos_student = req_student[req_labels == 1]
+                pos_residual = req_residual[req_labels == 1]
+                
                 # Order in the sorted list
                 pos_rank_index = np.where(sorted_labels == 1)[0][0] + 1
                 logger.info(f"[DEBUG] Query {req_id}: {num_candidates} cands ({num_positive} pos, {num_negative} neg)")
-                logger.info(f"[DEBUG]   Positive score: {pos_scores[0]:.6f}")
+                logger.info(f"[DEBUG]   Positive score: {pos_scores[0]:.6f} (Student logit: {pos_student[0]:.6f}, Residual: {pos_residual[0]:.6f})")
                 logger.info(
                     f"[DEBUG]   Negative scores: min={neg_scores.min():.6f}, max={neg_scores.max():.6f}, mean={neg_scores.mean():.6f}")
                 logger.info(f"[DEBUG]   Positive rank (In sorted list): {pos_rank_index} (1=best)")
