@@ -62,9 +62,11 @@ class DIEN(BaseModel):
                                    **kwargs)
         if not isinstance(dien_target_field, list):
             dien_target_field = [dien_target_field]
+        dien_target_field = [tuple(field) if type(field) != tuple else field for field in dien_target_field]
         self.dien_target_field = dien_target_field
         if not isinstance(dien_sequence_field, list):
             dien_sequence_field = [dien_sequence_field]
+        dien_sequence_field = [tuple(field) if type(field) != tuple else field for field in dien_sequence_field]
         self.dien_sequence_field = dien_sequence_field
         assert len(self.dien_target_field) == len(self.dien_sequence_field), \
                "dien_sequence_field or dien_target_field not supported."
@@ -134,10 +136,14 @@ class DIEN(BaseModel):
             zip(self.dien_target_field, self.dien_sequence_field)):
             target_emb = self.get_embedding(target_field, feature_emb_dict)
             sequence_emb = self.get_embedding(sequence_field, feature_emb_dict)
+            if len(sequence_emb.shape) == 2:
+                sequence_emb = sequence_emb.unsqueeze(1)
+                pad_mask = torch.ones([target_emb.shape[0], 1]).to(self.device).long() > 0  # no padding for non-sequence input
+            else:
+                seq_field = list(flatten([sequence_field]))[0] # pick the first sequence field
+                pad_mask = X[seq_field].long() > 0  # padding_idx = 0 required
             neg_emb = self.get_embedding(self.dien_neg_seq_field[idx], feature_emb_dict) \
                       if self.aux_loss_alpha > 0 else None
-            seq_field = list(flatten([sequence_field]))[0] # pick the first sequence field
-            pad_mask = X[seq_field].long() > 0  # padding_idx = 0 required
             # remove rows without sequence elements
             non_zero_mask = pad_mask.sum(dim=1) > 0
             packed_interests, interest_emb = self.interest_extraction(idx, sequence_emb[non_zero_mask], 
@@ -149,8 +155,9 @@ class DIEN(BaseModel):
             if self.enable_sum_pooling: # sum pooling of behavior sequence is used in the paper code
                 sum_pool_emb = self.sum_pooling(sequence_emb)
                 concat_emb += [sum_pool_emb, target_emb * sum_pool_emb]
+
         for feature, emb in feature_emb_dict.items():
-            if emb.ndim == 2 and (feature not in flatten([self.dien_neg_seq_field])):
+            if emb.ndim == 2 and (feature not in flatten([self.dien_neg_seq_field] + [self.dien_sequence_field])):
                 concat_emb.append(emb)
         y_pred = self.dnn(torch.cat(concat_emb, dim=-1))
         return_dict = {"y_pred": y_pred, "interest_emb": self.get_unmasked_tensor(interest_emb, non_zero_mask), 

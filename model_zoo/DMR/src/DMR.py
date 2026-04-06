@@ -64,9 +64,11 @@ class DMR(BaseModel):
                                   **kwargs)
         if target_field and not isinstance(target_field, list):
             target_field = [target_field]
+        target_field = [tuple(field) if type(field) != tuple else field for field in target_field]
         self.target_field = target_field
         if sequence_field and not isinstance(sequence_field, list):
             sequence_field = [sequence_field]
+        sequence_field = [tuple(field) if type(field) != tuple else field for field in sequence_field]
         self.sequence_field = sequence_field
         if neg_seq_field and not isinstance(neg_seq_field, list):
             neg_seq_field = [neg_seq_field]

@@ -234,3 +234,106 @@ def not_in_whitelist(element, whitelist=[]):
         return element not in whitelist
     else:
         return element != whitelist
+
+
+# =========================================================================
+# Training Efficiency Utilities
+# =========================================================================
+
+import torch
+
+def count_model_parameters(model, log=True):
+    """Count and optionally log total / trainable / frozen parameters."""
+    total = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    frozen = total - trainable
+    info = {
+        "total_params": total,
+        "trainable_params": trainable,
+        "frozen_params": frozen,
+    }
+    if log:
+        logging.info(f"Model parameters: total={total:,}, trainable={trainable:,}, frozen={frozen:,}")
+    return info
+
+
+def get_gpu_memory_usage(device=None):
+    """Return current / peak GPU memory usage in MB. Returns None if CUDA unavailable."""
+    if not torch.cuda.is_available():
+        return None
+    if device is None:
+        device = torch.cuda.current_device()
+    allocated = torch.cuda.memory_allocated(device) / (1024 ** 2)
+    reserved = torch.cuda.memory_reserved(device) / (1024 ** 2)
+    peak_allocated = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+    return {
+        "allocated_mb": round(allocated, 2),
+        "reserved_mb": round(reserved, 2),
+        "peak_allocated_mb": round(peak_allocated, 2),
+    }
+
+
+class TrainingTimer:
+    """Wall-clock timer for training phases (fit, epoch, eval).
+
+    Usage:
+        timer = TrainingTimer()
+        timer.start("fit")
+        for epoch in range(n_epochs):
+            timer.start("epoch")
+            ...
+            timer.stop("epoch")
+        timer.stop("fit")
+        timer.summary()  # logs all timings
+    """
+    def __init__(self):
+        self._starts = {}
+        self._totals = {}  # accumulated durations
+        self._counts = {}  # number of stop calls per phase
+
+    def start(self, phase="fit"):
+        self._starts[phase] = time.time()
+
+    def stop(self, phase="fit"):
+        if phase not in self._starts:
+            return 0.0
+        elapsed = time.time() - self._starts.pop(phase)
+        self._totals[phase] = self._totals.get(phase, 0.0) + elapsed
+        self._counts[phase] = self._counts.get(phase, 0) + 1
+        return elapsed
+
+    def get(self, phase):
+        return self._totals.get(phase, 0.0)
+
+    def summary(self, log=True):
+        """Return dict of phase → {total_sec, count, avg_sec} and optionally log it."""
+        results = {}
+        for phase in sorted(self._totals.keys()):
+            total = self._totals[phase]
+            count = self._counts[phase]
+            avg = total / count if count > 0 else 0.0
+            results[phase] = {"total_sec": round(total, 3),
+                              "count": count,
+                              "avg_sec": round(avg, 3)}
+        if log:
+            logging.info("=== Training Efficiency Report ===")
+            for phase, v in results.items():
+                logging.info(f"  {phase}: total={v['total_sec']:.3f}s, "
+                             f"count={v['count']}, avg={v['avg_sec']:.3f}s")
+            gpu_mem = get_gpu_memory_usage()
+            if gpu_mem:
+                logging.info(f"  GPU memory: allocated={gpu_mem['allocated_mb']:.1f}MB, "
+                             f"peak={gpu_mem['peak_allocated_mb']:.1f}MB")
+        return results
+
+
+def log_training_efficiency(model, timer=None):
+    """One-call convenience: log parameter counts + timing + GPU memory."""
+    count_model_parameters(model)
+    if timer is not None:
+        timer.summary()
+    else:
+        gpu_mem = get_gpu_memory_usage()
+        if gpu_mem:
+            logging.info(f"GPU memory: allocated={gpu_mem['allocated_mb']:.1f}MB, "
+                         f"peak={gpu_mem['peak_allocated_mb']:.1f}MB")
