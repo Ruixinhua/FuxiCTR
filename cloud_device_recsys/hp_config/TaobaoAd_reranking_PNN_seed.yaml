@@ -11,30 +11,42 @@ vocab_pruning:
   save_fp16: 1           # Save model weights in half-precision
 
 search_space:
-  seed: [2024, 2026, 42]      # 搜索不同随机种子
+  seed: [42, 2024, 2026]      # 搜索不同随机种子
 #  seed: [2024]    # 搜索不同随机种子
   reranking:
 #    model: ["DCNv3", "DNN", "PNN"]
     model: ["PNN"]
-    model_params.embedding_dim: [4, 8, 12, 16]
+    model_params.num_negatives: [4, 10, 20]
+#    model_params.embedding_dim: [4]
     model_params.hidden_units:
-#      - [ 512, 256, 128, 64 ]
-      - [ 512, 256]
+      - [ 512, 256, 128, 64 ]
+#      - [ 512, 256]
       - [ 512, 256, 128 ]
-      - [ 512, 256, 64 ]
-      - [ 512, 128, 64 ]
+#      - [ 512, 256, 64 ]
+#      - [ 512, 128, 64 ]
 #      - [ 256, 128, 64, 32 ]
 #      - [ 1024, 512, 256, 128, 64 ]
 #      - [ 2048, 1024, 512, 256, 128 ]
+
   cloud_teacher:
-    mode: ["inject"]  # "distill" = KD loss only, "inject" = inject logits as feature, "none" = no teacher
+      # "distill" = KD loss only, "inject" = inject logits as feature, "none" = no teacher, "hybrid_inject", "residual_inject"
+    version: ["FCN"]
+    cloud_feature_dropout: [ 0, 0.2 ]
+    residual_weight: [ 0, 1, 2, 0.1]
+    cloud_feature_scale: [ 0, 1 ]  # teacher logit 先除以 scale
+#    cloud_feature_scale: [ 0, 1, 5, 10 ]  # teacher logit 先除以 scale
 #    model_params.use_cloud_score: [0, 1]
 #    kd_loss_weight: [0.01, 0.1, 1]
 #    kd_loss_weight: [0, 1, 2, 5]
-#    kd_loss_type: ["kl_div"]
+#    kd_loss_type: ["mse"]
 #    kd_temperature: [1, 2, 4]
 #    kd_loss_type: ["mse", "kl_div", "cosine"]
 fixed_overrides:
+  cloud_teacher:
+    cloud_residual_scale: 1
+    mode: "hybrid_inject"
+#    cloud_score_scale: 10.0  # teacher logit 先除以 scale
+#    residual_weight: 1.0  # teacher 残差权重
   preranking:
     model: "DCNv3"
     training.epochs: 30
@@ -44,9 +56,10 @@ fixed_overrides:
   reranking:
     training.epochs: 30
     model_params.metrics_k: [1, 10, 50, 100]
-#    model_params.embedding_dim: 4
+    model_params.embedding_dim: 4
 #    model_params.use_diversity_loss: 1
     model_params.use_feature_encoder: 1
     model_params.use_cloud_score: 0
+    model_params.monitor: "gAUC"
     features: ["FG1", "FG2", "FG3"]
     neg_sampling_pool: candidate  # candidate, full

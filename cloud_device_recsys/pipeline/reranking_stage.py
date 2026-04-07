@@ -184,6 +184,20 @@ class RerankingStage(BaseStage):
         self.cloud_feature_dropout = self.cloud_teacher_params.get('cloud_feature_dropout', getattr(self, 'cloud_feature_dropout', 0.0))
         self.residual_weight = self.cloud_teacher_params.get('residual_weight', getattr(self, 'residual_weight', 1.0))
 
+        # Auto-downgrade hybrid_inject if one of the paths is strictly 0
+        if self.cloud_teacher_mode == 'hybrid_inject':
+            if self.cloud_feature_scale == 0.0 and self.residual_weight == 0.0:
+                self.logger.info("[Hybrid Inject] Both feature_scale and residual_weight are 0. Cloud teacher disabled.")
+                self.cloud_teacher_mode = "base"
+                self.use_cloud_score = False
+            elif self.cloud_feature_scale == 0.0:
+                self.logger.info("[Hybrid Inject] feature_scale is 0, auto-downgrading to residual_inject mode.")
+                self.cloud_teacher_mode = 'residual_inject'
+                self.use_cloud_score = False
+            elif self.residual_weight == 0.0:
+                self.logger.info("[Hybrid Inject] residual_weight is 0, auto-downgrading to inject mode.")
+                self.cloud_teacher_mode = 'inject'
+
         if self.cloud_teacher_mode:
             self.logger.info(f"Cloud teacher configured: mode={self.cloud_teacher_mode}")
             if self.cloud_teacher_mode == 'distill':
@@ -256,6 +270,10 @@ class RerankingStage(BaseStage):
 
     def build_model(self) -> DeviceReranker:
         """Build and initialize the re-ranking model using unified registry"""
+        
+        # Build cloud teacher model FIRST so parameters like mode and use_cloud_score 
+        # can downgrade and correctly influence the student model's feature map.
+        self._build_cloud_teacher()
         # Register cloud_score as numeric feature BEFORE model construction
         if self.use_cloud_score and 'cloud_score' not in self.feature_map.features:
             self.feature_map.features['cloud_score'] = {
@@ -287,9 +305,6 @@ class RerankingStage(BaseStage):
             self.logger.info("[FP16] Model weights will be saved in half-precision (FP16)")
 
         self.logger.info(f"Built {model_name} model, saving to {model_dir}")
-
-        # Build cloud teacher model (if configured)
-        self._build_cloud_teacher()
 
         return self.model
     
@@ -839,7 +854,7 @@ class RerankingStage(BaseStage):
         # Ensure _unmap_tensors are ready if using cloud teacher
         cloud_teacher = self.cloud_teacher_model or self.cloud_score_teacher
         unmap_tensors = None
-        is_residual_inject = (self.cloud_teacher_mode == 'residual_inject')
+        is_residual_inject = self.cloud_teacher_mode in ('residual_inject', 'hybrid_inject')
         if cloud_teacher is not None and (self.use_cloud_score or is_residual_inject):
             device = next(cloud_teacher.parameters()).device
             self._ensure_unmap_tensors(device)
@@ -916,7 +931,7 @@ class RerankingStage(BaseStage):
         # Ensure _unmap_tensors are ready if using cloud teacher
         cloud_teacher = self.cloud_teacher_model or self.cloud_score_teacher
         unmap_tensors = None
-        is_residual_inject = (self.cloud_teacher_mode == 'residual_inject')
+        is_residual_inject = self.cloud_teacher_mode in ('residual_inject', 'hybrid_inject')
         if cloud_teacher is not None and (self.use_cloud_score or is_residual_inject):
             device = next(cloud_teacher.parameters()).device
             self._ensure_unmap_tensors(device)

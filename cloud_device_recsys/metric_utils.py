@@ -632,6 +632,23 @@ def process_and_rank_candidates(
     # Pre-convert request_idx_for_valid to tensor for indexing user features
     request_idx_for_valid_tensor = torch.from_numpy(request_idx_for_valid).long()
 
+    # Evaluation caching for teacher logits
+    eval_teacher_logits = None
+    cache_filled = False
+    cache_key = None
+    if (use_teacher_for_cloud_score or use_teacher_for_residual) and cloud_teacher_model is not None:
+        stage_name = kwargs.get('stage_name', 'unknown_stage')
+        cache_key = f"{stage_name}_eval_logits"
+        if not hasattr(cloud_teacher_model, '_eval_logits_cache'):
+            cloud_teacher_model._eval_logits_cache = {}
+            
+        if cache_key in cloud_teacher_model._eval_logits_cache and len(cloud_teacher_model._eval_logits_cache[cache_key]) == num_valid:
+            eval_teacher_logits = cloud_teacher_model._eval_logits_cache[cache_key]
+            cache_filled = True
+            logger.info(f"Fast Evaluation: Loaded {num_valid} teacher logits from cache for {stage_name}")
+        else:
+            eval_teacher_logits = torch.zeros(num_valid, dtype=torch.float32, device='cpu')
+
     inference_all_start = time.time()
     num_batches = 0
 
@@ -663,37 +680,43 @@ def process_and_rank_candidates(
             chunk_tensor = item_feature_arrays[col][chunk_start:chunk_end]
             tensor_batch[col] = chunk_tensor.to(device, non_blocking=True)
 
-        # Cloud score injection: run teacher model per chunk
+        # Cloud score injection: run teacher model per chunk or load from cache
         teacher_logits_chunk = None
         if use_teacher_for_cloud_score or use_teacher_for_residual:
-            # Build teacher batch: unmap compact IDs back to original IDs
-            teacher_batch = dict(tensor_batch)
-            if cloud_teacher_unmap_tensors:
-                for feat, unmap_tensor in cloud_teacher_unmap_tensors.items():
-                    if feat in teacher_batch and teacher_batch[feat] is not None:
-                        feat_tensor = teacher_batch[feat]
-                        if isinstance(feat_tensor, torch.Tensor):
-                            max_valid_idx = unmap_tensor.size(0) - 1
-                            safe_indices = torch.clamp(feat_tensor.long(), min=0, max=max_valid_idx)
-                            teacher_batch[feat] = unmap_tensor[safe_indices].to(feat_tensor.dtype)
+            if cache_filled:
+                teacher_out_logit = eval_teacher_logits[chunk_start:chunk_end].to(device, non_blocking=True)
+            else:
+                # Build teacher batch: unmap compact IDs back to original IDs
+                teacher_batch = dict(tensor_batch)
+                if cloud_teacher_unmap_tensors:
+                    for feat, unmap_tensor in cloud_teacher_unmap_tensors.items():
+                        if feat in teacher_batch and teacher_batch[feat] is not None:
+                            feat_tensor = teacher_batch[feat]
+                            if isinstance(feat_tensor, torch.Tensor):
+                                max_valid_idx = unmap_tensor.size(0) - 1
+                                safe_indices = torch.clamp(feat_tensor.long(), min=0, max=max_valid_idx)
+                                teacher_batch[feat] = unmap_tensor[safe_indices].to(feat_tensor.dtype)
 
-            with torch.no_grad():
-                teacher_out = cloud_teacher_model.forward(teacher_batch)
+                with torch.no_grad():
+                    teacher_out = cloud_teacher_model.forward(teacher_batch)
+                    teacher_out_logit = teacher_out['logit'].detach().squeeze(-1)
+                
+                eval_teacher_logits[chunk_start:chunk_end] = teacher_out_logit.cpu()
 
             if use_teacher_for_cloud_score:
                 # Inject mode: add teacher logits as cloud_score feature
                 cloud_feature_scale = kwargs.get('cloud_feature_scale', kwargs.get('cloud_score_scale', 1.0))
                 if cloud_feature_scale != 1.0:
-                    tensor_batch['cloud_score'] = teacher_out['logit'] / cloud_feature_scale
-                    if num_batches == 1:
+                    tensor_batch['cloud_score'] = teacher_out_logit / cloud_feature_scale
+                    if num_batches == 1 and not cache_filled:
                         logger.info(f"[Inject Mode] Applied cloud_feature_scale={cloud_feature_scale}. "
                                     f"First batch cloud_score mean: {tensor_batch['cloud_score'].mean().item():.4f}")
                 else:
-                    tensor_batch['cloud_score'] = teacher_out['logit']
+                    tensor_batch['cloud_score'] = teacher_out_logit
             
             if use_teacher_for_residual:
                 # Residual inject or Hybrid inject: save teacher logits for post-forward addition
-                teacher_logits_chunk = teacher_out['logit'].detach()
+                teacher_logits_chunk = teacher_out_logit
 
         timing_stats['tensor_conversion'] += time.time() - t_tensor_start
 
@@ -752,6 +775,10 @@ def process_and_rank_candidates(
     logger.info(f"  Loop total:           {total_inference_time:8.2f}s")
     logger.info(f"  Overall total:        {precompute_time + total_inference_time:8.2f}s")
     logger.info("Finish model inference for all valid candidates.")
+
+    if eval_teacher_logits is not None and not cache_filled:
+        cloud_teacher_model._eval_logits_cache[cache_key] = eval_teacher_logits
+        logger.info(f"Saved {num_valid} teacher logits to cache for {stage_name}")
     # ========== Phase 5: Scatter results back to requests (OPTIMIZED - DataFrame output) ==========
     # Create mapping from valid indices back to original global indices
     global_to_valid_idx = np.full(total_candidates, -1, dtype=np.int64)
