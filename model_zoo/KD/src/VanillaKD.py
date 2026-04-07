@@ -25,6 +25,15 @@ Two-stage pipeline:
            with an auxiliary KL-divergence loss that aligns the student's predictions
            to the teacher's soft targets (Hinton et al., 2015).
 
+Data setup:
+  - is_personalization == 1 (group_id=1): rows with ALL features available (teacher data)
+  - is_personalization != 1 (group_id=2): rows with only NP features (student data)
+
+Routing:
+  - Training: teacher trains on all data, student trains on all data (personalized features
+    masked for group_id=1 rows), KD loss applied only on group_id=1 rows
+  - Inference: group_id=1 → teacher prediction, group_id=2 → student prediction
+
 Reference:
   Hinton et al., "Distilling the Knowledge in Neural Networks", NeurIPS Workshop 2015.
 """
@@ -229,59 +238,96 @@ class VanillaKD(BaseModel):
         y_pred = self.output_activation(logit)
         return y_pred, logit
 
+    def _get_personalized_mask(self, X):
+        """Get personalized/non-personalized masks from is_personalization field.
+        
+        Returns:
+            (personalized_mask, non_personalized_mask): bool tensors [batch_size]
+            personalized_mask=True for group_id=1 rows (full features available)
+        """
+        if self.personalization_field in X:
+            flag = X[self.personalization_field]
+            personalized_mask = (flag == 1)
+            non_personalized_mask = (flag != 1)
+        else:
+            batch_size = list(X.values())[0].size(0)
+            device = list(X.values())[0].device
+            personalized_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
+            non_personalized_mask = torch.ones(batch_size, dtype=torch.bool, device=device)
+            logging.warning(f"'{self.personalization_field}' not found in inputs, "
+                            f"treating all as non-personalized")
+        return personalized_mask, non_personalized_mask
+
     def forward(self, inputs):
         X = self.get_inputs(inputs)
+        personalized_mask, non_personalized_mask = self._get_personalized_mask(X)
 
         if self._training_phase == "teacher":
             # Phase 1: Teacher training — use all features, standard PNN forward
             teacher_y_pred, teacher_logit = self._forward_backbone(
                 self.teacher_embedding, self.teacher_interaction, self.teacher_dnn, X
             )
-            return {"y_pred": teacher_y_pred, "logit": teacher_logit}
+            return {
+                "y_pred": teacher_y_pred,
+                "logit": teacher_logit,
+                "personalized_mask": personalized_mask,
+                "non_personalized_mask": non_personalized_mask,
+            }
 
-        # Phase 2 (or inference): Student forward with masked features
-        batch_size = list(X.values())[0].size(0)
-        all_personalized_mask = torch.ones(batch_size, dtype=torch.bool, device=self.device)
-        _, student_X = self.feature_separator.separate_features(X, all_personalized_mask)
-
+        # Phase 2 / inference: both teacher and student forward
+        # Student: mask personalization features for group_id=1 rows
+        _, student_X = self.feature_separator.separate_features(X, personalized_mask)
         student_y_pred, student_logit = self._forward_backbone(
             self.student_embedding, self.student_interaction, self.student_dnn, student_X
         )
 
-        return_dict = {
-            "y_pred": student_y_pred,
-            "student_logit": student_logit,
-        }
+        # Teacher forward (frozen, all features)
+        with torch.no_grad():
+            teacher_y_pred, teacher_logit = self._forward_backbone(
+                self.teacher_embedding, self.teacher_interaction, self.teacher_dnn, X
+            )
 
-        # Teacher forward (frozen, all features) — only during training
-        if self.training:
-            with torch.no_grad():
-                teacher_y_pred, teacher_logit = self._forward_backbone(
-                    self.teacher_embedding, self.teacher_interaction, self.teacher_dnn, X
-                )
-            return_dict["teacher_logit"] = teacher_logit.detach()
-            return_dict["teacher_y_pred"] = teacher_y_pred.detach()
+        # Route predictions: group_id=1 → teacher, group_id=2 → student
+        final_pred = torch.zeros_like(student_y_pred)
+        if personalized_mask.any():
+            final_pred[personalized_mask] = teacher_y_pred[personalized_mask]
+        if non_personalized_mask.any():
+            final_pred[non_personalized_mask] = student_y_pred[non_personalized_mask]
+
+        return_dict = {
+            "y_pred": final_pred,
+            "student_y_pred": student_y_pred,
+            "student_logit": student_logit,
+            "teacher_y_pred": teacher_y_pred.detach(),
+            "teacher_logit": teacher_logit.detach(),
+            "personalized_mask": personalized_mask,
+            "non_personalized_mask": non_personalized_mask,
+        }
 
         return return_dict
 
     def add_loss(self, return_dict, y_true):
+        personalized_mask = return_dict["personalized_mask"]
+
         if self._training_phase == "teacher":
-            # Phase 1: standard BCE loss for teacher
+            # Phase 1: standard BCE loss for teacher on all data
             return self.loss_fn(return_dict["y_pred"], y_true, reduction='mean')
 
-        # Phase 2: student BCE + KD loss
-        student_y_pred = return_dict["y_pred"]
+        # Phase 2: student BCE on ALL data + KD loss on group_id=1 only
+        student_y_pred = return_dict["student_y_pred"]
         base_loss = self.loss_fn(student_y_pred, y_true, reduction='mean')
         total_loss = self.base_loss_weight * base_loss
 
-        if "teacher_logit" in return_dict:
-            student_logit = return_dict["student_logit"]
-            teacher_logit = return_dict["teacher_logit"]
+        # KD loss only on personalized rows (where teacher has privileged features)
+        if "teacher_logit" in return_dict and personalized_mask.any():
+            student_logit = return_dict["student_logit"][personalized_mask]
+            teacher_logit = return_dict["teacher_logit"][personalized_mask]
             kd_loss = self._compute_kd_loss(student_logit, teacher_logit)
             total_loss = total_loss + self.kd_loss_weight * kd_loss
 
             logging.debug(f"VanillaKD loss: base={base_loss.item():.6f}, "
-                          f"kd={kd_loss.item():.6f}")
+                          f"kd={kd_loss.item():.6f}, "
+                          f"kd_samples={personalized_mask.sum().item()}")
 
         return total_loss
 

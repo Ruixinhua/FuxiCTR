@@ -23,9 +23,14 @@ Single-stage joint training pipeline:
   - Both networks are trained simultaneously. The teacher's soft predictions serve as
     an online distillation signal for the student.
 
-This is inspired by the Privileged Features Distillation approach used in industrial
-advertising systems, where certain features (e.g., user identity) are available during
-training but not at inference time for privacy-constrained traffic.
+Data setup:
+  - is_personalization == 1 (group_id=1): rows with ALL features available (teacher data)
+  - is_personalization != 1 (group_id=2): rows with only NP features (student data)
+
+Routing:
+  - Training: teacher trained on all data, student trained on all data (personalized
+    features masked for group_id=1 rows), KD loss on group_id=1 rows only
+  - Inference: group_id=1 → teacher prediction, group_id=2 → student prediction
 
 Key differences from VanillaKD:
   - No pre-trained teacher required; teacher and student are trained jointly.
@@ -199,36 +204,64 @@ class PrivilegedFeaturesDistillation(BaseModel):
         y_pred = self.output_activation(logit)
         return y_pred, logit
 
+    def _get_personalized_mask(self, X):
+        """Get personalized/non-personalized masks from is_personalization field.
+        
+        Returns:
+            (personalized_mask, non_personalized_mask): bool tensors [batch_size]
+            personalized_mask=True for group_id=1 rows (full features available)
+        """
+        if self.personalization_field in X:
+            flag = X[self.personalization_field]
+            personalized_mask = (flag == 1)
+            non_personalized_mask = (flag != 1)
+        else:
+            batch_size = list(X.values())[0].size(0)
+            device = list(X.values())[0].device
+            personalized_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
+            non_personalized_mask = torch.ones(batch_size, dtype=torch.bool, device=device)
+            logging.warning(f"'{self.personalization_field}' not found in inputs, "
+                            f"treating all as non-personalized")
+        return personalized_mask, non_personalized_mask
+
     def forward(self, inputs):
         X = self.get_inputs(inputs)
+        personalized_mask, non_personalized_mask = self._get_personalized_mask(X)
 
-        # Mask personalized features for the student
-        batch_size = list(X.values())[0].size(0)
-        all_personalized_mask = torch.ones(batch_size, dtype=torch.bool, device=self.device)
-        _, student_X = self.feature_separator.separate_features(X, all_personalized_mask)
-
-        # Student forward (masked features)
+        # Student forward: mask personalization features for group_id=1 rows
+        _, student_X = self.feature_separator.separate_features(X, personalized_mask)
         student_y_pred, student_logit = self._forward_student(student_X)
 
+        # Teacher forward (all features)
+        teacher_y_pred, teacher_logit = self._forward_teacher(X)
+
+        # Route predictions: group_id=1 → teacher, group_id=2 → student
+        final_pred = torch.zeros_like(student_y_pred)
+        if personalized_mask.any():
+            final_pred[personalized_mask] = teacher_y_pred[personalized_mask]
+        if non_personalized_mask.any():
+            final_pred[non_personalized_mask] = student_y_pred[non_personalized_mask]
+
         return_dict = {
-            "y_pred": student_y_pred,  # student prediction is the primary output
+            "y_pred": final_pred,
+            "student_y_pred": student_y_pred,
             "student_logit": student_logit,
+            "personalized_mask": personalized_mask,
+            "non_personalized_mask": non_personalized_mask,
         }
 
-        # Teacher forward (all features) — trained jointly
         if self.training:
-            teacher_y_pred, teacher_logit = self._forward_teacher(X)
             return_dict["teacher_y_pred"] = teacher_y_pred
             return_dict["teacher_logit"] = teacher_logit
-        # At inference, only student is used (y_pred already set)
 
         return return_dict
 
     def add_loss(self, return_dict, y_true):
-        """Compute combined loss: teacher BCE + student BCE + KD loss."""
-        student_y_pred = return_dict["y_pred"]
+        """Compute combined loss: teacher BCE (group_id=1) + student BCE (all) + KD (group_id=1)."""
+        personalized_mask = return_dict["personalized_mask"]
 
-        # Student base loss
+        # Student base loss on ALL data
+        student_y_pred = return_dict["student_y_pred"]
         student_base_loss = self.loss_fn(student_y_pred, y_true, reduction='mean')
         total_loss = self.base_loss_weight * student_base_loss
 
@@ -237,19 +270,28 @@ class PrivilegedFeaturesDistillation(BaseModel):
             student_logit = return_dict["student_logit"]
             teacher_logit = return_dict["teacher_logit"]
 
-            # Teacher base loss (teacher also learns from labels)
-            teacher_base_loss = self.loss_fn(teacher_y_pred, y_true, reduction='mean')
-            total_loss = total_loss + self.teacher_loss_weight * teacher_base_loss
+            # Teacher base loss on group_id=1 data (where teacher has privileged features)
+            if personalized_mask.any():
+                teacher_base_loss = self.loss_fn(
+                    teacher_y_pred[personalized_mask],
+                    y_true[personalized_mask],
+                    reduction='mean'
+                )
+                total_loss = total_loss + self.teacher_loss_weight * teacher_base_loss
 
-            # KD loss (student learns from teacher's soft predictions)
-            kd_loss = self._compute_kd_loss(student_logit, teacher_logit)
-            total_loss = total_loss + self.kd_loss_weight * kd_loss
+                # KD loss on group_id=1 data only (teacher → student knowledge transfer)
+                kd_loss = self._compute_kd_loss(
+                    student_logit[personalized_mask],
+                    teacher_logit[personalized_mask]
+                )
+                total_loss = total_loss + self.kd_loss_weight * kd_loss
 
-            logging.debug(
-                f"PFD loss: student_bce={student_base_loss.item():.6f}, "
-                f"teacher_bce={teacher_base_loss.item():.6f}, "
-                f"kd={kd_loss.item():.6f}"
-            )
+                logging.debug(
+                    f"PFD loss: student_bce={student_base_loss.item():.6f}, "
+                    f"teacher_bce={teacher_base_loss.item():.6f}, "
+                    f"kd={kd_loss.item():.6f}, "
+                    f"kd_samples={personalized_mask.sum().item()}"
+                )
 
         return total_loss
 
