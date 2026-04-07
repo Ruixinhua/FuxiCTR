@@ -19,6 +19,8 @@ VanillaKD: Standard Two-Stage Knowledge Distillation for CTR/CVR Prediction
 
 Two-stage pipeline:
   Stage 1: Train a teacher model using ALL features (personalized + non-personalized).
+           If teacher_model_path is provided, this stage is skipped.
+           Otherwise, the teacher is trained automatically within fit().
   Stage 2: Freeze the teacher, train a student model using ONLY non-personalized features,
            with an auxiliary KL-divergence loss that aligns the student's predictions
            to the teacher's soft targets (Hinton et al., 2015).
@@ -30,12 +32,13 @@ Reference:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 import logging
 import os
 
 from fuxictr.pytorch.models import BaseModel
 from fuxictr.pytorch.layers import FeatureEmbedding, MLP_Block, InnerProductInteraction
-from fuxictr.pytorch.torch_utils import FeatureSeparator
+from fuxictr.pytorch.torch_utils import FeatureSeparator, get_optimizer
 
 
 class VanillaKD(BaseModel):
@@ -68,6 +71,7 @@ class VanillaKD(BaseModel):
                  product_type="inner",
                  # KD-specific parameters
                  teacher_model_path=None,
+                 teacher_pretrain_epochs=100,  # auto-train teacher if no checkpoint
                  kd_temperature=4.0,
                  kd_loss_weight=1.0,
                  base_loss_weight=1.0,
@@ -99,6 +103,12 @@ class VanillaKD(BaseModel):
         self.personalization_field = personalization_field
         self.backbone_type = backbone_type
         self.backbone_params = backbone_params or {}
+        self._learning_rate = learning_rate
+        self._optimizer_name = kwargs["optimizer"]
+        self._loss_name = kwargs["loss"]
+
+        # Teacher pretrain epochs: default to same as total epochs if not specified
+        self.teacher_pretrain_epochs = teacher_pretrain_epochs
 
         # Filter personalization features to only those in feature_map
         self.personalization_feature_list = [
@@ -119,25 +129,29 @@ class VanillaKD(BaseModel):
         self._build_teacher(embedding_dim, hidden_units, hidden_activations,
                             net_dropout, batch_norm, product_type)
 
-        # Load pre-trained teacher weights and freeze
+        # Determine training mode
+        self._teacher_pretrained = False
         if self.teacher_model_path and os.path.exists(self.teacher_model_path):
             self._load_and_freeze_teacher(self.teacher_model_path)
-        else:
-            logging.warning(
-                f"Teacher model path not found: {self.teacher_model_path}. "
-                f"Teacher will use random weights (train teacher first!)."
-            )
+            self._teacher_pretrained = True
+
+        # _training_phase: "teacher" during Phase 1, "student" during Phase 2
+        self._training_phase = "student" if self._teacher_pretrained else "teacher"
 
         self.compile(kwargs["optimizer"], kwargs["loss"], learning_rate)
         self.reset_parameters()
-        # Re-freeze teacher after reset_parameters
-        if self.teacher_model_path and os.path.exists(self.teacher_model_path):
+        # Re-freeze teacher after reset_parameters if loaded from checkpoint
+        if self._teacher_pretrained:
             self._load_and_freeze_teacher(self.teacher_model_path)
         self.model_to_device()
 
         logging.info(f"VanillaKD initialized:")
         logging.info(f"  - Backbone: {backbone_type}")
         logging.info(f"  - Teacher model: {teacher_model_path}")
+        logging.info(f"  - Teacher pretrained: {self._teacher_pretrained}")
+        if not self._teacher_pretrained:
+            logging.info(f"  - Teacher will be auto-trained in Phase 1 "
+                         f"(pretrain_epochs={teacher_pretrain_epochs})")
         logging.info(f"  - KD temperature: {kd_temperature}")
         logging.info(f"  - KD loss weight: {kd_loss_weight}")
         logging.info(f"  - KD loss type: {kd_loss_type}")
@@ -218,13 +232,18 @@ class VanillaKD(BaseModel):
     def forward(self, inputs):
         X = self.get_inputs(inputs)
 
-        # Mask personalized features for the student
-        # Create a dummy all-True mask (mask all personalized features for all samples)
+        if self._training_phase == "teacher":
+            # Phase 1: Teacher training — use all features, standard PNN forward
+            teacher_y_pred, teacher_logit = self._forward_backbone(
+                self.teacher_embedding, self.teacher_interaction, self.teacher_dnn, X
+            )
+            return {"y_pred": teacher_y_pred, "logit": teacher_logit}
+
+        # Phase 2 (or inference): Student forward with masked features
         batch_size = list(X.values())[0].size(0)
         all_personalized_mask = torch.ones(batch_size, dtype=torch.bool, device=self.device)
         _, student_X = self.feature_separator.separate_features(X, all_personalized_mask)
 
-        # Student forward (uses masked features)
         student_y_pred, student_logit = self._forward_backbone(
             self.student_embedding, self.student_interaction, self.student_dnn, student_X
         )
@@ -234,7 +253,7 @@ class VanillaKD(BaseModel):
             "student_logit": student_logit,
         }
 
-        # Teacher forward (uses all features) — only during training
+        # Teacher forward (frozen, all features) — only during training
         if self.training:
             with torch.no_grad():
                 teacher_y_pred, teacher_logit = self._forward_backbone(
@@ -246,15 +265,15 @@ class VanillaKD(BaseModel):
         return return_dict
 
     def add_loss(self, return_dict, y_true):
-        """Compute combined loss: base BCE + KD loss."""
+        if self._training_phase == "teacher":
+            # Phase 1: standard BCE loss for teacher
+            return self.loss_fn(return_dict["y_pred"], y_true, reduction='mean')
+
+        # Phase 2: student BCE + KD loss
         student_y_pred = return_dict["y_pred"]
-
-        # Base loss (BCE)
         base_loss = self.loss_fn(student_y_pred, y_true, reduction='mean')
-
         total_loss = self.base_loss_weight * base_loss
 
-        # KD loss (only during training when teacher logits are available)
         if "teacher_logit" in return_dict:
             student_logit = return_dict["student_logit"]
             teacher_logit = return_dict["teacher_logit"]
@@ -265,6 +284,85 @@ class VanillaKD(BaseModel):
                           f"kd={kd_loss.item():.6f}")
 
         return total_loss
+
+    def _freeze_teacher(self):
+        """Freeze all teacher parameters."""
+        for name, param in self.named_parameters():
+            if name.startswith("teacher_"):
+                param.requires_grad = False
+        teacher_params = sum(1 for n, _ in self.named_parameters() if n.startswith("teacher_"))
+        logging.info(f"Teacher frozen: {teacher_params} parameter groups")
+
+    def fit(self, data_generator, epochs=1, validation_data=None,
+            max_gradient_norm=10., **kwargs):
+        """Two-phase training: auto-train teacher if no checkpoint, then train student."""
+
+        if self._teacher_pretrained:
+            # Teacher already loaded from checkpoint — go directly to Phase 2
+            logging.info("=== Teacher loaded from checkpoint, skipping Phase 1 ===")
+            self._training_phase = "student"
+            super().fit(data_generator, epochs=epochs,
+                        validation_data=validation_data,
+                        max_gradient_norm=max_gradient_norm, **kwargs)
+            return
+
+        # ============================================================
+        # Phase 1: Train teacher with all features
+        # ============================================================
+        teacher_epochs = self.teacher_pretrain_epochs or epochs
+        logging.info("=" * 60)
+        logging.info(f"=== Phase 1: Training teacher for {teacher_epochs} epochs ===")
+        logging.info("=" * 60)
+
+        self._training_phase = "teacher"
+        # Only optimize teacher parameters
+        self.optimizer = get_optimizer(self._optimizer_name,
+                                      [p for n, p in self.named_parameters()
+                                       if n.startswith("teacher_")],
+                                      self._learning_rate)
+
+        # Save teacher checkpoint separately
+        teacher_checkpoint = self.checkpoint + ".teacher"
+        orig_checkpoint = self.checkpoint
+        self.checkpoint = teacher_checkpoint
+
+        super().fit(data_generator, epochs=teacher_epochs,
+                    validation_data=validation_data,
+                    max_gradient_norm=max_gradient_norm, **kwargs)
+
+        # Restore checkpoint path
+        self.checkpoint = orig_checkpoint
+
+        # Load best teacher weights and freeze
+        if os.path.exists(teacher_checkpoint):
+            logging.info(f"Loading best teacher weights from: {teacher_checkpoint}")
+            self.load_weights(teacher_checkpoint)
+            os.remove(teacher_checkpoint)
+        self._freeze_teacher()
+        self._teacher_pretrained = True
+
+        # ============================================================
+        # Phase 2: Train student with KD loss
+        # ============================================================
+        logging.info("=" * 60)
+        logging.info(f"=== Phase 2: Training student for {epochs} epochs with KD ===")
+        logging.info("=" * 60)
+
+        self._training_phase = "student"
+        # Re-create optimizer for student parameters only
+        self.optimizer = get_optimizer(self._optimizer_name,
+                                      [p for n, p in self.named_parameters()
+                                       if p.requires_grad],
+                                      self._learning_rate)
+
+        # Reset early stopping state for Phase 2
+        self._best_metric = np.Inf if self._monitor_mode == "min" else -np.Inf
+        self._stopping_steps = 0
+        self._stop_training = False
+
+        super().fit(data_generator, epochs=epochs,
+                    validation_data=validation_data,
+                    max_gradient_norm=max_gradient_norm, **kwargs)
 
     def _compute_kd_loss(self, student_logit, teacher_logit):
         """Compute knowledge distillation loss between student and teacher logits."""

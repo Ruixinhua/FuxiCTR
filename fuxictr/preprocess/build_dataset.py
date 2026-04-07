@@ -361,6 +361,13 @@ def build_dataset(feature_encoder, train_data=None, valid_data=None, test_data=N
             logging.warn(f"Skip rebuilding {feature_map_path}. "
                 + "Please delete it manually if rebuilding is required.")
         else:
+            if train_data is None:
+                raise ValueError(
+                    f"feature_map.json not found at {feature_map_path} and 'train_data' is not "
+                    f"set in the config. Either: (1) set 'train_data' path in dataset_config to "
+                    f"build from raw data, or (2) ensure the preprocessed data (including "
+                    f"feature_map.json) already exists at data_root/dataset_id/."
+                )
             # Load data files
             train_ddf = feature_encoder.read_data(train_data, **kwargs)
             logging.info("Raw training data loaded successfully")
