@@ -50,4 +50,4 @@ from .EulerNet.src import EulerNet
 from .WuKong.src import WuKong
 from .GDCN.src import GDCN
 from .DTCN.src import DualTowerModel, DualTowerCL
-from .KD.src import VanillaKD, PrivilegedFeaturesDistillation
+from .KD.src import VanillaKD, PrivilegedFeaturesDistillation, HAPFD
