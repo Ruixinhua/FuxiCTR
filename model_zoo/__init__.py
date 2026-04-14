@@ -50,4 +50,7 @@ from .EulerNet.src import EulerNet
 from .WuKong.src import WuKong
 from .GDCN.src import GDCN
 from .DTCN.src import DualTowerModel, DualTowerCL
+from .DTDN.src import DTDN
 from .KD.src import VanillaKD, PrivilegedFeaturesDistillation, HAPFD
+from .PrivacyPreserving.src import DPSGD, SplitRec, DeepMutualLearning, FitNet, FedRec, \
+    DualRec, FedPDD, LDPFedRec, FedCIA, FedCAR, P2FedRec
