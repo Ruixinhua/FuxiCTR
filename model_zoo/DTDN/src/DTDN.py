@@ -154,18 +154,8 @@ class DTDN(BaseModel):
                      f"β={distance_loss_weight}")
 
     def _build_tower(self, tower_type, kwargs):
-        from model_zoo.DTCN.src.model_adapter import (
-            PNNAdapter, DCNv3Adapter, FinalNetAdapter
-        )
-        classes = {
-            "PNN": PNNAdapter,
-            "DCNv3": DCNv3Adapter,
-            "FinalNet": FinalNetAdapter,
-        }
-        if tower_type not in classes:
-            raise ValueError(f"Unsupported tower type '{tower_type}'. "
-                             f"Choose from {list(classes.keys())}")
-        return classes[tower_type](feature_map=self.feature_map, **kwargs)
+        from fuxictr.pytorch.backbone import build_backbone
+        return build_backbone(tower_type, self.feature_map, **kwargs)
 
     def _get_personalization_mask(self, X):
         """Return boolean mask: True for personalized samples."""

@@ -296,7 +296,8 @@ class BaseModelAdapter(nn.Module, ABC):
 
 class DCNv3Adapter(BaseModelAdapter):
     """
-    DCNv3模型适配器，从DCNv3中提取hidden states，并集成对比学习功能
+    DCNv3模型适配器，从DCNv3中提取hidden states，并集成对比学习功能。
+    内部使用统一的 DCNv3Backbone 实现核心计算。
     """
 
     def __init__(self,
@@ -313,40 +314,25 @@ class DCNv3Adapter(BaseModelAdapter):
                  **kwargs):
         super(DCNv3Adapter, self).__init__(feature_map, embedding_dim=embedding_dim, **kwargs)
 
-        # 保存DCNv3特定的参数
-        self.num_deep_cross_layers = num_deep_cross_layers
-        self.num_shallow_cross_layers = num_shallow_cross_layers
-        self.deep_net_dropout = deep_net_dropout
-        self.shallow_net_dropout = shallow_net_dropout
-        self.layer_norm = layer_norm
-        self.batch_norm = batch_norm
-        self.num_heads = num_heads
-        self.output_activation = output_activation
+        from fuxictr.pytorch.backbone import DCNv3Backbone
 
-        from model_zoo.DCNv3.src import ExponentialCrossNetwork, LinearCrossNetwork, MultiHeadFeatureEmbedding
+        self._backbone = DCNv3Backbone(
+            feature_map,
+            embedding_dim=embedding_dim,
+            num_deep_cross_layers=num_deep_cross_layers,
+            num_shallow_cross_layers=num_shallow_cross_layers,
+            deep_net_dropout=deep_net_dropout,
+            shallow_net_dropout=shallow_net_dropout,
+            layer_norm=layer_norm,
+            batch_norm=batch_norm,
+            num_heads=num_heads,
+            output_activation=output_activation,
+        )
 
-        self.embedding_layer = MultiHeadFeatureEmbedding(feature_map, embedding_dim * num_heads, num_heads)
-        output_intermediate_features = "MT" in kwargs["output_mode"]
+        # Alias for CL methods that access embedding_layer directly
+        self.embedding_layer = self._backbone.embedding_layer
         cross_input_dim = feature_map.num_fields * embedding_dim
-
-        # 创建ECN和LCN，暂时设置为不输出intermediate features（用于完整模型输出）
-        self.ECN = ExponentialCrossNetwork(input_dim=cross_input_dim,
-                                           num_cross_layers=num_deep_cross_layers,
-                                           net_dropout=deep_net_dropout,
-                                           layer_norm=layer_norm,
-                                           batch_norm=batch_norm,
-                                           num_heads=num_heads,
-                                           output_intermediate_features=output_intermediate_features)
-
-        self.LCN = LinearCrossNetwork(input_dim=cross_input_dim,
-                                      num_cross_layers=num_shallow_cross_layers,
-                                      net_dropout=shallow_net_dropout,
-                                      layer_norm=layer_norm,
-                                      batch_norm=batch_norm,
-                                      num_heads=num_heads,
-                                      output_intermediate_features=output_intermediate_features)
-
-        self.hidden_dim = num_heads * cross_input_dim  # ECN + LCN
+        self.hidden_dim = num_heads * cross_input_dim
 
     def get_hidden_states(self, inputs):
         """
@@ -355,66 +341,19 @@ class DCNv3Adapter(BaseModelAdapter):
         Returns:
             tuple: (xld_flat, xls_flat) - ECN和LCN的扁平化输出
         """
-        feature_emb = self.embedding_layer(inputs)
-
-        # 提取intermediate features
-        xld_intermediate = self.ECN(feature_emb)
-        xls_intermediate = self.LCN(feature_emb)
-
-        # 展平
-        xld_flat = xld_intermediate.view(xld_intermediate.size(0), -1)
-        xls_flat = xls_intermediate.view(xls_intermediate.size(0), -1)
-
-        return xld_flat, xls_flat
+        return self._backbone.forward_features(inputs)
 
     def get_hidden_dim(self):
         return self.hidden_dim
 
     def get_model_return_dict(self, inputs):
-        """DCNv3的完整返回字典"""
-        # 完全复制原版DCNv3的forward方法逻辑，包括y_d和y_s的计算
-        feature_emb = self.embedding_layer(inputs)
-
-        # 注意：我们的DCNv3Adapter目前不支持domain_aware_structure
-        # 这相当于原版DCNv3中use_domain_aware_structure=False的情况
-        logits_xld = self.ECN(feature_emb).mean(dim=1)
-        logits_xls = self.LCN(feature_emb).mean(dim=1)
-
-        # 按照原版DCNv3逻辑计算最终logit
-        logit = (logits_xld + logits_xls) * 0.5
-
-        # 应用输出激活函数 - 完全按照原版DCNv3
-        y_pred = self.output_activation(logit) if self.output_activation else logit
-        y_d = self.output_activation(logits_xld) if self.output_activation else logits_xld
-        y_s = self.output_activation(logits_xls) if self.output_activation else logits_xls
-        return_dict = {"y_pred": y_pred,
-                       "y_d": y_d,
-                       "y_s": y_s}
-        return return_dict
+        return self._backbone.get_model_return_dict(inputs)
 
     def has_custom_loss(self):
-        """DCNv3有自定义的损失计算逻辑"""
-        return True
+        return self._backbone.has_custom_loss()
 
     def compute_custom_loss(self, return_dict, y_true, loss_fn):
-        """DCNv3的自定义损失计算 - 复制原始DCNv3.py的add_loss逻辑"""
-        y_pred = return_dict["y_pred"]
-        y_d = return_dict["y_d"]
-        y_s = return_dict["y_s"]
-
-        # 完全复制原版DCNv3.add_loss的逻辑
-        loss = loss_fn(y_pred, y_true, reduction='mean')
-        loss_d = loss_fn(y_d, y_true, reduction='mean')
-        loss_s = loss_fn(y_s, y_true, reduction='mean')
-
-        weight_d = loss_d - loss
-        weight_s = loss_s - loss
-
-        weight_d = torch.where(weight_d > 0, weight_d, torch.zeros_like(weight_d))
-        weight_s = torch.where(weight_s > 0, weight_s, torch.zeros_like(weight_s))
-
-        total_loss = loss + loss_d * weight_d + loss_s * weight_s
-        return total_loss
+        return self._backbone.compute_custom_loss(return_dict, y_true, loss_fn)
 
     # 对比学习相关方法实现
     def _extract_single_field_embedding(self, field_name, single_field_dict):
@@ -469,54 +408,43 @@ class DCNv3Adapter(BaseModelAdapter):
 
 class PNNAdapter(BaseModelAdapter):
     """
-    PNN模型适配器，从PNN中提取hidden states，并集成对比学习功能
+    PNN模型适配器，从PNN中提取hidden states，并集成对比学习功能。
+    内部使用统一的 PNNBackbone 实现核心计算。
     """
 
     def __init__(self, feature_map, embedding_dim=10, product_type="inner", **kwargs):
         super(PNNAdapter, self).__init__(feature_map, embedding_dim=embedding_dim, **kwargs)
 
-        self.embedding_layer = FeatureEmbedding(feature_map, embedding_dim)
+        from fuxictr.pytorch.backbone import PNNBackbone
 
-        if product_type != "inner":
-            raise NotImplementedError("product_type={} has not been implemented.".format(product_type))
+        self._backbone = PNNBackbone(
+            feature_map,
+            embedding_dim=embedding_dim,
+            product_type=product_type,
+            hidden_units=kwargs.get("hidden_units", []),
+            hidden_activations=kwargs.get("hidden_activations", "ReLU"),
+            net_dropout=kwargs.get("dropout_rates", 0.0),
+            batch_norm=kwargs.get("batch_norm", False),
+            output_activation=kwargs.get("output_activation"),
+        )
 
-        self.inner_product_layer = InnerProductInteraction(feature_map.num_fields, output="inner_product")
-        # 计算hidden states的维度
-        self.hidden_dim = (int(feature_map.num_fields * (feature_map.num_fields - 1) / 2) +
-                           feature_map.num_fields * embedding_dim)
-        if kwargs.get("output_mode") == "SingleTower":
-            # 添加DNN输出层以实现完整的PNN模型
-            self.dnn = MLP_Block(input_dim=self.hidden_dim, output_dim=1,
-                                 hidden_units=kwargs.get("hidden_units", []),  # 可以根据需要添加隐藏层
-                                 hidden_activations=kwargs.get("hidden_activations", "ReLU"),
-                                 output_activation=kwargs.get("output_activation"),
-                                 dropout_rates=kwargs.get("dropout_rates", 0.0),
-                                 batch_norm=kwargs.get("batch_norm", False))
+        # Alias for CL methods
+        self.embedding_layer = self._backbone.embedding_layer
+        self.inner_product_layer = self._backbone.inner_product_layer
+        self.hidden_dim = self._backbone._feature_input_dim
 
     def get_hidden_states(self, inputs):
         """提取hidden states（返回拼接后的hidden_states，不是tuple）"""
-        feature_emb = self.embedding_layer(inputs)
-        inner_products = self.inner_product_layer(feature_emb)
-
-        # 拼接embedding和inner products作为hidden states
-        hidden_states = torch.cat([feature_emb.flatten(start_dim=1), inner_products], dim=1)
-        return hidden_states
+        return self._backbone.forward_features(inputs)
 
     def get_hidden_dim(self):
         return self.hidden_dim
 
     def get_model_return_dict(self, inputs):
-        """PNN的完整返回字典"""
-        # 重用get_hidden_states的逻辑
-        hidden_states = self.get_hidden_states(inputs)
-        y_pred = self.dnn(hidden_states)
-
-        return_dict = {"y_pred": y_pred}
-        return return_dict
+        return self._backbone.get_model_return_dict(inputs)
 
     def has_custom_loss(self):
-        """PNN没有自定义的损失计算逻辑"""
-        return False
+        return self._backbone.has_custom_loss()
 
     # 对比学习相关方法实现
     def _extract_single_field_embedding(self, field_name, single_field_dict):
@@ -598,7 +526,8 @@ class PNNAdapter(BaseModelAdapter):
 
 class FinalNetAdapter(BaseModelAdapter):
     """
-    FinalNet模型适配器，从FinalNet中提取hidden states，并集成对比学习功能
+    FinalNet模型适配器，从FinalNet中提取hidden states，并集成对比学习功能。
+    内部使用统一的 FinalNetBackbone 实现核心计算。
     """
 
     def __init__(self, 
@@ -618,117 +547,48 @@ class FinalNetAdapter(BaseModelAdapter):
                  **kwargs):
         super(FinalNetAdapter, self).__init__(feature_map, embedding_dim=embedding_dim, **kwargs)
 
-        # 导入FinalNet相关组件
-        from model_zoo.FinalNet.src.FinalNet import FinalBlock, FeatureGating
-        from fuxictr.pytorch.torch_utils import get_activation
-        
-        self.embedding_layer = FeatureEmbedding(feature_map, embedding_dim)
-        num_fields = feature_map.num_fields
-        self.use_feature_gating = use_feature_gating
+        from fuxictr.pytorch.backbone import FinalNetBackbone
+
+        self._backbone = FinalNetBackbone(
+            feature_map,
+            embedding_dim=embedding_dim,
+            block_type=block_type,
+            batch_norm=batch_norm,
+            use_feature_gating=use_feature_gating,
+            block1_hidden_units=block1_hidden_units,
+            block1_hidden_activations=block1_hidden_activations,
+            block1_dropout=block1_dropout,
+            block2_hidden_units=block2_hidden_units,
+            block2_hidden_activations=block2_hidden_activations,
+            block2_dropout=block2_dropout,
+            residual_type=residual_type,
+            output_activation=output_activation,
+        )
+
+        # Alias for CL methods
+        self.embedding_layer = self._backbone.embedding_layer
         self.block_type = block_type
-        # 如果output_activation为None，使用Identity
-        self.output_activation = get_activation(output_activation) if output_activation else nn.Identity()
-        
-        # 计算gate_out_dim（如果使用feature_gating）
+        self.use_feature_gating = use_feature_gating
+        self.hidden_dim = self._backbone.latent_dim
         if use_feature_gating:
-            self.feature_gating = FeatureGating(num_fields, gate_residual="concat")
-            gate_out_dim = embedding_dim * num_fields * 2
-        else:
-            gate_out_dim = embedding_dim * num_fields
-        
-        # 创建FinalBlock
-        self.block1 = FinalBlock(input_dim=gate_out_dim,
-                                 hidden_units=block1_hidden_units,
-                                 hidden_activations=block1_hidden_activations,
-                                 dropout_rates=block1_dropout,
-                                 batch_norm=batch_norm,
-                                 residual_type=residual_type)
-        
-        # 计算hidden_dim
-        self.hidden_dim = block1_hidden_units[-1]
-        
-        # 添加输出层（用于SingleTower模式）
-        self.fc1 = nn.Linear(block1_hidden_units[-1], 1)
-        
-        if block_type == "2B":
-            self.block2 = FinalBlock(input_dim=embedding_dim * num_fields,
-                                     hidden_units=block2_hidden_units,
-                                     hidden_activations=block2_hidden_activations,
-                                     dropout_rates=block2_dropout,
-                                     batch_norm=batch_norm,
-                                     residual_type=residual_type)
-            self.fc2 = nn.Linear(block2_hidden_units[-1], 1)
+            self.feature_gating = self._backbone.feature_gating
+        self.block1 = self._backbone.block1
 
     def get_hidden_states(self, inputs):
         """提取hidden states（返回block1的输出）"""
-        feature_emb = self.embedding_layer(inputs)
-        
-        # 如果使用feature_gating，应用gating
-        if self.use_feature_gating:
-            feature_emb = self.feature_gating(feature_emb)
-        
-        # 通过block1获取hidden states
-        hidden_states = self.block1(feature_emb.flatten(start_dim=1))
-        return hidden_states
+        return self._backbone.forward_features(inputs)
 
     def get_hidden_dim(self):
         return self.hidden_dim
 
     def get_model_return_dict(self, inputs):
-        """FinalNet的完整返回字典"""
-        # 完全复制FinalNet的forward逻辑
-        feature_emb = self.embedding_layer(inputs)
-        y_pred, y1, y2 = None, None, None
-        
-        if self.block_type == "1B":
-            y_pred = self.forward1(feature_emb)
-        elif self.block_type == "2B":
-            y1 = self.forward1(feature_emb)
-            y2 = self.forward2(feature_emb)
-            y_pred = 0.5 * (y1 + y2)
-        
-        # 应用output_activation（与原始FinalNet保持一致）
-        y_pred = self.output_activation(y_pred)
-        
-        return_dict = {"y_pred": y_pred}
-        if y1 is not None:
-            return_dict["y1"] = y1
-        if y2 is not None:
-            return_dict["y2"] = y2
-        
-        return return_dict
-
-    def forward1(self, feature_emb):
-        """FinalNet的forward1方法"""
-        if self.use_feature_gating:
-            feature_emb = self.feature_gating(feature_emb)
-        block1_out = self.block1(feature_emb.flatten(start_dim=1))
-        y_pred = self.fc1(block1_out)
-        return y_pred
-
-    def forward2(self, feature_emb):
-        """FinalNet的forward2方法"""
-        block2_out = self.block2(feature_emb.flatten(start_dim=1))
-        y_pred = self.fc2(block2_out)
-        return y_pred
+        return self._backbone.get_model_return_dict(inputs)
 
     def has_custom_loss(self):
-        """FinalNet有自定义的损失计算逻辑"""
-        return True
+        return self._backbone.has_custom_loss()
 
     def compute_custom_loss(self, return_dict, y_true, loss_fn):
-        """FinalNet的自定义损失计算 - 复制原始FinalNet.add_loss的逻辑"""
-        loss = loss_fn(return_dict["y_pred"], y_true, reduction='mean')
-        
-        if self.block_type == "2B":
-            # 注意：y1和y2需要应用output_activation（与原始FinalNet保持一致）
-            y1 = self.output_activation(return_dict["y1"])
-            y2 = self.output_activation(return_dict["y2"])
-            loss1 = loss_fn(y1, return_dict["y_pred"].detach(), reduction='mean')
-            loss2 = loss_fn(y2, return_dict["y_pred"].detach(), reduction='mean')
-            loss = loss + loss1 + loss2
-        
-        return loss
+        return self._backbone.compute_custom_loss(return_dict, y_true, loss_fn)
 
     # 对比学习相关方法实现
     def _extract_single_field_embedding(self, field_name, single_field_dict):
