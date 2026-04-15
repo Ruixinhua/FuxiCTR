@@ -1,0 +1,97 @@
+# =========================================================================
+# Copyright (C) 2024. The FuxiCTR Library. All rights reserved.
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# =========================================================================
+
+"""
+Run experiment for TAAC2026 dataset.
+
+Usage:
+    python run_expid_taac2026.py --config ./config/model_config/taac2026_deepfm.yaml \
+                                 --expid DeepFM_taac2026_sample --gpu -1
+"""
+
+import os
+import sys
+# Ensure local project's fuxictr takes precedence over installed package
+_experiment_dir = os.path.dirname(os.path.realpath(__file__))
+_project_root = os.path.dirname(_experiment_dir)
+sys.path.insert(0, _project_root)
+os.chdir(_experiment_dir)
+import logging
+from fuxictr.utils import load_config, set_logger, print_to_json, save_results_to_csv
+from fuxictr.features import FeatureMap
+from fuxictr.pytorch.dataloaders import RankDataLoader
+from fuxictr.pytorch.torch_utils import seed_everything
+from fuxictr.preprocess import build_dataset
+from fuxictr.datasets.taac2026 import CustomizedFeatureProcessor
+import model_zoo
+import gc
+import argparse
+from pathlib import Path
+
+
+if __name__ == '__main__':
+    ''' Usage: python run_expid_taac2026.py --config {config_dir} --expid {experiment_id} --gpu {gpu_device_id}
+    '''
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, default='./config/', help='The config directory.')
+    parser.add_argument('--expid', type=str, default='DeepFM_taac2026_sample', help='The experiment id to run.')
+    parser.add_argument('--gpu', type=int, default=-1, help='The gpu index, -1 for cpu')
+    parser.add_argument('--save_predictions', action='store_true', 
+                        help='Whether to save prediction results for model ensemble')
+    parser.add_argument('--predictions_dir', type=str, default='./predictions', 
+                        help='Directory to save prediction results')
+    args = vars(parser.parse_args())
+    
+    experiment_id = args['expid']
+    params = load_config(args['config'], experiment_id)
+    params['gpu'] = args['gpu']
+    set_logger(params)
+    logging.info("Params: " + print_to_json(params))
+    seed_everything(seed=params['seed'])
+
+    data_dir = os.path.join(params['data_root'], params['dataset_id'])
+    feature_map_json = os.path.join(data_dir, "feature_map.json")
+    # Build feature_map and transform data
+    feature_encoder = CustomizedFeatureProcessor(**params)
+    params["train_data"], params["valid_data"], params["test_data"] = \
+        build_dataset(feature_encoder, **params)
+    feature_map = FeatureMap(params['dataset_id'], data_dir)
+    feature_map.load(feature_map_json, params)
+    logging.info("Feature specs: " + print_to_json(feature_map.features))
+    
+    model_class = getattr(model_zoo, params['model'])
+    model = model_class(feature_map, **params)
+    model.count_parameters()  # print number of parameters used in model
+
+    train_gen, valid_gen = RankDataLoader(feature_map, stage='train', **params).make_iterator()
+    model.fit(train_gen, validation_data=valid_gen, **params)
+
+    logging.info('****** Validation evaluation ******')
+    valid_result = model.evaluate(valid_gen, save_predictions=args['save_predictions'], 
+                                  save_dir=os.path.join(args['predictions_dir'], 'validation'))
+    del train_gen, valid_gen
+    gc.collect()
+    
+    test_result = {}
+    if params["test_data"]:
+        logging.info('******** Test evaluation ********')
+        test_gen = RankDataLoader(feature_map, stage='test', **params).make_iterator()
+        test_result = model.evaluate(test_gen, save_predictions=args['save_predictions'], 
+                                     save_dir=os.path.join(args['predictions_dir'], 'test'))
+
+    # Save results
+    result_filename = Path(args['config']).name.replace(".yaml", "") + '.csv'
+    save_results_to_csv(params, experiment_id, result_filename, valid_result, test_result)

@@ -43,6 +43,8 @@ if __name__ == '__main__':
     parser.add_argument('--predictions_dir', type=str, default='./predictions', help='Directory to save prediction results')
     parser.add_argument('--tunner_params_key', type=str, default=None,
                         help='Parameters for hyper-parameter tuning, in format of key1,key2,...,')
+    parser.add_argument('--profile', action='store_true',
+                        help='Enable training efficiency profiler (time, memory, throughput, params).')
     args = vars(parser.parse_args())
     
     experiment_id = args['expid']
@@ -70,6 +72,12 @@ if __name__ == '__main__':
     # Print model structure
     logging.info("Model structure:")
     logging.info(str(model))
+
+    # Attach training profiler if requested
+    profiler = None
+    if args.get('profile'):
+        from fuxictr.pytorch.training_profiler import TrainingProfiler
+        profiler = TrainingProfiler.attach(model, enabled=True)
 
     train_gen, valid_gen = RankDataLoader(feature_map, stage='train', **params).make_iterator()
     model.fit(train_gen, validation_data=valid_gen, **params)
@@ -120,6 +128,15 @@ if __name__ == '__main__':
             }
         else:
             test_result = model.evaluate(test_gen, save_predictions=args['save_predictions'], save_dir=os.path.join(args['predictions_dir'], 'test'))
+    # Save profiler results if profiling was enabled
+    if profiler is not None:
+        # Measure inference latency on test data
+        if params.get("test_data"):
+            test_gen_for_latency = RankDataLoader(feature_map, stage='test', **params).make_iterator()
+            profiler.measure_inference_latency(test_gen_for_latency, warmup=10, repeats=100)
+        profiler_path = os.path.join(model.model_dir, model.model_id + "_profiler.json")
+        profiler.save_json(profiler_path)
+
     # 使用抽离的保存函数
     result_filename = Path(args['config']).name.replace(".yaml", "") + '.csv'
     save_results_to_csv(params, experiment_id, result_filename, valid_result, test_result)
