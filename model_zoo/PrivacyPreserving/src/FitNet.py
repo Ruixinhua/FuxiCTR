@@ -49,7 +49,7 @@ import os
 
 from fuxictr.pytorch.models import BaseModel
 from fuxictr.pytorch.torch_utils import FeatureSeparator, get_optimizer
-from ..backbone import build_backbone
+from fuxictr.pytorch.backbone import build_backbone
 
 
 class FitNet(BaseModel):

@@ -45,9 +45,12 @@ class DTDN(BaseModel):
                  gpu=-1,
                  learning_rate=1e-3,
                  embedding_dim=10,
-                 # Tower backbone type
-                 tower_type="PNN",
-                 np_tower_type=None,  # defaults to tower_type
+                 # Tower backbone types
+                 tower_type="PNN",        # backbone for Tower A (personalized)
+                 tower_b_type=None,       # backbone for Tower B; defaults to tower_type
+                 np_tower_type=None,      # backbone for NP pathway; defaults to tower_type
+                 # Parameter sharing between Tower A and Tower B
+                 share_tower_params=False, # if True, Tower B = Tower A (shared weights)
                  # Feature separation
                  personalization_feature_list=None,
                  personalization_field="is_personalization",
@@ -91,7 +94,9 @@ class DTDN(BaseModel):
                                    **kwargs)
 
         self.tower_type = tower_type
+        self.tower_b_type = tower_b_type or tower_type
         self.np_tower_type = np_tower_type or tower_type
+        self.share_tower_params = share_tower_params
         self.distance_loss_weight = distance_loss_weight
         self.tower_a_loss_weight = tower_a_loss_weight
         self.tower_b_loss_weight = tower_b_loss_weight
@@ -111,16 +116,15 @@ class DTDN(BaseModel):
             self.personalization_feature_list, self.feature_map
         )
 
-        # Backbone params passed to all tower adapters
-        adapter_kwargs = dict(
+        # Backbone params passed to all tower builders
+        backbone_kwargs = dict(
             embedding_dim=embedding_dim,
             output_activation=self.output_activation,
-            output_mode="SingleTower",
             # PNN
             product_type=product_type,
             hidden_units=hidden_units,
             hidden_activations=hidden_activations,
-            dropout_rates=net_dropout,
+            net_dropout=net_dropout,
             batch_norm=batch_norm,
             # FinalNet
             block_type=block_type,
@@ -141,17 +145,24 @@ class DTDN(BaseModel):
             num_heads=num_heads,
         )
 
-        # Create three towers with independent parameters
-        self.tower_a = self._build_tower(self.tower_type, adapter_kwargs)
-        self.tower_b = self._build_tower(self.tower_type, adapter_kwargs)
-        self.np_pathway = self._build_tower(self.np_tower_type, adapter_kwargs)
+        # Create towers
+        self.tower_a = self._build_tower(self.tower_type, backbone_kwargs)
+        if self.share_tower_params:
+            # Paper Sec 3.1.2: towers "can be configured to either share
+            # parameters or operate as independent models"
+            self.tower_b = self.tower_a
+            logging.info("Tower A and B share parameters")
+        else:
+            self.tower_b = self._build_tower(self.tower_b_type, backbone_kwargs)
+        self.np_pathway = self._build_tower(self.np_tower_type, backbone_kwargs)
 
         self.compile(kwargs["optimizer"], kwargs["loss"], learning_rate)
         self.reset_parameters()
         self.model_to_device()
 
-        logging.info(f"DTDN initialized: towers={tower_type}, NP={self.np_tower_type}, "
-                     f"β={distance_loss_weight}")
+        logging.info(f"DTDN initialized: tower_a={tower_type}, tower_b={self.tower_b_type}"
+                     f"{'(shared)' if share_tower_params else ''}, "
+                     f"NP={self.np_tower_type}, β={distance_loss_weight}")
 
     def _build_tower(self, tower_type, kwargs):
         from fuxictr.pytorch.backbone import build_backbone

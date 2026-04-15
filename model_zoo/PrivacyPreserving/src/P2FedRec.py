@@ -82,7 +82,7 @@ import math
 
 from fuxictr.pytorch.models import BaseModel
 from fuxictr.pytorch.torch_utils import FeatureSeparator
-from ..backbone import build_backbone
+from fuxictr.pytorch.backbone import build_backbone
 
 
 class P2FedRec(BaseModel):
