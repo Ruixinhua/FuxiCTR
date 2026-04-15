@@ -43,7 +43,7 @@ if __name__ == '__main__':
     parser.add_argument('--predictions_dir', type=str, default='./predictions', help='Directory to save prediction results')
     parser.add_argument('--tunner_params_key', type=str, default=None,
                         help='Parameters for hyper-parameter tuning, in format of key1,key2,...,')
-    parser.add_argument('--profile', action='store_true',
+    parser.add_argument('--profile', type=int, default=1,
                         help='Enable training efficiency profiler (time, memory, throughput, params).')
     args = vars(parser.parse_args())
     
