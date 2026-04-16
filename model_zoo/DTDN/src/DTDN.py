@@ -15,20 +15,26 @@
 
 """
 DTDN: Dual-Tower Distillation Networks for Robust Ads Recommendation
-      under Personalized-Feature Constraints (SIGIR 2026)
+      under Personalized-Feature Constraints
 
-Architecture:
-  1. Foundational Dual-Tower (Tower A + Tower B):
-     - Two parallel FI towers with independent parameters
-     - Both process all data with all features
-     - Output masking: Tower A for personalized samples, Tower B for non-personalized
-     - Foundation prediction: y_F = y_A + y_B  (Eq. 3)
-  2. KD-Guided Non-Personalized Pathway:
-     - Separate FI + PL processing only non-personalized features
-     - Distance-based KD loss: BCE(|y_F - y_NP|, y_true) on NP samples  (Eq. 5-6)
+Architecture (two towers):
+  - Tower A (teacher): full features, serves PER users at inference
+  - Tower B (student): NP features only (DTDN) or full features (DT-only),
+    serves NP users at inference
 
-Training:
-  L_total = L_base + β * L_dis + L_reg   (Eq. 7)
+Training: **only on PER data (group_id=1)**
+  - Tower A: BCE(y_A, y) on PER data with full features
+  - Tower B: BCE(y_B, y) on PER data with NP features only
+  - Distance KD: BCE(|y_A - y_B|, y) on PER data — teacher signal from A to B
+
+Operating Modes:
+  - DT-only (β=0): Tower B sees full features, no KD
+  - DTDN   (β>0): Tower B sees NP features only, with distance KD from Tower A
+
+Inference: PER → Tower A, NP → Tower B
+
+Loss:
+  L_total = α_A * L_A + α_B * L_B + β * L_dis + L_reg
 """
 
 import torch
@@ -46,18 +52,18 @@ class DTDN(BaseModel):
                  learning_rate=1e-3,
                  embedding_dim=10,
                  # Tower backbone types
-                 tower_type="PNN",        # backbone for Tower A (personalized)
-                 tower_b_type=None,       # backbone for Tower B; defaults to tower_type
-                 np_tower_type=None,      # backbone for NP pathway; defaults to tower_type
-                 # Parameter sharing between Tower A and Tower B
-                 share_tower_params=False, # if True, Tower B = Tower A (shared weights)
+                 tower_type="PNN",        # backbone for Tower A (teacher)
+                 tower_b_type=None,       # backbone for Tower B (student); defaults to tower_type
+                 # Embedding sharing
+                 share_embedding=True,
                  # Feature separation
                  personalization_feature_list=None,
                  personalization_field="is_personalization",
                  # Loss weights
-                 distance_loss_weight=100.0,  # β in paper (optimal range ~80-150)
-                 tower_a_loss_weight=1.0,
-                 tower_b_loss_weight=1.0,
+                 distance_loss_weight=100.0,  # β: distance KD loss weight
+                 tower_a_loss_weight=1.0,     # α_A: Tower A BCE weight
+                 tower_b_loss_weight=1.0,     # α_B: Tower B BCE weight
+                 # ── Shared backbone defaults ──
                  # PNN backbone params
                  hidden_units=[400, 400, 400],
                  hidden_activations="relu",
@@ -81,6 +87,8 @@ class DTDN(BaseModel):
                  shallow_net_dropout=0.1,
                  layer_norm=True,
                  num_heads=8,
+                 # Per-tower overrides
+                 tower_b_config=None,     # e.g. {"block1_hidden_units": [400]}
                  # Regularization
                  embedding_regularizer=None,
                  net_regularizer=None,
@@ -95,8 +103,7 @@ class DTDN(BaseModel):
 
         self.tower_type = tower_type
         self.tower_b_type = tower_b_type or tower_type
-        self.np_tower_type = np_tower_type or tower_type
-        self.share_tower_params = share_tower_params
+        self.share_embedding = share_embedding
         self.distance_loss_weight = distance_loss_weight
         self.tower_a_loss_weight = tower_a_loss_weight
         self.tower_b_loss_weight = tower_b_loss_weight
@@ -111,13 +118,13 @@ class DTDN(BaseModel):
             logging.info(f"Personalization features ({len(self.personalization_feature_list)}): "
                          f"{self.personalization_feature_list}")
 
-        # Feature separator: masks personalized features for NP pathway
+        # Feature separator: masks personalized features for Tower B in DTDN mode
         self.feature_separator = FeatureSeparator(
             self.personalization_feature_list, self.feature_map
         )
 
-        # Backbone params passed to all tower builders
-        backbone_kwargs = dict(
+        # Backbone default params
+        backbone_defaults = dict(
             embedding_dim=embedding_dim,
             output_activation=self.output_activation,
             # PNN
@@ -145,24 +152,24 @@ class DTDN(BaseModel):
             num_heads=num_heads,
         )
 
-        # Create towers
-        self.tower_a = self._build_tower(self.tower_type, backbone_kwargs)
-        if self.share_tower_params:
-            # Paper Sec 3.1.2: towers "can be configured to either share
-            # parameters or operate as independent models"
-            self.tower_b = self.tower_a
-            logging.info("Tower A and B share parameters")
-        else:
-            self.tower_b = self._build_tower(self.tower_b_type, backbone_kwargs)
-        self.np_pathway = self._build_tower(self.np_tower_type, backbone_kwargs)
+        tower_a_kwargs = backbone_defaults
+        tower_b_kwargs = {**backbone_defaults, **(tower_b_config or {})}
+
+        # Two towers only
+        self.tower_a = self._build_tower(self.tower_type, tower_a_kwargs)
+        self.tower_b = self._build_tower(self.tower_b_type, tower_b_kwargs)
+
+        # Embedding sharing
+        if self.share_embedding:
+            self.tower_b.embedding_layer = self.tower_a.embedding_layer
+            logging.info("Tower B shares embedding layer with Tower A")
 
         self.compile(kwargs["optimizer"], kwargs["loss"], learning_rate)
         self.reset_parameters()
         self.model_to_device()
 
-        logging.info(f"DTDN initialized: tower_a={tower_type}, tower_b={self.tower_b_type}"
-                     f"{'(shared)' if share_tower_params else ''}, "
-                     f"NP={self.np_tower_type}, β={distance_loss_weight}")
+        logging.info(f"DTDN initialized: tower_a={tower_type}, tower_b={self.tower_b_type}, "
+                     f"share_emb={share_embedding}, β={distance_loss_weight}")
 
     def _build_tower(self, tower_type, kwargs):
         from fuxictr.pytorch.backbone import build_backbone
@@ -185,107 +192,91 @@ class DTDN(BaseModel):
         per_mask = self._get_personalization_mask(X)  # [B], True = personalized
 
         # Feature preparation
-        #   full_features:   inputs unchanged (personalized features intact)
-        #   masked_features: personalized features zeroed for personalized users
-        #                    (NP users already have default/padding values)
         full_features, masked_features = self.feature_separator.separate_features(
             X, per_mask
         )
 
-        # ── Tower A & B: both process full_features ──
+        # ── Tower A: always uses full features ──
         ta_dict = self.tower_a.get_model_return_dict(full_features)
-        tb_dict = self.tower_b.get_model_return_dict(full_features)
         y_ta = ta_dict["y_pred"]  # [B, 1]
+
+        # ── Tower B: NP features in DTDN mode, full features in DT-only mode ──
+        if self.distance_loss_weight > 0:
+            tb_dict = self.tower_b.get_model_return_dict(masked_features)
+        else:
+            tb_dict = self.tower_b.get_model_return_dict(full_features)
         y_tb = tb_dict["y_pred"]  # [B, 1]
 
-        # Output masking (Eq. 1-3)
+        # ── Inference routing: PER → Tower A, NP → Tower B ──
         pm = per_mask.float()
         if y_ta.dim() == 2:
             pm = pm.unsqueeze(-1)
-        y_a = y_ta * pm              # personalized predictions only
-        y_b = y_tb * (1.0 - pm)      # non-personalized predictions only
-        y_f = y_a + y_b              # foundation prediction
-
-        # ── NP Pathway: uses masked_features ──
-        np_dict = self.np_pathway.get_model_return_dict(masked_features)
-        y_np = np_dict["y_pred"]     # [B, 1]
-
-        # Evaluation prediction: use foundation prediction y_f
-        # Paper Sec 4.4: "the auxiliary pipeline is thus not required at
-        # inference, and its benefits are absorbed into the trained
-        # non-personalized tower."  Tower B handles NP users.
-        y_pred = y_f
+        y_pred = torch.where(pm > 0.5, y_ta, y_tb)
 
         return {
-            "y_pred": y_pred,       # for evaluation (= y_f)
-            "y_f": y_f,             # foundation prediction (for loss)
-            "y_np": y_np,           # NP pathway prediction (for loss)
-            "y_ta": y_ta,           # Tower A raw prediction
-            "y_tb": y_tb,           # Tower B raw prediction
+            "y_pred": y_pred,       # routed prediction for evaluation
+            "y_ta": y_ta,           # Tower A prediction (teacher)
+            "y_tb": y_tb,           # Tower B prediction (student)
             "per_mask": per_mask,   # personalization mask
             "ta_dict": ta_dict,     # full Tower A output (for custom loss)
             "tb_dict": tb_dict,     # full Tower B output (for custom loss)
-            "np_dict": np_dict,     # full NP output (for custom loss)
         }
 
     # ─────────────────────────────────────────────────────────────
-    # Loss
+    # Loss — trained only on PER data (group_id=1)
     # ─────────────────────────────────────────────────────────────
 
     def add_loss(self, return_dict, y_true):
         per_mask = return_dict["per_mask"]
-        np_mask = ~per_mask
         per_count = per_mask.sum().item()
-        np_count = np_mask.sum().item()
 
         total_loss = torch.tensor(0.0, device=y_true.device)
-        total_count = per_count + np_count
 
-        # ═══════ Base Loss (Eq. 4): L_base = (1/B) Σ ℓ(y_F, y) ═══════
-        # Because y_F = y_ta for PER samples and y_tb for NP samples (output
-        # masking), we compute each tower's loss on its subset and weight by
-        # the subset proportion so the combined loss equals the paper's
-        # mean-over-batch formulation.
+        if per_count == 0:
+            # No PER data in this batch — skip training
+            total_loss += self.regularization_loss()
+            return total_loss
 
-        # Tower A loss — personalized samples only
-        if per_count > 0:
-            ta_dict = return_dict["ta_dict"]
-            if self.tower_a.has_custom_loss():
-                masked = {k: (v[per_mask] if isinstance(v, torch.Tensor) else v)
-                          for k, v in ta_dict.items()}
-                ta_loss = self.tower_a.compute_custom_loss(
-                    masked, y_true[per_mask], self.loss_fn)
-            else:
-                ta_loss = self.loss_fn(
-                    ta_dict["y_pred"][per_mask], y_true[per_mask], reduction='mean')
-            total_loss = total_loss + self.tower_a_loss_weight * ta_loss * (per_count / total_count)
+        y_true_per = y_true[per_mask]
 
-        # Tower B loss — non-personalized samples only
-        if np_count > 0:
-            tb_dict = return_dict["tb_dict"]
-            if self.tower_b.has_custom_loss():
-                masked = {k: (v[np_mask] if isinstance(v, torch.Tensor) else v)
-                          for k, v in tb_dict.items()}
-                tb_loss = self.tower_b.compute_custom_loss(
-                    masked, y_true[np_mask], self.loss_fn)
-            else:
-                tb_loss = self.loss_fn(
-                    tb_dict["y_pred"][np_mask], y_true[np_mask], reduction='mean')
-            total_loss = total_loss + self.tower_b_loss_weight * tb_loss * (np_count / total_count)
+        # ═══════ Tower A BCE on PER data ═══════
+        ta_dict = return_dict["ta_dict"]
+        if self.tower_a.has_custom_loss():
+            masked = {k: (v[per_mask] if isinstance(v, torch.Tensor) else v)
+                      for k, v in ta_dict.items()}
+            ta_loss = self.tower_a.compute_custom_loss(
+                masked, y_true_per, self.loss_fn)
+        else:
+            ta_loss = self.loss_fn(
+                ta_dict["y_pred"][per_mask], y_true_per, reduction='mean')
+        total_loss = total_loss + self.tower_a_loss_weight * ta_loss
 
-        # ═══════ Distance Loss (Eq. 5-6): KD on NP samples ═══════
-        if np_count > 0 and self.distance_loss_weight > 0:
-            y_f_np = return_dict["y_f"][np_mask]     # foundation pred for NP
-            y_np = return_dict["y_np"][np_mask]       # NP pathway pred for NP
-            y_true_np = y_true[np_mask]
+        # ═══════ Tower B BCE on PER data (NP features only in DTDN mode) ═══════
+        tb_dict = return_dict["tb_dict"]
+        if self.tower_b.has_custom_loss():
+            masked = {k: (v[per_mask] if isinstance(v, torch.Tensor) else v)
+                      for k, v in tb_dict.items()}
+            tb_loss = self.tower_b.compute_custom_loss(
+                masked, y_true_per, self.loss_fn)
+        else:
+            tb_loss = self.loss_fn(
+                tb_dict["y_pred"][per_mask], y_true_per, reduction='mean')
+        total_loss = total_loss + self.tower_b_loss_weight * tb_loss
 
-            # Per-sample L1 distance (Eq. 5)
-            d_dis = torch.abs(y_f_np - y_np)
+        # ═══════ Distance KD loss on PER data ═══════
+        if self.distance_loss_weight > 0:
+            y_ta_per = return_dict["y_ta"][per_mask]
+            y_tb_per = return_dict["y_tb"][per_mask]
+
+            # |y_A - y_B|: how far student is from teacher
+            d_dis = torch.abs(y_ta_per - y_tb_per)
             d_dis = torch.clamp(d_dis, 1e-7, 1.0 - 1e-7)
 
-            # BCE on distance (Eq. 6)
+            # BCE(distance, y_true): distance should be small when y=0,
+            # large when y=1 (teacher-student agreement matters more on
+            # positive samples)
             l_dis = F.binary_cross_entropy(
-                d_dis.view(-1), y_true_np.view(-1).float(), reduction='mean')
+                d_dis.view(-1), y_true_per.view(-1).float(), reduction='mean')
 
             total_loss = total_loss + self.distance_loss_weight * l_dis
 
