@@ -69,6 +69,7 @@ class PrerankingStage(BaseStage):
         # Filter feature_map to only include allowed features (FG1, FG2)
         self.feature_map = filter_feature_map(feature_map, feature_group_manager, self.allowed_feature_groups,
                                               use_feature_encoder=model_params.get("use_feature_encoder", False))
+        self._log_active_feature_summary()
         self.feature_map.default_emb_dim = model_params['embedding_dim']
         self.use_logit = model_params.get('use_logit', True)
         self.top_k = top_k
@@ -100,6 +101,44 @@ class PrerankingStage(BaseStage):
         self.inference_batch_size = model_params.get('inference_batch_size', 50000)
         # Item features storage for lookups during evaluation/processing
         self.item_features_df = None
+
+    def _log_active_feature_summary(self):
+        """Log the feature groups that are actually retained in this stage's filtered feature_map."""
+        impression_col = getattr(self.feature_map, 'dataset_config', {}).get('impression_id_col', 'impression_id')
+        special_cols = {impression_col, 'group_id', 'click', 'clk', 'label', *self.feature_map.labels}
+
+        active_model_features = [
+            name for name in self.feature_map.features.keys()
+            if name not in special_cols
+        ]
+
+        group_buckets = {
+            FeatureGroup.FG1: [],
+            FeatureGroup.FG2: [],
+            FeatureGroup.FG3: [],
+        }
+        unassigned = []
+
+        for feat_name in active_model_features:
+            group = self.feature_group_manager.feature_assignments.get(feat_name)
+            if group in group_buckets:
+                group_buckets[group].append(feat_name)
+            else:
+                unassigned.append(feat_name)
+
+        self.logger.info(
+            "Active model features after filtering: total=%d, FG1=%d, FG2=%d, FG3=%d, unassigned=%d",
+            len(active_model_features),
+            len(group_buckets[FeatureGroup.FG1]),
+            len(group_buckets[FeatureGroup.FG2]),
+            len(group_buckets[FeatureGroup.FG3]),
+            len(unassigned),
+        )
+        self.logger.info("Active FG1 Features: %s", ", ".join(group_buckets[FeatureGroup.FG1]) or "(none)")
+        self.logger.info("Active FG2 Features: %s", ", ".join(group_buckets[FeatureGroup.FG2]) or "(none)")
+        self.logger.info("Active FG3 Features: %s", ", ".join(group_buckets[FeatureGroup.FG3]) or "(none)")
+        if unassigned:
+            self.logger.info("Active Unassigned Features: %s", ", ".join(unassigned))
 
     def load_item_features(self, item_pool_path: str):
         """Load item features from parquet file for inference lookup"""

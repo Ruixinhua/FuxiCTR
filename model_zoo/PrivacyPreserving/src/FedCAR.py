@@ -87,6 +87,8 @@ class FedCAR(BaseModel):
                  prototype_weight=0.1,           # prototype alignment weight
                  base_loss_weight=1.0,           # device BCE weight
                  cloud_loss_weight=1.0,          # cloud BCE weight
+                 # Inference routing
+                 inference_model="auto",         # "auto", "cloud", "device"
                  # Feature separation
                  personalization_feature_list=None,
                  personalization_field="is_personalization",
@@ -132,6 +134,7 @@ class FedCAR(BaseModel):
         self.prototype_weight = prototype_weight
         self.base_loss_weight = base_loss_weight
         self.cloud_loss_weight = cloud_loss_weight
+        self.inference_model = inference_model
         self.personalization_feature_list = personalization_feature_list or []
         self.personalization_field = personalization_field
 
@@ -265,12 +268,17 @@ class FedCAR(BaseModel):
         cloud_proj = self.cloud_projector(cloud_latent)
         device_proj = self.device_projector(device_latent)
 
-        # Route
-        final_pred = torch.zeros_like(device_y_pred)
-        if personalized_mask.any():
-            final_pred[personalized_mask] = cloud_y_pred[personalized_mask]
-        if non_personalized_mask.any():
-            final_pred[non_personalized_mask] = device_y_pred[non_personalized_mask]
+        # Route predictions based on inference_model setting
+        if self.inference_model == "cloud":
+            final_pred = cloud_y_pred
+        elif self.inference_model == "device":
+            final_pred = device_y_pred
+        else:  # "auto" — original routing
+            final_pred = torch.zeros_like(device_y_pred)
+            if personalized_mask.any():
+                final_pred[personalized_mask] = cloud_y_pred[personalized_mask]
+            if non_personalized_mask.any():
+                final_pred[non_personalized_mask] = device_y_pred[non_personalized_mask]
 
         return_dict = {
             "y_pred": final_pred,

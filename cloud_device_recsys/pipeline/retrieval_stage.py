@@ -83,8 +83,9 @@ class RetrievalStage(BaseStage):
         self.chunk_size = model_params.get('chunk_size', 50000)
         # Negative sampling parameters
         self.num_negatives = model_params.get('num_negatives', 0)
-        self.loss_type = model_params.get('loss_type', 'bpr')  # 'bpr', 'margin', 'softmax'
+        self.loss_type = model_params.get('loss_type', 'bpr')  # 'bpr', 'margin', 'softmax', 'sampled_softmax'
         self.margin = model_params.get('margin', 1.0)
+        self.use_in_batch_negatives = model_params.get('use_in_batch_negatives', False)
         self.use_diversity_loss = model_params.get('use_diversity_loss', False)
         self.negative_sampler: Optional[NegativeSampler] = None
         # Item index for retrieval
@@ -126,14 +127,16 @@ class RetrievalStage(BaseStage):
         
         # Initialize negative sampler if using negative sampling
         use_negative_sampling = self.num_negatives > 0 and item_features_df is not None
+        use_pairwise_training = use_negative_sampling or self.use_in_batch_negatives
         if use_negative_sampling:
             item_id_col = getattr(self.feature_map, 'dataset_config', {}).get('item_id_col', 'cand_item_id')
             self.negative_sampler = NegativeSampler(item_features_df, item_id_col=item_id_col)
             self.logger.info(f"Negative Sampling: {self.num_negatives} negatives per positive, loss_type={self.loss_type}")
-        else:
-            if self.num_negatives > 0 and item_features_df is None:
-                self.logger.warning("num_negatives > 0 but item_features_df not provided. Using standard training.")
-        
+        if self.use_in_batch_negatives:
+            self.logger.info("In-batch negatives enabled (cross-entropy over batch)")
+        if not use_negative_sampling and self.num_negatives > 0 and item_features_df is None:
+            self.logger.warning("num_negatives > 0 but item_features_df not provided. Using standard training.")
+
         self.logger.info(f"Start Training: epochs={epochs}, monitor={self.monitor}")
         
         best_metric = -np.inf if mode == "max" else np.inf
@@ -151,7 +154,7 @@ class RetrievalStage(BaseStage):
             self.logger.info(f"*** Epoch {epoch+1} ***")
             
             # Choose training method based on negative sampling
-            if use_negative_sampling:
+            if use_pairwise_training:
                 self.train_epoch_with_negatives(train_data)
             else:
                 self.train_epoch(train_data)
@@ -226,7 +229,7 @@ class RetrievalStage(BaseStage):
         train_loss = 0
         total_batches = 0
         
-        if self.negative_sampler is None:
+        if self.negative_sampler is None and self.num_negatives > 0:
             raise ValueError("Negative sampler not initialized. Call train() with item_features_df.")
         
         item_id_col = getattr(self.feature_map, 'dataset_config', {}).get('item_id_col', 'cand_item_id')
@@ -247,61 +250,88 @@ class RetrievalStage(BaseStage):
             pos_item_ids = batch_dict[item_id_col].cpu().numpy()
             
             # Sample negative items for each positive: [B, num_negatives]
-            neg_item_ids = self.negative_sampler.sample_negatives_batch(
-                pos_item_ids, self.num_negatives
-            )
+            if self.num_negatives > 0 and self.negative_sampler is not None:
+                neg_item_ids = self.negative_sampler.sample_negatives_batch(
+                    pos_item_ids, self.num_negatives
+                )
+            else:
+                neg_item_ids = None
             
             # Compute positive embeddings
             pos_user_emb = self.model.get_user_embedding(batch_data)  # [B, D]
             pos_item_emb = self.model.get_item_embedding(batch_data)  # [B, D]
-            pos_scores = self.model.cal_similarity(pos_user_emb, pos_item_emb)  # [B, 1]
-            
-            # === Optimized: Batch all negatives into single embedding call ===
-            # Flatten: [B, num_neg] -> [B * num_neg]
-            neg_ids_flat = neg_item_ids.reshape(-1)
-            
-            # Get features for all negatives at once
-            neg_features = self.negative_sampler.get_features_by_ids(neg_ids_flat)
-            
-            # Build batched negative dict
-            neg_batch_dict = {}
-            for key, val in batch_dict.items():
-                if key == item_id_col:
-                    neg_batch_dict[key] = torch.tensor(neg_ids_flat, device=self.model.device)
-                elif key in neg_features.columns:
-                    val = neg_features[key].to_numpy(copy=False)
-                    if not np.isscalar(val[0]):
-                        val = np.vstack(val)  # Ensure 2D for multi-valued features
-                    neg_batch_dict[key] = torch.tensor(val, device=self.model.device)
-                else:
-                    # Repeat user features along batch dimension: [B, ...] -> [B * num_neg, ...]
-                    if hasattr(val, 'to'):
-                        val = val.to(self.model.device)
-                        # Repeat each element num_negatives times along batch dim (dim=0)
-                        neg_batch_dict[key] = val.repeat_interleave(self.num_negatives, dim=0)
+            # Use raw logits (no sigmoid) for pairwise losses to avoid double activation
+            pos_scores = self.model.cal_similarity_raw(pos_user_emb, pos_item_emb)  # [B, 1]
+
+            # === In-batch negatives: use other items in the batch as negatives ===
+            if self.use_in_batch_negatives:
+                # user_emb [B, D] x item_emb [B, D]^T -> [B, B] all-pairs scores
+                in_batch_scores = torch.matmul(pos_user_emb, pos_item_emb.t()) / self.model.temperature  # [B, B]
+                # Positive scores are on the diagonal
+                # Use cross-entropy: target is diagonal (index i for row i)
+                in_batch_targets = torch.arange(batch_size, device=self.model.device)
+                in_batch_loss = torch.nn.functional.cross_entropy(in_batch_scores, in_batch_targets)
+
+            # === Explicit negatives (if num_negatives > 0) ===
+            if self.num_negatives > 0 and neg_item_ids is not None:
+                # Flatten: [B, num_neg] -> [B * num_neg]
+                neg_ids_flat = neg_item_ids.reshape(-1)
+
+                # Get features for all negatives at once
+                neg_features = self.negative_sampler.get_features_by_ids(neg_ids_flat)
+
+                # Build batched negative dict
+                neg_batch_dict = {}
+                for key, val in batch_dict.items():
+                    if key == item_id_col:
+                        neg_batch_dict[key] = torch.tensor(neg_ids_flat, device=self.model.device)
+                    elif key in neg_features.columns:
+                        val = neg_features[key].to_numpy(copy=False)
+                        if not np.isscalar(val[0]):
+                            val = np.vstack(val)  # Ensure 2D for multi-valued features
+                        neg_batch_dict[key] = torch.tensor(val, device=self.model.device)
                     else:
-                        neg_batch_dict[key] = val
-            
-            # Single call for all negative embeddings: [B * num_neg, D]
-            neg_item_emb_flat = self.model.get_item_embedding(neg_batch_dict)
-            
-            # Repeat user embedding and compute all similarities at once
-            pos_user_emb_repeated = pos_user_emb.repeat_interleave(self.num_negatives, dim=0)  # [B * num_neg, D]
-            neg_scores_flat = self.model.cal_similarity(pos_user_emb_repeated, neg_item_emb_flat)  # [B * num_neg, 1]
-            
-            # Reshape: [B * num_neg, 1] -> [B, num_neg]
-            neg_scores = neg_scores_flat.view(batch_size, self.num_negatives)
-            
-            # Compute pairwise ranking loss
-            if self.loss_type == 'bpr':
-                loss = bpr_loss(pos_scores, neg_scores)
-            elif self.loss_type == 'margin':
-                loss = margin_ranking_loss(pos_scores, neg_scores, margin=self.margin)
-            elif self.loss_type == 'softmax':
-                loss = softmax_cross_entropy_loss(pos_scores, neg_scores)
+                        # Repeat user features along batch dimension: [B, ...] -> [B * num_neg, ...]
+                        if hasattr(val, 'to'):
+                            val = val.to(self.model.device)
+                            neg_batch_dict[key] = val.repeat_interleave(self.num_negatives, dim=0)
+                        else:
+                            neg_batch_dict[key] = val
+
+                # Single call for all negative embeddings: [B * num_neg, D]
+                neg_item_emb_flat = self.model.get_item_embedding(neg_batch_dict)
+
+                # Repeat user embedding and compute all similarities at once (raw logits)
+                pos_user_emb_repeated = pos_user_emb.repeat_interleave(self.num_negatives, dim=0)
+                neg_scores_flat = self.model.cal_similarity_raw(pos_user_emb_repeated, neg_item_emb_flat)
+
+                # Reshape: [B * num_neg, 1] -> [B, num_neg]
+                neg_scores = neg_scores_flat.view(batch_size, self.num_negatives)
             else:
-                raise ValueError(f"Unknown loss_type: {self.loss_type}")
-            
+                neg_scores = None
+
+            # Compute pairwise ranking loss
+            loss = torch.tensor(0.0, device=self.model.device)
+
+            # Explicit negative loss (if we have sampled negatives)
+            if neg_scores is not None:
+                if self.loss_type == 'bpr':
+                    loss = loss + bpr_loss(pos_scores, neg_scores)
+                elif self.loss_type == 'margin':
+                    loss = loss + margin_ranking_loss(pos_scores, neg_scores, margin=self.margin)
+                elif self.loss_type in ('softmax', 'sampled_softmax'):
+                    loss = loss + softmax_cross_entropy_loss(pos_scores, neg_scores)
+                else:
+                    raise ValueError(f"Unknown loss_type: {self.loss_type}")
+
+            # In-batch negative loss (always cross-entropy over the batch)
+            if self.use_in_batch_negatives:
+                if neg_scores is not None:
+                    # Combine: weight explicit + in-batch equally
+                    loss = 0.5 * loss + 0.5 * in_batch_loss
+                else:
+                    loss = in_batch_loss
+
             # Add diversity loss if enabled (works for both wrapper and mixin models)
             if self.use_diversity_loss:
                 diversity_delta = compute_diversity_for_pairwise(self.model, batch_data, pos_scores)
@@ -330,7 +360,7 @@ class RetrievalStage(BaseStage):
     def build_item_index(self, item_data):
         """Build item embeddings index from iterator"""
         self.model.eval()
-        
+        device = next(self.model.parameters()).device
         emb_list, id_list = [], []
         # Get IDs if available, else sequential
         config = getattr(self.feature_map, 'dataset_config', {})
@@ -339,13 +369,13 @@ class RetrievalStage(BaseStage):
             for batch in tqdm(item_data, disable=True, file=sys.stdout):
                 # Get embeddings using model helper
                 embs = self.model.get_item_embedding(batch)
-                emb_list.append(embs.cpu())
+                emb_list.append(embs.detach())
                 id_list.append(batch[item_id_col].cpu())
-        self.item_embeddings = torch.vstack(emb_list)
+        self.item_embeddings = torch.vstack(emb_list).to(device)
         self.item_ids = torch.cat(id_list)
         self.item_id_to_idx = {item_id.item(): i for i, item_id in enumerate(self.item_ids)}
-        
-        self.logger.info(f"Index Built: {self.item_embeddings.shape} items")
+
+        self.logger.info(f"Index Built: {self.item_embeddings.shape} items on {self.item_embeddings.device}")
 
     def _retrieve_and_score(
         self,
@@ -390,7 +420,8 @@ class RetrievalStage(BaseStage):
         self.model.eval()
         metrics_k = self.metrics_k if metrics_k is None else metrics_k
         total_recall = {k: 0.0 for k in metrics_k} if compute_metrics else None
-        
+        model_device = next(self.model.parameters()).device
+
         # Setup output
         output = StageOutput(stage_name=self.stage_name) if return_output else None
         
@@ -406,7 +437,8 @@ class RetrievalStage(BaseStage):
         user_embs_list = []
         ground_truths_list = []  # List of sets for process, list of single items for evaluate
         user_features_list = [] if return_output else None
-        
+        all_user_features = self.feature_group_manager.get_user_features() if return_output else set()
+
         # Use a dict to deduplicate and aggregate ground truth per request
         request_info_temp = {}
         
@@ -424,12 +456,11 @@ class RetrievalStage(BaseStage):
                     if req_id not in request_info_temp:
                         emb_idx = len(request_ids_list)
                         request_ids_list.append(req_id)
-                        user_embs_list.append(u_emb[i].cpu())
+                        user_embs_list.append(u_emb[i].detach())
                         
                         # Extract ALL user features (FG2 + FG3) for downstream stages
                         if return_output:
                             user_features = {}
-                            all_user_features = self.feature_group_manager.get_user_features()  # FG2 + FG3
                             for feat_name, feat_val in batch_data.items():
                                 if feat_name in [item_id_col, impression_id_col, label_col]:
                                     continue
@@ -460,7 +491,10 @@ class RetrievalStage(BaseStage):
         user_embs = torch.vstack(user_embs_list)
         num_requests = len(request_ids_list)
         num_items = len(self.item_ids)
-        
+        item_ids_np = self.item_ids.cpu().numpy()
+        request_ids_arr = np.asarray(request_ids_list)
+        request_id_dtype = request_ids_arr.dtype if len(request_ids_arr) else np.int64
+
         # Build ground truth list aligned with request order
         for req_id in request_ids_list:
             ground_truths_list.append(request_info_temp[req_id]['ground_truth'])
@@ -486,39 +520,49 @@ class RetrievalStage(BaseStage):
         else:
             fetch_k = min(self.top_k + max_positives, num_items)
         
-        # DataFrame-first: collect candidates as lists for efficient DataFrame creation
-        candidates_data = [] if return_output else None
-        user_features_data = [] if return_output else None
-        
-        for chunk_start in range(0, num_requests, self.chunk_size):
+        candidate_frames = [] if return_output else None
+        num_chunks = max((num_requests + self.chunk_size - 1) // self.chunk_size, 1)
+
+        for chunk_idx, chunk_start in enumerate(range(0, num_requests, self.chunk_size), start=1):
             chunk_end = min(chunk_start + self.chunk_size, num_requests)
             chunk_len = chunk_end - chunk_start
-            
+            chunk_begin_time = datetime.datetime.now()
+
+            self.logger.info(
+                f"Scoring chunk {chunk_idx}/{num_chunks} for requests {chunk_start}:{chunk_end} "
+                f"(size={chunk_len})"
+            )
+
             with torch.no_grad():
                 user_chunk_t = user_embs[chunk_start:chunk_end]  # [chunk, D]
+                if user_chunk_t.device != model_device:
+                    user_chunk_t = user_chunk_t.to(model_device, non_blocking=(model_device.type == 'cuda'))
                 scores_t = torch.matmul(user_chunk_t, self.item_embeddings.T)    # [chunk, num_items]
                 
                 topk_k = min(fetch_k, num_items)
                 topk_scores_t, topk_indices_t = torch.topk(scores_t, topk_k, dim=1, sorted=True)
                 # sorted=True ensures topk_indices[:, :k] gives true top-k for any k <= topk_k
-            
-            # ---- Evaluate-only fast path: GPU-vectorized Recall@K ----
-            if compute_metrics and not return_output:
+
+            # ---- GPU-vectorized Recall@K computation ----
+            if compute_metrics:
                 # Separate single-GT and multi-GT users for vectorized processing
                 chunk_gt_idxs = gt_idx_list[chunk_start:chunk_end]
                 gt_lens = np.array([len(g) for g in chunk_gt_idxs])
-                
+
                 single_mask = gt_lens == 1
                 multi_mask = gt_lens > 1
-                
+                device_mask_single = None
+                device_mask_multi = None
+
                 # Pre-build single-GT index tensor on GPU (most common case)
                 if single_mask.any():
                     single_gt = torch.tensor(
                         [chunk_gt_idxs[i][0] for i in range(chunk_len) if single_mask[i]],
                         dtype=torch.long, device=topk_indices_t.device
                     )  # [num_single]
-                    single_topk = topk_indices_t[torch.from_numpy(single_mask)]  # [num_single, topk_k]
-                
+                    device_mask_single = torch.from_numpy(single_mask).to(topk_indices_t.device)
+                    single_topk = topk_indices_t[device_mask_single]  # [num_single, topk_k]
+
                 # Pre-build multi-GT padded tensor on GPU (rare case)
                 if multi_mask.any():
                     multi_indices = np.where(multi_mask)[0]
@@ -530,95 +574,98 @@ class RetrievalStage(BaseStage):
                     )
                     for j, idx in enumerate(multi_indices):
                         g = chunk_gt_idxs[idx]
-                        multi_gt_padded[j, :len(g)] = torch.from_numpy(g)
-                    multi_topk = topk_indices_t[torch.from_numpy(multi_mask)]  # [num_multi, topk_k]
-                
+                        multi_gt_padded[j, :len(g)] = torch.from_numpy(g).to(topk_indices_t.device)
+                    device_mask_multi = torch.from_numpy(multi_mask).to(topk_indices_t.device)
+                    multi_topk = topk_indices_t[device_mask_multi]  # [num_multi, topk_k]
+
                 for k in metrics_k:
                     k_eff = min(k, topk_indices_t.shape[1])
                     hits = 0
-                    
+
                     # Single-GT: fully vectorized on GPU
                     if single_mask.any():
                         # [num_single, k_eff] == [num_single, 1] → broadcast
                         hits += (single_topk[:, :k_eff] == single_gt.unsqueeze(1)).any(dim=1).sum().item()
-                    
+
                     # Multi-GT: vectorized on GPU with padded tensor
                     if multi_mask.any():
                         # [num_multi, k_eff, 1] == [num_multi, 1, max_gt] → broadcast
                         hits += (multi_topk[:, :k_eff].unsqueeze(2) == multi_gt_padded.unsqueeze(1)).any(dim=2).any(dim=1).sum().item()
-                    
+
                     total_recall[k] += hits
-                continue  # Skip the per-user output-building loop below
-            
-            # ---- Full path: transfer to CPU and build output ----
-            topk_indices = topk_indices_t.cpu().numpy()   # [chunk, topk_k]
-            topk_scores = topk_scores_t.cpu().numpy()     # [chunk, topk_k]
-            
-            # For true positive scores, need full score matrix
+
+            # ---- Output-building path: transfer only top-k tensors to CPU and assemble arrays ----
             if return_output:
-                scores_np = scores_t.cpu().numpy()  # [chunk, num_items]
-            
-            # Process each user in chunk
-            for i in range(chunk_len):
-                global_idx = chunk_start + i
-                req_id = request_ids_list[global_idx]
-                true_positives = ground_truths_list[global_idx]
-                
-                user_topk_indices = topk_indices[i]
-                user_topk_scores = topk_scores[i]
-                
-                # Compute metrics if requested (full path with output)
-                if compute_metrics:
-                    gt_idxs = gt_idx_list[global_idx]
-                    if len(gt_idxs) > 0:
-                        for k in metrics_k:
-                            k_eff = min(k, len(user_topk_indices))
-                            if np.isin(gt_idxs, user_topk_indices[:k_eff]).any():
-                                total_recall[k] += 1
-                
-                # Build candidate data if returning output (DataFrame-first)
-                if return_output:
-                    user_features = user_features_list[global_idx]
-                    
-                    # Collect user features for this request
-                    user_feat_row = {'request_id': req_id}
-                    user_feat_row.update(user_features)
-                    user_features_data.append(user_feat_row)
-                    
-                    added_item_ids = set()
-                    
-                    # Add true positives first (with their actual scores)
-                    for tp_item_id in true_positives:
-                        if tp_item_id not in added_item_ids:
-                            tp_score = 0.0
-                            if tp_item_id in self.item_id_to_idx:
-                                tp_idx = self.item_id_to_idx[tp_item_id]
-                                tp_score = scores_np[i, tp_idx]
-                            candidates_data.append({
-                                'request_id': req_id,
-                                'item_id': tp_item_id,
-                                'score': float(tp_score),
-                                'label': 1
-                            })
-                            added_item_ids.add(tp_item_id)
-                    
-                    # Fill with top-K items
-                    num_added = len(added_item_ids)
-                    for j in range(len(user_topk_indices)):
-                        if num_added >= self.top_k:
-                            break
-                        item_idx = user_topk_indices[j]
-                        item_id = self.item_ids[item_idx].item()
-                        if item_id not in added_item_ids:
-                            candidates_data.append({
-                                'request_id': req_id,
-                                'item_id': item_id,
-                                'score': float(user_topk_scores[j]),
-                                'label': 0
-                            })
-                            added_item_ids.add(item_id)
-                            num_added += 1
-        
+                topk_indices = topk_indices_t.cpu().numpy()   # [chunk, topk_k]
+                topk_scores = topk_scores_t.cpu().numpy().astype(np.float32, copy=False)  # [chunk, topk_k]
+
+                chunk_request_blocks = []
+                chunk_item_blocks = []
+                chunk_score_blocks = []
+                chunk_label_blocks = []
+
+                for i in range(chunk_len):
+                    global_idx = chunk_start + i
+                    req_id = request_ids_list[global_idx]
+                    true_positives = ground_truths_list[global_idx]
+                    user_topk_indices = topk_indices[i]
+                    user_topk_scores = topk_scores[i]
+                    user_topk_item_ids = item_ids_np[user_topk_indices]
+
+                    if true_positives:
+                        tp_item_ids = np.fromiter(
+                            true_positives, dtype=item_ids_np.dtype, count=len(true_positives)
+                        )
+                    else:
+                        tp_item_ids = np.empty(0, dtype=item_ids_np.dtype)
+
+                    if len(tp_item_ids) > 0:
+                        tp_scores = np.zeros(len(tp_item_ids), dtype=np.float32)
+                        for tp_pos, tp_item_id in enumerate(tp_item_ids):
+                            match_idx = np.flatnonzero(user_topk_item_ids == tp_item_id)
+                            if match_idx.size > 0:
+                                tp_scores[tp_pos] = user_topk_scores[match_idx[0]]
+                    else:
+                        tp_scores = np.empty(0, dtype=np.float32)
+
+                    negatives_needed = max(self.top_k - len(tp_item_ids), 0)
+                    if negatives_needed > 0:
+                        if len(tp_item_ids) > 0:
+                            negative_mask = ~np.isin(user_topk_item_ids, tp_item_ids, assume_unique=False)
+                            neg_item_ids = user_topk_item_ids[negative_mask][:negatives_needed]
+                            neg_scores = user_topk_scores[negative_mask][:negatives_needed]
+                        else:
+                            neg_item_ids = user_topk_item_ids[:negatives_needed]
+                            neg_scores = user_topk_scores[:negatives_needed]
+                    else:
+                        neg_item_ids = np.empty(0, dtype=item_ids_np.dtype)
+                        neg_scores = np.empty(0, dtype=np.float32)
+
+                    total_candidates = len(tp_item_ids) + len(neg_item_ids)
+                    if total_candidates == 0:
+                        continue
+
+                    chunk_request_blocks.append(np.full(total_candidates, req_id, dtype=request_id_dtype))
+                    chunk_item_blocks.append(np.concatenate([tp_item_ids, neg_item_ids]))
+                    chunk_score_blocks.append(np.concatenate([tp_scores, neg_scores]))
+                    chunk_label_blocks.append(np.concatenate([
+                        np.ones(len(tp_item_ids), dtype=np.int8),
+                        np.zeros(len(neg_item_ids), dtype=np.int8),
+                    ]))
+
+                if chunk_request_blocks:
+                    chunk_frame = pd.DataFrame({
+                        'request_id': np.concatenate(chunk_request_blocks),
+                        'item_id': np.concatenate(chunk_item_blocks),
+                        'score': np.concatenate(chunk_score_blocks),
+                        'label': np.concatenate(chunk_label_blocks),
+                    })
+                    candidate_frames.append(chunk_frame)
+
+            del topk_scores_t, topk_indices_t, scores_t
+            elapsed = (datetime.datetime.now() - chunk_begin_time).total_seconds()
+            self.logger.info(f"Finished chunk {chunk_idx}/{num_chunks} in {elapsed:.2f}s")
+
         # Finalize metrics
         metrics = None
         if compute_metrics:
@@ -635,9 +682,16 @@ class RetrievalStage(BaseStage):
         
         # Finalize output using DataFrame-first API
         if return_output:
-            import pandas as pd
-            candidates_df = pd.DataFrame(candidates_data)
-            user_features_df = pd.DataFrame(user_features_data)
+            if candidate_frames:
+                candidates_df = pd.concat(candidate_frames, ignore_index=True)
+            else:
+                candidates_df = pd.DataFrame(columns=['request_id', 'item_id', 'score', 'label'])
+
+            if user_features_list is not None and len(user_features_list) > 0:
+                user_features_df = pd.DataFrame(user_features_list)
+                user_features_df.insert(0, 'request_id', request_ids_arr)
+            else:
+                user_features_df = pd.DataFrame({'request_id': request_ids_arr})
             
             output = StageOutput.from_dataframes(
                 stage_name=self.stage_name,
@@ -711,4 +765,3 @@ class RetrievalStage(BaseStage):
         )
         
         return metrics or {}
-

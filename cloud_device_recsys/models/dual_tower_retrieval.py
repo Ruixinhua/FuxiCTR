@@ -298,6 +298,7 @@ class DualTowerRetrieval(DiversityLossMixin, BaseModel):
     def cal_similarity(self, user_emb: torch.Tensor, item_emb: torch.Tensor) -> torch.Tensor:
         """
         Calculate similarity scores between user and item embeddings.
+        Applies output_activation (sigmoid) — use for BCE-based training only.
 
         Args:
             user_emb: User embeddings [batch_size, dim]
@@ -311,6 +312,23 @@ class DualTowerRetrieval(DiversityLossMixin, BaseModel):
         similarity = similarity / self.temperature
         # Apply output activation (sigmoid for binary classification)
         return self.output_activation(similarity)
+
+    def cal_similarity_raw(self, user_emb: torch.Tensor, item_emb: torch.Tensor) -> torch.Tensor:
+        """
+        Calculate raw similarity logits (no sigmoid). Use for pairwise ranking losses
+        (BPR, margin, softmax) where the loss function handles the activation.
+
+        Args:
+            user_emb: User embeddings [batch_size, dim] or [batch_size, num_items, dim]
+            item_emb: Item embeddings [batch_size, dim] or [batch_size, num_items, dim]
+        Returns:
+            Raw similarity logits [batch_size, 1] or [batch_size, num_items]
+        """
+        if user_emb.dim() == 3 or item_emb.dim() == 3:
+            # Batched: user_emb [B, 1, D] x item_emb [B, N, D] -> [B, N]
+            return (user_emb * item_emb).sum(dim=-1) / self.temperature
+        similarity = (user_emb * item_emb).sum(dim=-1, keepdim=True)
+        return similarity / self.temperature
 
     def get_diversity_item_embeddings(self, feat_emb_dict):
         """

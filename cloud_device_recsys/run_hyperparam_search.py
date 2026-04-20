@@ -58,7 +58,9 @@ def parse_args():
     parser.add_argument('--dataset_id', type=str, default=None,
                         help='Dataset ID to use (overrides base config)')
     parser.add_argument('--output_dir', type=str, default='./outputs/hp_search',
-                        help='Output directory for search results')
+                        help='Output directory for experiment artifacts such as checkpoints and metrics')
+    parser.add_argument('--result_dir', type=str, default=None,
+                        help='Directory for search-level artifacts such as results.csv')
     parser.add_argument('--gpu', nargs='+', type=int, default=[-1],
                         help='GPU device ID (-1 for CPU)')
     parser.add_argument('--mode', type=str, default='full',
@@ -76,6 +78,8 @@ def parse_args():
                         help='Resume from previous search (skip completed experiments)')
     parser.add_argument('--seed', type=int, default=2024,
                         help='Random seed')
+    parser.add_argument('--run_retrieval_test', type=int, default=0,
+                        help='Whether to run retrieval test stage')
     parser.add_argument('--run_reranking_test', type=int, default=0,
                         help='Whether to run reranking test stage')
     parser.add_argument('--run_preranking_test', type=int, default=0,
@@ -263,6 +267,28 @@ def generate_experiment_id(params: Dict[str, Dict[str, Any]], seed_override: int
     return f"{base_name}__{full_hash}"
 
 
+def build_temp_config_namespace(args: argparse.Namespace, result_dir: str, base_config: dict) -> str:
+    """
+    Build a stable namespace for generated temp configs.
+
+    Concurrent searches can share the same experiment_id when they sweep the same
+    hyperparameter grid across different datasets / scenarios. Include the search
+    context so temp YAMLs do not overwrite each other.
+    """
+    dataset_id = args.dataset_id or base_config.get('dataset_id', 'unknown_dataset')
+    result_tag = os.path.basename(os.path.normpath(result_dir)) or 'default'
+    namespace_source = json.dumps({
+        'base_config': os.path.abspath(args.base_config),
+        'dataset_id': dataset_id,
+        'mode': args.mode,
+        'result_dir': os.path.abspath(result_dir),
+        'search_config': os.path.abspath(args.search_config),
+    }, sort_keys=True)
+    namespace_hash = hashlib.md5(namespace_source.encode()).hexdigest()[:8]
+    safe_tag = ''.join(ch if ch.isalnum() or ch in ('_', '-') else '_' for ch in result_tag)
+    return f'{safe_tag}__{namespace_hash}'
+
+
 def params_to_flat_dict(params: Dict[str, Dict[str, Any]], prefix: str = '') -> Dict[str, Any]:
     """
     Flatten nested params dict for CSV output.
@@ -307,6 +333,7 @@ def build_run_pipeline_cmd(
         '--experiment_id', experiment_id,
         '--gpu', str(gpu_id),
         '--seed', str(seed),
+        '--save_stage_outputs', '0',
     ]
 
     if args.dataset_id:
@@ -314,6 +341,9 @@ def build_run_pipeline_cmd(
 
     if args.n_rows:
         cmd.extend(['--n_rows', str(args.n_rows)])
+
+    if args.run_retrieval_test:
+        cmd.extend(['--run_retrieval_test', str(args.run_retrieval_test)])
 
     if args.prev_output_path:
         cmd.extend(['--prev_output_path', args.prev_output_path])
@@ -359,6 +389,8 @@ def save_results(
             'seed': r.get('seed', ''),
             'status': r['status'],
             'timestamp': r.get('timestamp', ''),
+            'run_dir': r.get('run_dir', ''),
+            'stage_outputs_dir': r.get('stage_outputs_dir', ''),
         }
         # Add params
         flat_params = params_to_flat_dict(r['params'])
@@ -371,7 +403,7 @@ def save_results(
     
     # Reorder columns: experiment_id, status, timestamp, params..., metrics...
     if len(df) > 0:
-        meta_cols = ['experiment_id', 'seed', 'status', 'timestamp']
+        meta_cols = ['experiment_id', 'seed', 'status', 'timestamp', 'run_dir', 'stage_outputs_dir']
         param_cols = sorted([c for c in df.columns if c.startswith(('retrieval.', 'preranking.', 'reranking.', 'dtcn.', 'cloud_teacher.'))])
         metric_cols = sorted([c for c in df.columns if c not in meta_cols + param_cols])
         df = df[meta_cols + param_cols + metric_cols]
@@ -382,6 +414,8 @@ def save_results(
 
 def main():
     args = parse_args()
+    args.output_dir = os.path.abspath(args.output_dir)
+    result_dir = os.path.abspath(args.result_dir or args.output_dir)
     
     # Get script directory
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -418,7 +452,8 @@ def main():
     print(f"Stages being searched: {searched_keys}")
     if seed_values:
         print(f"Seeds being searched: {seed_values}")
-    print(f"Output directory: {args.output_dir}")
+    print(f"Model output directory: {args.output_dir}")
+    print(f"Search result directory: {result_dir}")
     print(f"Mode: {args.mode}")
     print(f"GPU: {args.gpu}")
     if args.n_rows:
@@ -440,15 +475,21 @@ def main():
         print("\n[DRY RUN] Exiting without running experiments.")
         return
     
-    # Create output directory
+    # Create artifact directories
     os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(result_dir, exist_ok=True)
     
-    # Temp configs will be saved in the original config_dir (where dataset_config.yaml exists)
-    # with a unique prefix to avoid conflicts
+    # Temp configs are saved under config/generated/<YYYY-MM>/ to keep the
+    # config root clean while still letting run_pipeline load them via pipeline_id.
     temp_config_prefix = 'hp_temp_'
+    temp_config_bucket = datetime.now().strftime('%Y-%m')
+    temp_config_subdir = os.path.join('generated', temp_config_bucket)
+    temp_config_dir = os.path.join(args.config_dir, temp_config_subdir)
+    os.makedirs(temp_config_dir, exist_ok=True)
+    temp_config_namespace = build_temp_config_namespace(args, result_dir, base_config)
     
     # Check for existing results (for resume)
-    results_path = os.path.join(args.output_dir, 'results.csv')
+    results_path = os.path.join(result_dir, 'results.csv')
     completed_experiments = set()
     existing_results = []
     
@@ -479,7 +520,8 @@ def main():
 
         modified_config = apply_params_to_config(base_config, params, fixed_overrides)
 
-        config_name = f'{temp_config_prefix}{experiment_id}'
+        config_stem = f'{temp_config_prefix}{temp_config_namespace}__{experiment_id}'
+        config_name = os.path.join(temp_config_subdir, config_stem).replace(os.sep, '/')
         temp_config_path = os.path.join(args.config_dir, f'{config_name}.yaml')
         save_yaml(modified_config, temp_config_path)
 
@@ -547,6 +589,8 @@ def main():
                 'metrics': metrics,
                 'status': 'success' if success else 'failed',
                 'timestamp': datetime.now().isoformat(),
+                'run_dir': os.path.join(args.output_dir, experiment_id),
+                'stage_outputs_dir': os.path.join(args.output_dir, experiment_id, 'stage_outputs'),
             }
             results.append(result)
 
@@ -570,8 +614,16 @@ def main():
             # Try to find a good metric to sort by
             sample_metrics = successful[0]['metrics']
             sort_metrics = [
-                'reranking_test_Recall@5', 'preranking_test_Recall@100', 
-                'retrieval_test_Recall@1000', 'test_auc'
+                'reranking_valid_gAUC',
+                'reranking_valid_Recall@1',
+                'preranking_valid_gAUC',
+                'preranking_valid_Recall@100',
+                'retrieval_valid_Recall@1000',
+                'retrieval_valid_nDCG@1000',
+                'reranking_test_Recall@5',
+                'preranking_test_Recall@100',
+                'retrieval_test_Recall@1000',
+                'test_auc',
             ]
             sort_by = None
             for m in sort_metrics:

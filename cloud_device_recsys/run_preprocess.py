@@ -139,6 +139,59 @@ def filter_rare_items(
     )
 
 
+def build_item_keep_list(
+    ddf: pl.LazyFrame,
+    item_id_col: str,
+    min_count: int,
+    count_col: str = "item_cnt",
+) -> pl.LazyFrame:
+    """
+    Build an item whitelist for rows whose item frequency is at least min_count.
+
+    Args:
+        ddf: Source LazyFrame
+        item_id_col: Item ID column
+        min_count: Minimum item frequency threshold
+        count_col: Temporary count column name
+
+    Returns:
+        LazyFrame with one column: item_id_col
+    """
+    return (
+        ddf.group_by(item_id_col)
+        .agg(pl.len().alias(count_col))
+        .filter(pl.col(count_col) >= min_count)
+        .select(item_id_col)
+        .unique()
+    )
+
+
+def build_train_head_items(
+    ddf: pl.LazyFrame,
+    item_id_col: str,
+    label_col: str,
+    min_positive_count: int
+) -> pl.LazyFrame:
+    """
+    Build the item whitelist for train filtering from positive train samples only.
+
+    Args:
+        ddf: Train split LazyFrame
+        item_id_col: Item ID column
+        label_col: Label column
+        min_positive_count: Keep items with at least this many positive train rows
+
+    Returns:
+        LazyFrame with one column: item_id_col
+    """
+    return build_item_keep_list(
+        ddf.filter(pl.col(label_col) > 0),
+        item_id_col=item_id_col,
+        min_count=min_positive_count,
+        count_col="positive_item_cnt",
+    )
+
+
 # =============================================================================
 # Configuration Helpers
 # =============================================================================
@@ -283,6 +336,12 @@ class DataPreprocessor:
         
         # Preprocessing options
         self.preprocess_opts = self.config.get('preprocessing', {})
+        self.train_filter_opts = self.preprocess_opts.get('train_item_freq_filter', {})
+        self.eval_filter_opts = self.preprocess_opts.get('eval_item_freq_filter', {})
+        self._train_head_items_ddf = None
+        self._train_filter_initialized = False
+        self._eval_keep_items_ddf = None
+        self._eval_filter_initialized = False
         
         self.logger.info("=" * 60)
         self.logger.info("FuxiCTR Data Preprocessing")
@@ -292,6 +351,80 @@ class DataPreprocessor:
         self.logger.info(f"Output directory: {self.output_dir}")
         self.logger.info(f"Feature columns: {len(self.feature_cols)}")
         self.logger.info(f"N rows limit: {n_rows if n_rows else 'None'}")
+
+    def _get_train_filter_min_positive_count(self) -> int:
+        if not self.train_filter_opts.get('enabled', False):
+            return 1
+        return int(self.train_filter_opts.get('min_positive_count', 1))
+
+    def _get_eval_filter_min_positive_count(self) -> int:
+        if not self.eval_filter_opts.get('enabled', False):
+            return 1
+        return int(self.eval_filter_opts.get('min_positive_count', 1))
+
+    def _maybe_initialize_train_filter(self, train_ddf: pl.LazyFrame) -> None:
+        min_positive_count = self._get_train_filter_min_positive_count()
+        if min_positive_count <= 1 or self._train_filter_initialized:
+            return
+
+        item_id_col = self.config.get('item_id_col', 'item_id')
+        label_col = self.label_cols[0]['name']
+        self._train_head_items_ddf = build_train_head_items(
+            train_ddf,
+            item_id_col=item_id_col,
+            label_col=label_col,
+            min_positive_count=min_positive_count
+        )
+        kept_items = self._train_head_items_ddf.select(pl.len()).collect().item()
+        self.logger.info(
+            f"[train] Initialized positive item-frequency filter: "
+            f"keep items with >= {min_positive_count} positive rows "
+            f"-> {kept_items} unique items"
+        )
+        self._train_filter_initialized = True
+
+    def _maybe_initialize_eval_filter(
+        self,
+        valid_ddf: Optional[pl.LazyFrame],
+        test_ddf: Optional[pl.LazyFrame],
+    ) -> None:
+        min_positive_count = self._get_eval_filter_min_positive_count()
+        if min_positive_count <= 1 or self._eval_filter_initialized:
+            return
+
+        label_col = self.label_cols[0]['name']
+        item_id_col = self.config.get('item_id_col', 'item_id')
+        eval_positive_ddfs = []
+        eval_splits = []
+
+        if valid_ddf is not None:
+            eval_positive_ddfs.append(filter_positive_samples(valid_ddf, label_col))
+            eval_splits.append("valid")
+        if test_ddf is not None:
+            eval_positive_ddfs.append(filter_positive_samples(test_ddf, label_col))
+            eval_splits.append("test")
+
+        if not eval_positive_ddfs:
+            return
+
+        if len(eval_positive_ddfs) > 1:
+            combined_eval_ddf = pl.concat(eval_positive_ddfs)
+        else:
+            combined_eval_ddf = eval_positive_ddfs[0]
+
+        self._eval_keep_items_ddf = build_item_keep_list(
+            combined_eval_ddf,
+            item_id_col=item_id_col,
+            min_count=min_positive_count,
+            count_col="eval_positive_item_cnt",
+        )
+        kept_items = self._eval_keep_items_ddf.select(pl.len()).collect().item()
+        self.logger.info(
+            f"[eval] Initialized combined positive item-frequency filter on {eval_splits}: "
+            f"keep items with >= {min_positive_count} positive rows "
+            f"-> {kept_items} unique items"
+        )
+        self._eval_filter_initialized = True
     
     def get_raw_path(self, split: str) -> str:
         """Get path to raw data file for a split."""
@@ -317,6 +450,20 @@ class DataPreprocessor:
         if self.preprocess_opts.get('generate_impression_id', True):
             impression_col = self.config.get('impression_id_col', 'impression_id')
             ddf = generate_impression_id(ddf, impression_col)
+
+        if split == 'train':
+            min_positive_count = self._get_train_filter_min_positive_count()
+            if min_positive_count > 1:
+                if self._train_head_items_ddf is None:
+                    self._maybe_initialize_train_filter(ddf)
+                item_id_col = self.config.get('item_id_col', 'item_id')
+                before_count = ddf.select(pl.len()).collect().item()
+                ddf = ddf.join(self._train_head_items_ddf, on=item_id_col, how='inner')
+                after_count = ddf.select(pl.len()).collect().item()
+                self.logger.info(
+                    f"[train] Filtered by positive item freq >= {min_positive_count}: "
+                    f"{before_count} -> {after_count}"
+                )
         
         if split in ['valid', 'test']:
             # Filter positive samples for eval splits
@@ -326,6 +473,22 @@ class DataPreprocessor:
                 ddf = filter_positive_samples(ddf, label_col)
                 after_count = ddf.select(pl.len()).collect().item()
                 self.logger.info(f"[{split}] Filtered positive samples: {before_count} -> {after_count}")
+
+            min_eval_positive_count = self._get_eval_filter_min_positive_count()
+            if min_eval_positive_count > 1:
+                if self._eval_keep_items_ddf is None:
+                    raise RuntimeError(
+                        "Eval item-frequency filter requested but not initialized. "
+                        "Call _maybe_initialize_eval_filter() before preprocess_split()."
+                    )
+                item_id_col = self.config.get('item_id_col', 'item_id')
+                before_count = ddf.select(pl.len()).collect().item()
+                ddf = ddf.join(self._eval_keep_items_ddf, on=item_id_col, how='inner')
+                after_count = ddf.select(pl.len()).collect().item()
+                self.logger.info(
+                    f"[{split}] Filtered by combined eval positive item freq >= "
+                    f"{min_eval_positive_count}: {before_count} -> {after_count}"
+                )
 
             min_item_count = self.preprocess_opts.get('min_item_count_eval', 1)
             if min_item_count > 1:
@@ -375,48 +538,37 @@ class DataPreprocessor:
         # Read all data splits
         # =====================================================================
         all_ddfs = []
+        raw_split_ddfs = {}
         split_ddfs = {}  # Store preprocessed LazyFrames for each split
-        
-        # Read train data
-        train_path = self.get_raw_path('train')
-        train_ddf = None
-        if os.path.exists(train_path):
-            self.logger.info(f"Reading train data: {train_path}")
-            train_ddf = feature_processor.read_data(
-                train_path, 
+
+        for split_name in ['train', 'valid', 'test']:
+            split_path = self.get_raw_path(split_name)
+            if not os.path.exists(split_path):
+                continue
+            self.logger.info(f"Reading {split_name} data: {split_path}")
+            raw_split_ddfs[split_name] = feature_processor.read_data(
+                split_path,
                 data_format=data_format,
                 n_rows=self.n_rows
             )
-            train_ddf = self.preprocess_split(train_ddf, 'train')
-            all_ddfs.append(train_ddf)
-            split_ddfs['train'] = train_ddf
-        
-        # Read valid data
-        valid_path = self.get_raw_path('valid')
-        if os.path.exists(valid_path):
-            self.logger.info(f"Reading valid data: {valid_path}")
-            valid_ddf = feature_processor.read_data(
-                valid_path,
-                data_format=data_format,
-                n_rows=self.n_rows
-            )
-            valid_ddf = self.preprocess_split(valid_ddf, 'valid')
-            all_ddfs.append(valid_ddf)
-            split_ddfs['valid'] = valid_ddf
-        
-        # Read test data
-        test_path = self.get_raw_path('test')
-        if os.path.exists(test_path):
-            self.logger.info(f"Reading test data: {test_path}")
-            test_ddf = feature_processor.read_data(
-                test_path,
-                data_format=data_format,
-                n_rows=self.n_rows
-            )
-            test_ddf = self.preprocess_split(test_ddf, 'test')
-            all_ddfs.append(test_ddf)
-            split_ddfs['test'] = test_ddf
-        
+
+        train_ddf = raw_split_ddfs.get('train')
+        if train_ddf is not None:
+            self._maybe_initialize_train_filter(train_ddf)
+
+        self._maybe_initialize_eval_filter(
+            raw_split_ddfs.get('valid'),
+            raw_split_ddfs.get('test'),
+        )
+
+        for split_name in ['train', 'valid', 'test']:
+            split_ddf = raw_split_ddfs.get(split_name)
+            if split_ddf is None:
+                continue
+            split_ddf = self.preprocess_split(split_ddf, split_name)
+            all_ddfs.append(split_ddf)
+            split_ddfs[split_name] = split_ddf
+
         if not all_ddfs:
             self.logger.error("No data files found!")
             return

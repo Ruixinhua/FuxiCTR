@@ -354,6 +354,76 @@ def run_retrieval_stage(retrieval_stage, pipeline_config, dataset_config, fg_man
     
     return metrics, valid_output, test_output
 
+
+def save_retrieval_outputs(
+        retrieval_stage,
+        pipeline_config,
+        dataset_config,
+        fg_manager,
+        model_weights_path,
+        logger=None,
+        run_test=True,
+):
+    """Load a trained retrieval checkpoint and export valid/test stage outputs."""
+    if logger is None:
+        logger = logging.getLogger('PipelineRunner')
+    retrieval_config = pipeline_config['stages']['retrieval']
+    metrics = {}
+
+    paths = get_data_paths(dataset_config, pipeline_config, logger)
+    paths = prepare_debug_paths(paths, dataset_config, logger)
+
+    ensure_item_pool(
+        data_paths={'item_pool_path': paths['item_pool_path'], 'test_path': paths['test_path'],
+                    'valid_path': paths['valid_path']},
+        dataset_config=dataset_config,
+        feature_group_manager=fg_manager,
+        logger=logger
+    )
+
+    item_fm = _create_item_feature_map(retrieval_stage.feature_map, fg_manager)
+    num_negatives = retrieval_config.get('model_params', {}).get('num_negatives', 0)
+    label_col = dataset_config.get('label_col', {}).get('name', 'label')
+    loaders = _prepare_stage_data_loaders(
+        feature_map=retrieval_stage.feature_map,
+        stage_config=retrieval_config,
+        paths=paths,
+        create_train=True,
+        create_test=run_test,
+        shuffle_train=False,
+        create_item_loader=True,
+        item_feature_map=item_fm,
+        num_negatives=num_negatives,
+        label_col=label_col,
+        logger=logger
+    )
+    valid_loader = loaders['valid_loader']
+    item_loader = loaders['item_loader']
+    test_loader = loaders['test_loader'] if run_test else None
+
+    retrieval_stage.build_model()
+    retrieval_stage.model.load_weights(model_weights_path)
+    retrieval_stage.best_weights_path = model_weights_path
+    logger.info(f"[save_retrieval_outputs] Loaded pre-trained weights from: {model_weights_path}")
+
+    item_gen, _ = item_loader.make_iterator()
+    retrieval_stage.build_item_index(item_gen)
+    logger.info("[save_retrieval_outputs] Item index built from candidate item pool.")
+
+    logger.info("[save_retrieval_outputs] Processing valid set...")
+    valid_output, valid_metrics = retrieval_stage.process(valid_loader.make_iterator(), compute_metrics=True)
+    metrics.update({f"retrieval_valid_{k}": v for k, v in valid_metrics.items()})
+
+    test_output = None
+    if run_test:
+        logger.info("[save_retrieval_outputs] Processing test set...")
+        test_output, test_metrics = retrieval_stage.process(test_loader.make_iterator(), compute_metrics=True)
+        metrics.update({f"retrieval_test_{k}": v for k, v in test_metrics.items()})
+    else:
+        logger.info("[save_retrieval_outputs] Skipping retrieval test evaluation.")
+
+    return metrics, valid_output, test_output
+
 def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, fg_manager=None, logger=None,
                          prev_output_test=None, prev_output_valid=None, run_test=True, **kwargs):
     if logger is None:
@@ -976,6 +1046,164 @@ def run_reranking_stage(reranking_stage, pipeline_config, dataset_config, fg_man
     return metrics
 
 
+def save_reranking_outputs(
+        reranking_stage,
+        pipeline_config,
+        dataset_config,
+        fg_manager=None,
+        logger=None,
+        model_weights_path=None,
+        prev_output_path=None,
+        retrieval_output_path=None,
+        run_test=True,
+        feature_map=None,
+        original_feature_map=None,
+):
+    """Load a trained reranking checkpoint and export valid/test reranked outputs."""
+    if logger is None:
+        logger = logging.getLogger('PipelineRunner')
+    if not model_weights_path:
+        raise RuntimeError("--model_weights_path is required for save_reranking_outputs mode.")
+    if not prev_output_path:
+        raise RuntimeError("--prev_output_path (preranking stage outputs) is required for save_reranking_outputs mode.")
+
+    metrics = {}
+    prev_output_valid, prev_output_test = load_stage_outputs_from_dir(
+        prev_output_path, 'preranking', logger, load_test=bool(run_test)
+    )
+
+    retrieval_output_valid, retrieval_output_test = None, None
+    if retrieval_output_path:
+        retrieval_output_valid, retrieval_output_test = load_stage_outputs_from_dir(
+            retrieval_output_path, 'retrieval', logger, load_test=bool(run_test)
+        )
+
+    reranking_config = pipeline_config['stages']['reranking']
+    cloud_teacher_config = pipeline_config['stages'].get('cloud_teacher', {})
+
+    if cloud_teacher_config.get('mode') and feature_map is not None and fg_manager is not None:
+        from cloud_device_recsys.utils import filter_feature_map
+
+        teacher_features_str = cloud_teacher_config.get('cloud_teacher_features', ['FG1', 'FG2'])
+        teacher_feature_groups = [FeatureGroup.from_string(f) for f in teacher_features_str]
+        teacher_base_fm = original_feature_map if original_feature_map is not None else feature_map
+        cloud_teacher_feature_map = filter_feature_map(
+            teacher_base_fm, fg_manager, teacher_feature_groups,
+            use_feature_encoder=cloud_teacher_config.get('cloud_teacher_model_params', {}).get(
+                'use_feature_encoder',
+                reranking_config.get('model_params', {}).get('use_feature_encoder', False)
+            )
+        )
+        cloud_teacher_feature_map.default_emb_dim = cloud_teacher_config.get(
+            'cloud_teacher_model_params', {}
+        ).get(
+            'embedding_dim',
+            reranking_config.get('model_params', {}).get('embedding_dim', 16)
+        )
+
+        reranking_stage.cloud_teacher_params = cloud_teacher_config
+        reranking_stage.cloud_teacher_feature_map = cloud_teacher_feature_map
+        reranking_stage.cloud_teacher_mode = cloud_teacher_config.get('mode')
+
+        if reranking_stage.cloud_teacher_mode == 'inject':
+            reranking_stage.use_cloud_score = True
+        elif reranking_stage.cloud_teacher_mode == 'distill':
+            reranking_stage.use_cloud_score = False
+            reranking_stage.kd_loss_weight = cloud_teacher_config.get('kd_loss_weight', 0.1)
+            reranking_stage.kd_loss_type = cloud_teacher_config.get('kd_loss_type', 'mse')
+            reranking_stage.kd_temperature = cloud_teacher_config.get('kd_temperature', 1.0)
+        elif reranking_stage.cloud_teacher_mode == 'residual_inject':
+            reranking_stage.use_cloud_score = False
+            reranking_stage.residual_weight = cloud_teacher_config.get('residual_weight', 1.0)
+        elif reranking_stage.cloud_teacher_mode == 'hybrid_inject':
+            reranking_stage.use_cloud_score = True
+            reranking_stage.residual_weight = cloud_teacher_config.get('residual_weight', 1.0)
+
+    paths = get_data_paths(dataset_config, pipeline_config, logger)
+    paths = prepare_debug_paths(paths, dataset_config, logger)
+
+    if fg_manager is not None:
+        ensure_item_pool(
+            data_paths={'item_pool_path': paths['item_pool_path'], 'valid_path': paths['valid_path'],
+                        'test_path': paths['test_path']},
+            dataset_config=dataset_config,
+            feature_group_manager=fg_manager,
+            logger=logger
+        )
+
+    reranking_stage.build_model()
+    reranking_stage.model.load_weights(model_weights_path)
+    reranking_stage.best_weights_path = model_weights_path
+    logger.info(f"[save_reranking_outputs] Loaded pre-trained weights from: {model_weights_path}")
+
+    if os.path.exists(paths['item_pool_path']):
+        reranking_stage.load_item_features(paths['item_pool_path'])
+    else:
+        raise RuntimeError(f"Item pool not found at {paths['item_pool_path']}")
+
+    if fg_manager is not None:
+        impression_id_col = dataset_config.get('impression_id_col', 'impression_id')
+        prev_output_valid = enrich_stage_output_user_features(
+            prev_output_valid, paths['valid_path'], fg_manager, impression_id_col, logger
+        )
+        prev_output_test = enrich_stage_output_user_features(
+            prev_output_test, paths['test_path'], fg_manager, impression_id_col, logger
+        )
+        if retrieval_output_valid is not None:
+            retrieval_output_valid = enrich_stage_output_user_features(
+                retrieval_output_valid, paths['valid_path'], fg_manager, impression_id_col, logger
+            )
+        if retrieval_output_test is not None:
+            retrieval_output_test = enrich_stage_output_user_features(
+                retrieval_output_test, paths['test_path'], fg_manager, impression_id_col, logger
+            )
+
+    vocab_pruning_config = pipeline_config.get('vocab_pruning', {})
+    if vocab_pruning_config.get('enabled', False) and vocab_pruning_config.get('mode', 'runtime') == 'offline':
+        from cloud_device_recsys.utils import get_data_dir
+        data_dir = get_data_dir(dataset_config)
+        remap_dict_path = os.path.join(data_dir, 'remap_dict.pkl')
+        if os.path.exists(remap_dict_path):
+            import pickle
+            from cloud_device_recsys.data.remap_vocab_data import remap_stage_output
+            with open(remap_dict_path, 'rb') as f:
+                remap_dicts = pickle.load(f)
+            reranking_stage.remap_dicts = remap_dicts
+            if prev_output_valid is not None:
+                prev_output_valid = remap_stage_output(prev_output_valid, remap_dicts, feature_map)
+            if prev_output_test is not None:
+                prev_output_test = remap_stage_output(prev_output_test, remap_dicts, feature_map)
+            if retrieval_output_valid is not None:
+                retrieval_output_valid = remap_stage_output(retrieval_output_valid, remap_dicts, feature_map)
+            if retrieval_output_test is not None:
+                retrieval_output_test = remap_stage_output(retrieval_output_test, remap_dicts, feature_map)
+
+    logger.info("[save_reranking_outputs] Processing valid set...")
+    valid_output, _ = reranking_stage.process(prev_output_valid, compute_metrics=False)
+    valid_metrics = reranking_stage.evaluate(
+        prev_output_valid,
+        retrieval_output=retrieval_output_valid,
+    )
+    metrics.update({f"reranking_valid_{k}": v for k, v in valid_metrics.items()})
+
+    test_output = None
+    if run_test:
+        if prev_output_test is None:
+            logger.warning("[save_reranking_outputs] No preranking test output provided, skipping test export.")
+        else:
+            logger.info("[save_reranking_outputs] Processing test set...")
+            test_output, _ = reranking_stage.process(prev_output_test, compute_metrics=False)
+            test_metrics = reranking_stage.evaluate(
+                prev_output_test,
+                retrieval_output=retrieval_output_test,
+            )
+            metrics.update({f"reranking_test_{k}": v for k, v in test_metrics.items()})
+    else:
+        logger.info("[save_reranking_outputs] Skipping reranking test evaluation.")
+
+    return metrics, valid_output, test_output
+
+
 def main():
     print("DEBUG: main() started", flush=True)
     """Main entry point"""
@@ -987,7 +1215,11 @@ def main():
         logger.info(f"Experiment ID: {args.experiment_id}")
         run_output_dir = f"{run_output_base}/{args.experiment_id}"
     else:
-        run_output_dir = os.path.join(run_output_base, f"{args.pipeline_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        pipeline_slug = args.pipeline_id.replace("/", "__")
+        run_output_dir = os.path.join(
+            run_output_base,
+            f"{pipeline_slug}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
     os.makedirs(run_output_dir, exist_ok=True)
     stage_output_dir = f"{run_output_dir}/stage_outputs"
 
@@ -1013,6 +1245,18 @@ def main():
 
     # Ensure dataset_id in pipeline_config is consistent
     pipeline_config['dataset_id'] = dataset_config['dataset_id']
+
+    config_save_stage_outputs = bool(
+        pipeline_config.get('output', {}).get('save_intermediate', False)
+    )
+    if args.save_stage_outputs is None:
+        args.save_stage_outputs = config_save_stage_outputs
+        logger.info(
+            "save_stage_outputs not set via CLI. Using config output.save_intermediate=%s",
+            args.save_stage_outputs,
+        )
+    else:
+        logger.info("save_stage_outputs overridden via CLI: %s", args.save_stage_outputs)
 
     # --- Apply Retrieval Stage Overrides ---
     if 'retrieval' in pipeline_config.get('stages', {}):
@@ -1228,6 +1472,30 @@ def main():
             if r_test is not None:
                 save_stage_output(r_test, stage_output_dir, 'retrieval_test', logger)
 
+    elif args.mode == 'save_retrieval_outputs':
+        logger.info("Running save_retrieval_outputs: loading pre-trained model and generating stage outputs")
+        if 'retrieval' not in stages:
+            raise RuntimeError("No retrieval stage found in config.")
+        if not args.model_weights_path:
+            raise RuntimeError("--model_weights_path is required for save_retrieval_outputs mode.")
+
+        retrieval_stage = stages['retrieval']()
+        r_metrics, r_valid, r_test = save_retrieval_outputs(
+            retrieval_stage,
+            pipeline_config,
+            dataset_config,
+            fg_manager,
+            model_weights_path=args.model_weights_path,
+            logger=logger,
+            run_test=bool(args.run_retrieval_test),
+        )
+        all_metrics.update(r_metrics)
+
+        if args.save_stage_outputs:
+            save_stage_output(r_valid, stage_output_dir, 'retrieval_valid', logger)
+            if r_test is not None:
+                save_stage_output(r_test, stage_output_dir, 'retrieval_test', logger)
+
     elif args.mode == 'preranking':
         logger.info("Running preranking stage only")
         if 'preranking' not in stages:
@@ -1283,6 +1551,36 @@ def main():
                                         retrieval_output_valid=retrieval_output_valid,
                                         retrieval_output_test=retrieval_output_test)
         all_metrics.update(d_metrics)
+
+    elif args.mode == 'save_reranking_outputs':
+        logger.info("Running save_reranking_outputs: loading pre-trained model and generating stage outputs")
+        if 'reranking' not in stages:
+            raise RuntimeError("No reranking stage found in config.")
+        if not args.model_weights_path:
+            raise RuntimeError("--model_weights_path is required for save_reranking_outputs mode.")
+        if not args.prev_output_path:
+            raise RuntimeError("--prev_output_path (preranking stage outputs) is required for save_reranking_outputs mode.")
+
+        reranking_stage = stages['reranking']()
+        d_metrics, d_valid, d_test = save_reranking_outputs(
+            reranking_stage,
+            pipeline_config,
+            dataset_config,
+            fg_manager=fg_manager,
+            logger=logger,
+            model_weights_path=args.model_weights_path,
+            prev_output_path=args.prev_output_path,
+            retrieval_output_path=args.retrieval_output_path,
+            run_test=bool(args.run_reranking_test),
+            feature_map=feature_map,
+            original_feature_map=original_feature_map,
+        )
+        all_metrics.update(d_metrics)
+
+        if args.save_stage_outputs:
+            save_stage_output(d_valid, stage_output_dir, 'reranking_valid', logger)
+            if d_test is not None:
+                save_stage_output(d_test, stage_output_dir, 'reranking_test', logger)
         
     elif args.mode == 'joint_train':
         logger.info("Running Cloud-Device Joint Training")

@@ -609,8 +609,22 @@ def process_and_rank_candidates(
     user_feature_names_in_model = [f for f in user_feature_names if f in feature_map.features]
 
     precompute_time = time.time() - t_precompute_start
-    logger.info(f"Pre-converted {len(request_user_features)} user + {len(item_feature_arrays)} item feature arrays "
-                f"to tensor-ready dtypes in {precompute_time:.2f}s")
+    logger.info(
+        "Prepared tensor-ready metadata in %.2fs: raw=%d user + %d item arrays, active model=%d user + %d item features",
+        precompute_time,
+        len(request_user_features),
+        len(item_feature_arrays),
+        len(user_feature_names_in_model),
+        len(item_feature_names_in_model),
+    )
+    logger.info(
+        "Active inference user features: %s",
+        ", ".join(user_feature_names_in_model) if user_feature_names_in_model else "(none)",
+    )
+    logger.info(
+        "Active inference item features: %s",
+        ", ".join(item_feature_names_in_model) if item_feature_names_in_model else "(none)",
+    )
                 
     # Fine-grained timing for bottleneck analysis
     timing_stats = {

@@ -171,7 +171,7 @@ def get_data_paths(dataset_config: dict, pipeline_config: dict, logger):
     valid_path = os.path.join(processed_data_root, f'valid.{data_format}')
     test_path = os.path.join(processed_data_root, f'test.{data_format}')
     
-    # Item pool path (test/valid items only - for evaluation/index building)
+    # Candidate item pool path (actual source splits are controlled by dataset_config.item_pool.source)
     item_pool_config = dataset_config.get('item_pool', {})
     item_pool_file = item_pool_config.get('file', 'cand_item_list')
     item_pool_path = os.path.join(dataset_config.get('processed_data_root', data_dir), f'{item_pool_file}.parquet')
@@ -541,6 +541,19 @@ def enrich_stage_output_user_features(
     
     return stage_output
 
+def parse_optional_bool(value):
+    """Parse CLI bools while still allowing an omitted value via nargs='?'."""
+    if value is None or isinstance(value, bool):
+        return value
+
+    value = str(value).strip().lower()
+    if value in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Invalid boolean value: {value}")
+
+
 def parse_pipeline_args():
     """Parse command line arguments for the pipeline."""
     parser = argparse.ArgumentParser(description='Cloud-Device Recommendation Pipeline')
@@ -551,7 +564,9 @@ def parse_pipeline_args():
     parser.add_argument('--dataset_id', type=str, default=None,
                        help='Dataset ID from dataset_config.yaml')
     parser.add_argument('--mode', type=str, default='full',
-                       choices=['full', 'retrieval', 'preranking', 'reranking', 'train', 'evaluate', 'joint_train', 'dtcn_preranking', 'save_preranking_outputs'],
+                       choices=['full', 'retrieval', 'preranking', 'reranking', 'train', 'evaluate', 'joint_train',
+                                'dtcn_preranking', 'save_retrieval_outputs', 'save_preranking_outputs',
+                                'save_reranking_outputs'],
                        help='Execution mode')
     parser.add_argument('--stage', type=str, default=None,
                        choices=['retrieval', 'preranking', 'reranking'],
@@ -581,9 +596,11 @@ def parse_pipeline_args():
 
     parser.add_argument('--n_rows', type=int, default=None,
                        help='Override debug n_rows (set to small number for quick testing)')
-    parser.add_argument('--save_stage_outputs', type=bool, default=False,
-                        help='Save intermediate stage outputs (StageOutput) to disk for later reuse')
+    parser.add_argument('--save_stage_outputs', nargs='?', const='1', default=None,
+                        type=parse_optional_bool,
+                        help='Save intermediate stage outputs (StageOutput) to disk for later reuse. '
+                             'If omitted, defaults to output.save_intermediate from the pipeline config.')
     parser.add_argument('--model_weights_path', type=str, default=None,
                         help='Path to pre-trained model weights (.model file). '
-                             'Used with --mode save_preranking_outputs to skip training.')
+                             'Used with save_*_outputs modes to skip training and export outputs from the best checkpoint.')
     return parser.parse_args()

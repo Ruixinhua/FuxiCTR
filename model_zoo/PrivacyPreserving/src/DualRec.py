@@ -81,6 +81,8 @@ class DualRec(BaseModel):
                  base_loss_weight=1.0,       # device BCE weight
                  cloud_loss_weight=1.0,      # cloud BCE weight
                  kd_loss_type="kl",          # "kl", "mse", "cosine"
+                 # Inference routing
+                 inference_model="auto",     # "auto", "cloud", "device"
                  # Feature separation
                  personalization_feature_list=None,
                  personalization_field="is_personalization",
@@ -126,6 +128,7 @@ class DualRec(BaseModel):
         self.base_loss_weight = base_loss_weight
         self.cloud_loss_weight = cloud_loss_weight
         self.kd_loss_type = kd_loss_type
+        self.inference_model = inference_model
         self.personalization_feature_list = personalization_feature_list or []
         self.personalization_field = personalization_field
 
@@ -190,12 +193,17 @@ class DualRec(BaseModel):
         cloud_logit = self.cloud_backbone(X)
         cloud_y_pred = self.output_activation(cloud_logit)
 
-        # Route: personalized -> cloud, non-personalized -> device
-        final_pred = torch.zeros_like(device_y_pred)
-        if personalized_mask.any():
-            final_pred[personalized_mask] = cloud_y_pred[personalized_mask]
-        if non_personalized_mask.any():
-            final_pred[non_personalized_mask] = device_y_pred[non_personalized_mask]
+        # Route predictions based on inference_model setting
+        if self.inference_model == "cloud":
+            final_pred = cloud_y_pred
+        elif self.inference_model == "device":
+            final_pred = device_y_pred
+        else:  # "auto" — original routing
+            final_pred = torch.zeros_like(device_y_pred)
+            if personalized_mask.any():
+                final_pred[personalized_mask] = cloud_y_pred[personalized_mask]
+            if non_personalized_mask.any():
+                final_pred[non_personalized_mask] = device_y_pred[non_personalized_mask]
 
         return_dict = {
             "y_pred": final_pred,

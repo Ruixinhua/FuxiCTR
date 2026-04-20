@@ -33,15 +33,17 @@ class NegativeSampler:
     - Pre-computed numpy arrays for fast lookup
     - Cached feature arrays for GPU transfer
     - Optional per-user candidate pools from retrieval stage
-    
+    - Optional popularity-weighted sampling (sample proportional to item frequency^alpha)
+
     Usage:
         # Random sampling (default)
         sampler = NegativeSampler(item_features_df, item_id_col='cand_item_id')
         neg_item_ids = sampler.sample_negatives_batch(positive_ids, num_negatives=4)
         
-        # Retrieval-based sampling
+        # Popularity-weighted sampling
         sampler = NegativeSampler(
             item_features_df, item_id_col='cand_item_id',
+            item_popularity=popularity_counts, popularity_alpha=0.75,
         )
     """
     
@@ -49,6 +51,8 @@ class NegativeSampler:
         self,
         item_features_df: pd.DataFrame,
         item_id_col: str = 'cand_item_id',
+        item_popularity: Optional[Dict] = None,
+        popularity_alpha: float = 0.75,
     ):
         """
         Initialize the negative sampler with pre-computed lookup structures.
@@ -56,6 +60,10 @@ class NegativeSampler:
         Args:
             item_features_df: DataFrame containing item features.
             item_id_col: Column name for item IDs
+            item_popularity: Optional dict mapping item_id -> frequency count.
+                            If provided, enables popularity-weighted sampling.
+            popularity_alpha: Smoothing exponent for popularity weights (0=uniform, 1=proportional).
+                            Default 0.75 following word2vec negative sampling convention.
         """
         self.item_id_col = item_id_col
 
@@ -79,10 +87,19 @@ class NegativeSampler:
         self.user_candidates: Optional[Dict[Any, np.ndarray]] = None
         self.has_user_candidates = False
 
+        # Popularity-weighted sampling
+        self.sampling_probs: Optional[np.ndarray] = None
+        if item_popularity is not None:
+            counts = np.array([item_popularity.get(iid, 1.0) for iid in self.all_item_ids], dtype=np.float64)
+            counts = np.power(counts, popularity_alpha)
+            self.sampling_probs = counts / counts.sum()
+            logger.info(f"Popularity-weighted sampling enabled (alpha={popularity_alpha})")
+
         logger.info(f"NegativeSampler initialized with {self.num_items} items, "
                    f"{self.item_features_df.shape[1]} feature columns pre-cached"
-                   f"{', with per-user candidates' if self.has_user_candidates else ''}")
-    
+                   f"{', with per-user candidates' if self.has_user_candidates else ''}"
+                   f"{', popularity-weighted' if self.sampling_probs is not None else ''}")
+
     def sample_negatives_batch(
         self,
         positive_item_ids: np.ndarray,
@@ -106,12 +123,18 @@ class NegativeSampler:
         oversample_factor = 2
         total_samples = num_negatives * oversample_factor
         
-        # Random indices into all_item_ids
-        sampled_indices = np.random.randint(
-            0, self.num_items,
-            size=(batch_size, total_samples)
-        )
-        
+        # Random indices into all_item_ids (uniform or popularity-weighted)
+        if self.sampling_probs is not None:
+            sampled_indices = np.array([
+                np.random.choice(self.num_items, size=total_samples, replace=True, p=self.sampling_probs)
+                for _ in range(batch_size)
+            ])
+        else:
+            sampled_indices = np.random.randint(
+                0, self.num_items,
+                size=(batch_size, total_samples)
+            )
+
         # Get corresponding item IDs
         sampled_ids = self.all_item_ids[sampled_indices]
         
