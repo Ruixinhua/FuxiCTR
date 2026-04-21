@@ -97,6 +97,8 @@ class PrerankingStage(BaseStage):
         self.loss_type = model_params.get('loss_type', 'bpr')  # 'bpr', 'margin', 'softmax'
         self.margin = model_params.get('margin', 1.0)
         self.use_in_batch_negatives = model_params.get('use_in_batch_negatives', False)
+        self.in_batch_negative_chunk_size = max(1, int(model_params.get('in_batch_negative_chunk_size', 128)))
+        self.in_batch_negative_sample_size = int(model_params.get('in_batch_negative_sample_size', 255))
         self.negative_sampler: Optional[NegativeSampler] = None
         # Inference batch size for process_and_rank_candidates
         self.inference_batch_size = model_params.get('inference_batch_size', 50000)
@@ -324,6 +326,12 @@ class PrerankingStage(BaseStage):
         model.optimizer.zero_grad()
         loss.backward()
 
+        cls._finalize_gradient_update(model, batch_size)
+
+    @classmethod
+    def _finalize_gradient_update(cls, model: Any, batch_size: int):
+        """Finalize one optimizer update after gradients have already been accumulated."""
+
         if cls._uses_dp_gradient_perturbation(model):
             model._clip_gradients()
             model._add_dp_noise(batch_size)
@@ -342,6 +350,97 @@ class PrerankingStage(BaseStage):
             return model_output.get('logit', model_output['y_pred'])
         return model_output['y_pred']
 
+    @staticmethod
+    def _supports_pairwise_auxiliary_loss(model: Any) -> bool:
+        """Return True when pairwise training should preserve model-specific auxiliary losses."""
+        return type(model).__name__ in {"DualRec", "FedCAR", "FedCIA"}
+
+    def _compute_pairwise_auxiliary_loss(self, model_output: Dict[str, Any]) -> Optional[torch.Tensor]:
+        """
+        Re-apply model-specific auxiliary losses when pairwise training bypasses model.train_step().
+
+        The pairwise preranking loop optimizes ranking losses directly and therefore skips the
+        BaseModel -> add_loss() path where several privacy-preserving models define their
+        collaborative regularizers. This helper mirrors only those auxiliary terms, leaving the
+        pairwise ranking loss as the primary supervised signal for positives vs. negatives.
+        """
+        model_name = type(self.model).__name__
+        aux_loss = None
+
+        if model_name == "DualRec":
+            personalized_mask = model_output["personalized_mask"]
+            if personalized_mask.any():
+                kd_loss = self.model._compute_kd_loss(
+                    model_output["device_logit"][personalized_mask],
+                    model_output["cloud_logit"][personalized_mask].detach(),
+                )
+                aux_loss = self.model.kd_loss_weight * kd_loss
+
+                if self.model.mutual_reg_weight > 0:
+                    reverse_kd = self.model._compute_kd_loss(
+                        model_output["cloud_logit"][personalized_mask],
+                        model_output["device_logit"][personalized_mask].detach(),
+                    )
+                    aux_loss = aux_loss + self.model.mutual_reg_weight * reverse_kd
+
+            if self.model.odr_loss_weight > 0:
+                odr_loss = self.model._compute_odr_loss(
+                    model_output["device_logit"],
+                    model_output["cloud_logit"],
+                )
+                aux_loss = odr_loss * self.model.odr_loss_weight if aux_loss is None else aux_loss + self.model.odr_loss_weight * odr_loss
+
+            return aux_loss
+
+        if model_name == "FedCAR":
+            if self.model.contrastive_weight > 0:
+                contrastive_loss = self.model._info_nce_loss(
+                    model_output["cloud_proj"].detach(),
+                    model_output["device_proj"],
+                )
+                aux_loss = self.model.contrastive_weight * contrastive_loss
+
+            if self.model.use_prototype and self.model.training:
+                self.model._update_prototype(model_output["cloud_proj"])
+                device_proj_norm = torch.nn.functional.normalize(model_output["device_proj"], dim=-1)
+                proto_norm = torch.nn.functional.normalize(self.model.global_prototype.unsqueeze(0), dim=-1)
+                prototype_loss = 1 - (device_proj_norm * proto_norm).sum(dim=-1).mean()
+                weighted_proto_loss = self.model.prototype_weight * prototype_loss
+                aux_loss = weighted_proto_loss if aux_loss is None else aux_loss + weighted_proto_loss
+
+            return aux_loss
+
+        if model_name == "FedCIA":
+            cloud_sim = self.model._compute_similarity_matrix(
+                model_output["cloud_latent"].detach(),
+                add_noise=True,
+            )
+            device_sim = self.model._compute_similarity_matrix(
+                model_output["device_latent"],
+                add_noise=False,
+            )
+            align_loss = self.model.similarity_align_weight * torch.nn.functional.mse_loss(device_sim, cloud_sim)
+            aux_loss = align_loss
+
+            if self.model.reverse_align_weight > 0:
+                cloud_sim_live = self.model._compute_similarity_matrix(
+                    model_output["cloud_latent"],
+                    add_noise=False,
+                )
+                device_sim_detached = self.model._compute_similarity_matrix(
+                    model_output["device_latent"].detach(),
+                    add_noise=False,
+                )
+                reverse_loss = self.model.reverse_align_weight * torch.nn.functional.mse_loss(
+                    cloud_sim_live,
+                    device_sim_detached,
+                )
+                aux_loss = aux_loss + reverse_loss
+
+            return aux_loss
+
+        return None
+
     def _get_item_feature_keys(self, item_id_col: str) -> set:
         """Infer which batch columns should be swapped when replacing candidate items."""
         item_feature_keys = {item_id_col}
@@ -353,33 +452,104 @@ class PrerankingStage(BaseStage):
                     item_feature_keys.add(feat_name)
         return item_feature_keys
 
-    @staticmethod
-    def _tile_batch_tensor(val: torch.Tensor, repeats: int) -> torch.Tensor:
-        """Repeat the full batch so item columns enumerate every in-batch candidate per user."""
-        repeat_shape = [repeats] + [1] * max(val.dim() - 1, 0)
-        return val.repeat(*repeat_shape)
-
-    def _compute_in_batch_scores(self, batch_dict: Dict[str, Any], item_id_col: str) -> torch.Tensor:
-        """
-        Build an all-pairs [B, B] score matrix by pairing each user/context row with every item in the batch.
-        """
-        batch_size = len(batch_dict[item_id_col])
-        item_feature_keys = self._get_item_feature_keys(item_id_col)
+    def _build_in_batch_chunk(
+        self,
+        batch_dict: Dict[str, Any],
+        item_feature_keys: set,
+        row_start: int,
+        row_end: int,
+        item_indices: torch.Tensor,
+    ) -> Dict[str, Any]:
+        """Build one in-batch chunk with explicit candidate indices for each user row."""
+        candidates_per_row = item_indices.size(1)
+        flat_item_indices = item_indices.reshape(-1)
         pair_batch_dict = {}
 
         for key, val in batch_dict.items():
             if hasattr(val, 'to'):
                 val = val.to(self.model.device)
                 if key in item_feature_keys:
-                    pair_batch_dict[key] = self._tile_batch_tensor(val, batch_size)
+                    pair_batch_dict[key] = val.index_select(0, flat_item_indices)
                 else:
-                    pair_batch_dict[key] = val.repeat_interleave(batch_size, dim=0)
+                    user_chunk = val[row_start:row_end]
+                    pair_batch_dict[key] = user_chunk.repeat_interleave(candidates_per_row, dim=0)
             else:
                 pair_batch_dict[key] = val
+        return pair_batch_dict
 
-        pair_output = self.model.forward(pair_batch_dict)
-        pair_scores = self._get_pairwise_scores(pair_output)
-        return pair_scores.reshape(batch_size, batch_size)
+    @staticmethod
+    def _sample_in_batch_negative_indices(
+        batch_size: int,
+        row_start: int,
+        row_end: int,
+        negatives_per_row: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """
+        Sample batch-local negatives with replacement while excluding each row's own positive index.
+        """
+        row_count = row_end - row_start
+        sampled = torch.randint(0, batch_size - 1, (row_count, negatives_per_row), device=device)
+        row_indices = torch.arange(row_start, row_end, device=device).unsqueeze(1)
+        return sampled + (sampled >= row_indices).long()
+
+    def _backward_in_batch_loss(
+        self,
+        batch_dict: Dict[str, Any],
+        item_id_col: str,
+        loss_weight: float = 1.0,
+    ) -> float:
+        """
+        Backprop the in-batch cross-entropy loss chunk-by-chunk to cap peak activation memory.
+        """
+        batch_size = len(batch_dict[item_id_col])
+        chunk_size = min(self.in_batch_negative_chunk_size, batch_size)
+        max_negatives = max(batch_size - 1, 0)
+        use_sampled_negatives = (
+            self.in_batch_negative_sample_size > 0
+            and self.in_batch_negative_sample_size < max_negatives
+        )
+        item_feature_keys = self._get_item_feature_keys(item_id_col)
+        total_loss_value = 0.0
+
+        for row_start in range(0, batch_size, chunk_size):
+            row_end = min(row_start + chunk_size, batch_size)
+            row_count = row_end - row_start
+            row_indices = torch.arange(row_start, row_end, device=self.model.device)
+
+            if use_sampled_negatives:
+                neg_indices = self._sample_in_batch_negative_indices(
+                    batch_size=batch_size,
+                    row_start=row_start,
+                    row_end=row_end,
+                    negatives_per_row=self.in_batch_negative_sample_size,
+                    device=self.model.device,
+                )
+                item_indices = torch.cat([row_indices.unsqueeze(1), neg_indices], dim=1)
+                in_batch_targets = torch.zeros(row_count, dtype=torch.long, device=self.model.device)
+            else:
+                item_indices = torch.arange(batch_size, device=self.model.device).unsqueeze(0).expand(row_count, -1)
+                in_batch_targets = row_indices
+
+            pair_batch_dict = self._build_in_batch_chunk(
+                batch_dict=batch_dict,
+                item_feature_keys=item_feature_keys,
+                row_start=row_start,
+                row_end=row_end,
+                item_indices=item_indices,
+            )
+            pair_output = self.model.forward(pair_batch_dict)
+            pair_scores = self._get_pairwise_scores(pair_output).reshape(row_count, item_indices.size(1))
+            chunk_loss = torch.nn.functional.cross_entropy(
+                pair_scores,
+                in_batch_targets,
+                reduction='sum',
+            )
+            scaled_chunk_loss = loss_weight * chunk_loss / batch_size
+            total_loss_value += scaled_chunk_loss.detach().item()
+            scaled_chunk_loss.backward()
+
+        return total_loss_value
 
     def train(self,
               train_data: Any,
@@ -429,7 +599,22 @@ class PrerankingStage(BaseStage):
             )
             self.logger.info(f"Negative Sampling: {self.num_negatives} negatives per positive, loss_type={self.loss_type}")
         if self.use_in_batch_negatives:
-            self.logger.info("In-batch negatives enabled (cross-entropy over batch)")
+            if self.in_batch_negative_sample_size > 0:
+                self.logger.info(
+                    "In-batch negatives enabled (sampled cross-entropy, chunk_size=%d, negatives_per_example=%d)",
+                    self.in_batch_negative_chunk_size,
+                    self.in_batch_negative_sample_size,
+                )
+            else:
+                self.logger.info(
+                    "In-batch negatives enabled (full-batch cross-entropy, chunk_size=%d)",
+                    self.in_batch_negative_chunk_size,
+                )
+        if use_pairwise_training and self._supports_pairwise_auxiliary_loss(self.model):
+            self.logger.info(
+                "Pairwise training will preserve model-specific auxiliary losses for %s.",
+                type(self.model).__name__,
+            )
         if self.num_negatives > 0 and self.item_features_df is None:
             self.logger.warning("num_negatives > 0 but item_features_df not loaded. Explicit negative sampling disabled.")
         
@@ -571,17 +756,23 @@ class PrerankingStage(BaseStage):
         batch_dict = dict(batch_data)
         batch_size = len(batch_dict[item_id_col])
 
-        pos_output = self.model.forward(batch_data)
-        pos_scores = self._get_pairwise_scores(pos_output)
-
         neg_batch_dict = None
         neg_scores_flat = None
         neg_scores = None
+        pos_scores = None
+        pos_output = None
+        aux_loss = None
+
+        if self.num_negatives > 0 or self._supports_pairwise_auxiliary_loss(self.model):
+            pos_output = self.model.forward(batch_data)
+            if self._supports_pairwise_auxiliary_loss(self.model):
+                aux_loss = self._compute_pairwise_auxiliary_loss(pos_output)
 
         if self.num_negatives > 0:
             if self.negative_sampler is None:
                 raise ValueError("Negative sampler not initialized. Call train() after loading item features.")
 
+            pos_scores = self._get_pairwise_scores(pos_output)
             pos_item_ids = batch_dict[item_id_col].cpu().numpy()
             neg_item_ids = self.negative_sampler.sample_negatives_batch(
                 pos_item_ids, self.num_negatives
@@ -612,29 +803,32 @@ class PrerankingStage(BaseStage):
             neg_scores_flat = self._get_pairwise_scores(neg_output)
             neg_scores = neg_scores_flat.view(batch_size, self.num_negatives)
 
-        in_batch_loss = None
-        if self.use_in_batch_negatives:
-            in_batch_scores = self._compute_in_batch_scores(batch_dict, item_id_col)
-            in_batch_targets = torch.arange(batch_size, device=self.model.device)
-            in_batch_loss = torch.nn.functional.cross_entropy(in_batch_scores, in_batch_targets)
-
-        loss = torch.tensor(0.0, device=self.model.device)
+        explicit_loss = None
         if neg_scores is not None:
             if self.loss_type == 'bpr':
-                loss = loss + bpr_loss(pos_scores, neg_scores)
+                explicit_loss = bpr_loss(pos_scores, neg_scores)
             elif self.loss_type == 'margin':
-                loss = loss + margin_ranking_loss(pos_scores, neg_scores, margin=self.margin)
-            elif self.loss_type == 'softmax':
-                loss = loss + softmax_cross_entropy_loss(pos_scores, neg_scores)
+                explicit_loss = margin_ranking_loss(pos_scores, neg_scores, margin=self.margin)
+            elif self.loss_type in ('softmax', 'sampled_softmax'):
+                explicit_loss = softmax_cross_entropy_loss(pos_scores, neg_scores)
             else:
                 raise ValueError(f"Unknown loss_type: {self.loss_type}")
 
-        if in_batch_loss is not None:
-            loss = 0.5 * loss + 0.5 * in_batch_loss if neg_scores is not None else in_batch_loss
-
-        if neg_scores is None and in_batch_loss is None:
+        if explicit_loss is None and not self.use_in_batch_negatives:
             raise ValueError("Pairwise training requires explicit negatives or use_in_batch_negatives=True.")
+
+        in_batch_loss_weight = 0.0
+        if self.use_in_batch_negatives:
+            if explicit_loss is not None:
+                explicit_loss = 0.5 * explicit_loss
+                in_batch_loss_weight = 0.5
+            else:
+                in_batch_loss_weight = 1.0
             
+        loss = None
+        if explicit_loss is not None:
+            loss = explicit_loss
+
         # Add per-user diversity loss if enabled
         if self.use_diversity_loss and neg_batch_dict is not None and neg_scores_flat is not None:
             diversity_theta = self.model_params.get('diversity_theta', 0.7)
@@ -653,14 +847,33 @@ class PrerankingStage(BaseStage):
                 kernel=diversity_kernel,
                 gamma=diversity_gamma,
             )
-            loss = loss + diversity_delta
+            loss = diversity_delta if loss is None else loss + diversity_delta
+
+        if aux_loss is not None:
+            loss = aux_loss if loss is None else loss + aux_loss
 
         # Add regularization
         if hasattr(self.model, 'regularization_loss'):
-            loss = loss + self.model.regularization_loss()
-        self._apply_gradient_update(self.model, loss, batch_size)
-        
-        return loss
+            reg_loss = self.model.regularization_loss()
+            loss = reg_loss if loss is None else loss + reg_loss
+
+        self.model.optimizer.zero_grad()
+        total_loss_value = 0.0
+
+        if loss is not None:
+            total_loss_value += loss.detach().item()
+            loss.backward()
+
+        if in_batch_loss_weight > 0:
+            total_loss_value += self._backward_in_batch_loss(
+                batch_dict=batch_dict,
+                item_id_col=item_id_col,
+                loss_weight=in_batch_loss_weight,
+            )
+
+        self._finalize_gradient_update(self.model, batch_size)
+
+        return torch.tensor(total_loss_value, device=self.model.device)
 
     def process(self,
                 input_data: StageOutput,
