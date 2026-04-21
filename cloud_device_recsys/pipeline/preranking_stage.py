@@ -300,6 +300,41 @@ class PrerankingStage(BaseStage):
         
         return best_metric
 
+    @staticmethod
+    def _uses_dp_gradient_perturbation(model: Any) -> bool:
+        """Return True when a model exposes DP-aware gradient update hooks."""
+        return (
+            hasattr(model, "_clip_gradients")
+            and callable(getattr(model, "_clip_gradients"))
+            and hasattr(model, "_add_dp_noise")
+            and callable(getattr(model, "_add_dp_noise"))
+            and hasattr(model, "max_grad_norm_per_sample")
+            and hasattr(model, "noise_multiplier")
+        )
+
+    @classmethod
+    def _apply_gradient_update(cls, model: Any, loss: torch.Tensor, batch_size: int):
+        """
+        Apply one optimizer update, dispatching to model-specific DP logic when available.
+
+        The preranking pairwise loop bypasses ``model.train_step()``, so DP models such
+        as DPSGD need their clipping/noise path re-applied here.
+        """
+        model.optimizer.zero_grad()
+        loss.backward()
+
+        if cls._uses_dp_gradient_perturbation(model):
+            model._clip_gradients()
+            model._add_dp_noise(batch_size)
+            if hasattr(model, "_dp_steps"):
+                model._dp_steps += 1
+            if hasattr(model, "_total_samples"):
+                model._total_samples += batch_size
+        else:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), model._max_gradient_norm)
+
+        model.optimizer.step()
+
     def train(self,
               train_data: Any,
               valid_data: Optional[Any] = None,
@@ -575,11 +610,7 @@ class PrerankingStage(BaseStage):
         # Add regularization
         if hasattr(self.model, 'regularization_loss'):
             loss = loss + self.model.regularization_loss()
-        # Backprop
-        self.model.optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.model._max_gradient_norm)
-        self.model.optimizer.step()
+        self._apply_gradient_update(self.model, loss, batch_size)
         
         return loss
 
