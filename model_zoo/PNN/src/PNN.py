@@ -34,6 +34,7 @@ class PNN(BaseModel):
                  net_dropout=0, 
                  batch_norm=False, 
                  product_type="inner", 
+                 use_sharing=True,
                  embedding_regularizer=None, 
                  net_regularizer=None, 
                  **kwargs):
@@ -43,7 +44,7 @@ class PNN(BaseModel):
                                   embedding_regularizer=embedding_regularizer, 
                                   net_regularizer=net_regularizer,
                                   **kwargs) 
-        self.embedding_layer = FeatureEmbedding(feature_map, embedding_dim)
+        self.embedding_layer = FeatureEmbedding(feature_map, embedding_dim, use_sharing=use_sharing)
         if product_type != "inner":
             raise NotImplementedError("product_type={} has not been implemented.".format(product_type))
         self.inner_product_layer = InnerProductInteraction(self.num_fields, output="inner_product")

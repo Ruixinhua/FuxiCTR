@@ -96,6 +96,7 @@ class PrerankingStage(BaseStage):
         self.evaluate_pool_diversity = model_params.get('evaluate_pool_diversity', False)
         self.loss_type = model_params.get('loss_type', 'bpr')  # 'bpr', 'margin', 'softmax'
         self.margin = model_params.get('margin', 1.0)
+        self.use_in_batch_negatives = model_params.get('use_in_batch_negatives', False)
         self.negative_sampler: Optional[NegativeSampler] = None
         # Inference batch size for process_and_rank_candidates
         self.inference_batch_size = model_params.get('inference_batch_size', 50000)
@@ -203,7 +204,7 @@ class PrerankingStage(BaseStage):
              pass
 
     def _run_training_phase(self, phase_name, train_data, valid_data,
-                            epochs, patience, mode, use_negative_sampling,
+                            epochs, patience, mode, use_pairwise_training,
                             item_id_col, best_metric, metrics, 
                             diversity_warmup_epochs=0, target_diversity_lambda=0.01,
                             **kwargs):
@@ -217,7 +218,7 @@ class PrerankingStage(BaseStage):
             epochs: Max epochs for this phase
             patience: Early stopping patience
             mode: 'max' or 'min' for monitor metric
-            use_negative_sampling: Whether to use negative sampling
+            use_pairwise_training: Whether to use pairwise/in-batch training
             item_id_col: Name of item ID column
             best_metric: Starting best metric value
             metrics: Metrics dict to update (mutated in-place)
@@ -255,7 +256,7 @@ class PrerankingStage(BaseStage):
             steps = 0
             
             for batch_data in train_data:
-                if use_negative_sampling and self.num_negatives > 0:
+                if use_pairwise_training:
                     loss = self._train_step_with_negatives(batch_data, item_id_col, torch)
                 else:
                     loss = self.model.train_step(batch_data)
@@ -264,7 +265,7 @@ class PrerankingStage(BaseStage):
                 steps += 1
             
             avg_loss = total_loss / steps if steps > 0 else 0.0
-            if use_negative_sampling:
+            if use_pairwise_training:
                 self.logger.info(f"[{phase_name}] Train Loss ({self.loss_type}): {avg_loss:.6f}")
             else:
                 self.logger.info(f"[{phase_name}] Train Loss: {avg_loss:.6f}")
@@ -335,6 +336,51 @@ class PrerankingStage(BaseStage):
 
         model.optimizer.step()
 
+    def _get_pairwise_scores(self, model_output: Dict[str, Any]) -> torch.Tensor:
+        """Extract the score tensor used by pairwise and in-batch losses."""
+        if self.use_logit:
+            return model_output.get('logit', model_output['y_pred'])
+        return model_output['y_pred']
+
+    def _get_item_feature_keys(self, item_id_col: str) -> set:
+        """Infer which batch columns should be swapped when replacing candidate items."""
+        item_feature_keys = {item_id_col}
+        if self.item_features_df is not None:
+            item_feature_keys.update(self.item_features_df.columns)
+        if self.feature_group_manager is not None:
+            for feat_name, group in self.feature_group_manager.feature_assignments.items():
+                if group == FeatureGroup.FG1:
+                    item_feature_keys.add(feat_name)
+        return item_feature_keys
+
+    @staticmethod
+    def _tile_batch_tensor(val: torch.Tensor, repeats: int) -> torch.Tensor:
+        """Repeat the full batch so item columns enumerate every in-batch candidate per user."""
+        repeat_shape = [repeats] + [1] * max(val.dim() - 1, 0)
+        return val.repeat(*repeat_shape)
+
+    def _compute_in_batch_scores(self, batch_dict: Dict[str, Any], item_id_col: str) -> torch.Tensor:
+        """
+        Build an all-pairs [B, B] score matrix by pairing each user/context row with every item in the batch.
+        """
+        batch_size = len(batch_dict[item_id_col])
+        item_feature_keys = self._get_item_feature_keys(item_id_col)
+        pair_batch_dict = {}
+
+        for key, val in batch_dict.items():
+            if hasattr(val, 'to'):
+                val = val.to(self.model.device)
+                if key in item_feature_keys:
+                    pair_batch_dict[key] = self._tile_batch_tensor(val, batch_size)
+                else:
+                    pair_batch_dict[key] = val.repeat_interleave(batch_size, dim=0)
+            else:
+                pair_batch_dict[key] = val
+
+        pair_output = self.model.forward(pair_batch_dict)
+        pair_scores = self._get_pairwise_scores(pair_output)
+        return pair_scores.reshape(batch_size, batch_size)
+
     def train(self,
               train_data: Any,
               valid_data: Optional[Any] = None,
@@ -372,8 +418,9 @@ class PrerankingStage(BaseStage):
         initial_lr = kwargs.pop('learning_rate', self.model_params.get('learning_rate', 1e-3))
         metrics = {}
         
-        # Initialize negative sampler if using negative sampling
+        # Initialize negative sampler if using explicit negative sampling
         use_negative_sampling = self.num_negatives > 0 and self.item_features_df is not None
+        use_pairwise_training = use_negative_sampling or self.use_in_batch_negatives
         if use_negative_sampling:
             item_id_col = getattr(self.feature_map, 'dataset_config', {}).get('item_id_col', 'cand_item_id')
             self.negative_sampler = NegativeSampler(
@@ -381,9 +428,10 @@ class PrerankingStage(BaseStage):
                 item_id_col=item_id_col,
             )
             self.logger.info(f"Negative Sampling: {self.num_negatives} negatives per positive, loss_type={self.loss_type}")
-        else:
-            if self.num_negatives > 0 and self.item_features_df is None:
-                self.logger.warning("num_negatives > 0 but item_features_df not loaded. Using standard training.")
+        if self.use_in_batch_negatives:
+            self.logger.info("In-batch negatives enabled (cross-entropy over batch)")
+        if self.num_negatives > 0 and self.item_features_df is None:
+            self.logger.warning("num_negatives > 0 but item_features_df not loaded. Explicit negative sampling disabled.")
         
         # Ensure optimizer is initialized
         if not hasattr(self.model, 'optimizer') or self.model.optimizer is None:
@@ -429,7 +477,7 @@ class PrerankingStage(BaseStage):
                     epochs=phase1_epochs,
                     patience=patience,
                     mode=mode,
-                    use_negative_sampling=use_negative_sampling,
+                    use_pairwise_training=use_pairwise_training,
                     item_id_col=item_id_col,
                     best_metric=best_metric,
                     metrics=metrics,
@@ -465,7 +513,7 @@ class PrerankingStage(BaseStage):
                 epochs=self.diversity_epochs,
                 patience=patience,
                 mode=mode,
-                use_negative_sampling=use_negative_sampling,
+                use_pairwise_training=use_pairwise_training,
                 item_id_col=item_id_col,
                 best_metric=best_metric,
                 metrics=metrics,
@@ -485,7 +533,7 @@ class PrerankingStage(BaseStage):
                 epochs=epochs,
                 patience=patience,
                 mode=mode,
-                use_negative_sampling=use_negative_sampling,
+                use_pairwise_training=use_pairwise_training,
                 item_id_col=item_id_col,
                 best_metric=best_metric,
                 metrics=metrics,
@@ -510,10 +558,7 @@ class PrerankingStage(BaseStage):
     
     def _train_step_with_negatives(self, batch_data, item_id_col: str, torch):
         """
-        Single training step with negative sampling for pairwise ranking.
-        
-        Optimized: batches all negatives into a single forward pass instead of
-        processing each negative separately.
+        Single training step with explicit negatives and/or in-batch negatives.
         
         Args:
             batch_data: Positive example batch
@@ -525,70 +570,73 @@ class PrerankingStage(BaseStage):
         """
         batch_dict = dict(batch_data)
         batch_size = len(batch_dict[item_id_col])
-        
-        # Get positive item IDs
-        pos_item_ids = batch_dict[item_id_col].cpu().numpy()
-        neg_item_ids = self.negative_sampler.sample_negatives_batch(
-            pos_item_ids, self.num_negatives
-        )
-        
-        # Get positive predictions
-        pos_output = self.model.forward(batch_data)
-        # BPR and Softmax losses require logits, not probabilities
-        if self.use_logit:
-            pos_scores = pos_output.get('logit', pos_output['y_pred'])  # [B, 1]
-        else:
-            pos_scores = pos_output['y_pred']
-        
-        # === Optimized: Batch all negatives into single forward pass ===
-        # Flatten: [B, num_neg] -> [B * num_neg]
-        neg_ids_flat = neg_item_ids.reshape(-1)
-        
-        # Get features for all negatives at once using the optimized method
-        neg_features = self.negative_sampler.get_features_by_ids(neg_ids_flat)
-        
-        # Build batched negative dict: repeat user features, use negative item features
-        neg_batch_dict = {}
-        for key, val in batch_dict.items():
-            if key == item_id_col:
-                neg_batch_dict[key] = torch.tensor(neg_ids_flat, device=self.model.device)
-            elif key in neg_features.columns:
-                # Use negative item feature
-                val = neg_features[key].to_numpy(copy=False)
-                if not np.isscalar(val[0]):
-                    val = np.vstack(val)  # Ensure 2D for multi-valued features
-                neg_batch_dict[key] = torch.tensor(val, device=self.model.device)
-            else:
-                # Repeat user features along batch dimension: [B, ...] -> [B * num_neg, ...]
-                if hasattr(val, 'to'):
-                    val = val.to(self.model.device)
-                    # Repeat each element num_negatives times along batch dim (dim=0)
-                    neg_batch_dict[key] = val.repeat_interleave(self.num_negatives, dim=0)
-                else:
-                    neg_batch_dict[key] = val
 
-        neg_output = self.model.forward(neg_batch_dict)
-        # BPR and Softmax losses require logits, not probabilities
-        if self.use_logit:
-            neg_scores_flat = neg_output.get('logit', neg_output['y_pred'])  # [B * num_neg, 1]
-        else:
-            neg_scores_flat = neg_output['y_pred']
-        
-        # Reshape back: [B * num_neg, 1] -> [B, num_neg]
-        neg_scores = neg_scores_flat.view(batch_size, self.num_negatives)
-        
-        # Compute pairwise ranking loss
-        if self.loss_type == 'bpr':
-            loss = bpr_loss(pos_scores, neg_scores)
-        elif self.loss_type == 'margin':
-            loss = margin_ranking_loss(pos_scores, neg_scores, margin=self.margin)
-        elif self.loss_type == 'softmax':
-            loss = softmax_cross_entropy_loss(pos_scores, neg_scores)
-        else:
-            raise ValueError(f"Unknown loss_type: {self.loss_type}")
+        pos_output = self.model.forward(batch_data)
+        pos_scores = self._get_pairwise_scores(pos_output)
+
+        neg_batch_dict = None
+        neg_scores_flat = None
+        neg_scores = None
+
+        if self.num_negatives > 0:
+            if self.negative_sampler is None:
+                raise ValueError("Negative sampler not initialized. Call train() after loading item features.")
+
+            pos_item_ids = batch_dict[item_id_col].cpu().numpy()
+            neg_item_ids = self.negative_sampler.sample_negatives_batch(
+                pos_item_ids, self.num_negatives
+            )
+
+            # Flatten: [B, num_neg] -> [B * num_neg]
+            neg_ids_flat = neg_item_ids.reshape(-1)
+            neg_features = self.negative_sampler.get_features_by_ids(neg_ids_flat)
+
+            # Build batched negative dict: repeat user features, use negative item features
+            neg_batch_dict = {}
+            for key, val in batch_dict.items():
+                if key == item_id_col:
+                    neg_batch_dict[key] = torch.tensor(neg_ids_flat, device=self.model.device)
+                elif key in neg_features.columns:
+                    val = neg_features[key].to_numpy(copy=False)
+                    if not np.isscalar(val[0]):
+                        val = np.vstack(val)  # Ensure 2D for multi-valued features
+                    neg_batch_dict[key] = torch.tensor(val, device=self.model.device)
+                else:
+                    if hasattr(val, 'to'):
+                        val = val.to(self.model.device)
+                        neg_batch_dict[key] = val.repeat_interleave(self.num_negatives, dim=0)
+                    else:
+                        neg_batch_dict[key] = val
+
+            neg_output = self.model.forward(neg_batch_dict)
+            neg_scores_flat = self._get_pairwise_scores(neg_output)
+            neg_scores = neg_scores_flat.view(batch_size, self.num_negatives)
+
+        in_batch_loss = None
+        if self.use_in_batch_negatives:
+            in_batch_scores = self._compute_in_batch_scores(batch_dict, item_id_col)
+            in_batch_targets = torch.arange(batch_size, device=self.model.device)
+            in_batch_loss = torch.nn.functional.cross_entropy(in_batch_scores, in_batch_targets)
+
+        loss = torch.tensor(0.0, device=self.model.device)
+        if neg_scores is not None:
+            if self.loss_type == 'bpr':
+                loss = loss + bpr_loss(pos_scores, neg_scores)
+            elif self.loss_type == 'margin':
+                loss = loss + margin_ranking_loss(pos_scores, neg_scores, margin=self.margin)
+            elif self.loss_type == 'softmax':
+                loss = loss + softmax_cross_entropy_loss(pos_scores, neg_scores)
+            else:
+                raise ValueError(f"Unknown loss_type: {self.loss_type}")
+
+        if in_batch_loss is not None:
+            loss = 0.5 * loss + 0.5 * in_batch_loss if neg_scores is not None else in_batch_loss
+
+        if neg_scores is None and in_batch_loss is None:
+            raise ValueError("Pairwise training requires explicit negatives or use_in_batch_negatives=True.")
             
         # Add per-user diversity loss if enabled
-        if self.use_diversity_loss:
+        if self.use_diversity_loss and neg_batch_dict is not None and neg_scores_flat is not None:
             diversity_theta = self.model_params.get('diversity_theta', 0.7)
             diversity_lambda = getattr(self.model, '_diversity_lambda', self.model_params.get('diversity_lambda', 0.01))
             diversity_kernel = self.model_params.get('diversity_kernel', 'gram')

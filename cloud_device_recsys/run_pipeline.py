@@ -141,6 +141,7 @@ def _prepare_stage_data_loaders(feature_map, stage_config: dict, paths: dict,
                                 create_train=True, create_test=True, shuffle_train=True,
                                 create_item_loader=False, item_feature_map=None,
                                 num_negatives: int = 0, label_col: str = "label",
+                                force_positive_train_data: bool = False,
                                 logger=None):
     """
     Create data loaders for a pipeline stage.
@@ -156,6 +157,7 @@ def _prepare_stage_data_loaders(feature_map, stage_config: dict, paths: dict,
         item_feature_map: Feature map for item pool (required if create_item_loader=True)
         num_negatives: Number of negatives per positive (0 = pointwise, >0 = pairwise)
         label_col: Label column name for filtering positive samples
+        force_positive_train_data: Whether to force positive-only train data even when num_negatives == 0
         logger: Logger instance for positive data creation
 
     Returns:
@@ -172,7 +174,8 @@ def _prepare_stage_data_loaders(feature_map, stage_config: dict, paths: dict,
             train_path=paths['train_path'],
             num_negatives=num_negatives,
             label_col=label_col,
-            logger=logger
+            logger=logger,
+            force_positive_only=force_positive_train_data,
         )
 
         # train_fm = copy.deepcopy(feature_map)
@@ -438,6 +441,7 @@ def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, fg_m
 
     # Create data loaders for preranking stage
     num_negatives = preranking_config.get('model_params', {}).get('num_negatives', 0)
+    use_in_batch_negatives = preranking_config.get('model_params', {}).get('use_in_batch_negatives', False)
     loaders = _prepare_stage_data_loaders(
         feature_map=preranking_stage.feature_map,
         stage_config=preranking_config,
@@ -446,6 +450,7 @@ def run_preranking_stage(preranking_stage, pipeline_config, dataset_config, fg_m
         create_test=False,
         num_negatives=num_negatives,
         label_col=dataset_config.get('label_col', {}).get('name', 'label'),
+        force_positive_train_data=use_in_batch_negatives,
         logger=logger
     )
     train_gen, _ = loaders['train_loader'].make_iterator()
@@ -544,6 +549,7 @@ def run_joint_training_stage(preranking_stage, reranking_stage, pipeline_config,
     _jt_nn = joint_params.get('num_negatives', None)
     pre_num_negatives = preranking_config.get('model_params', {}).get('num_negatives', _jt_nn or 0)
     re_num_negatives  = reranking_config.get('model_params', {}).get('num_negatives', _jt_nn or 0)
+    pre_use_in_batch_negatives = preranking_config.get('model_params', {}).get('use_in_batch_negatives', False)
     logger.info(f"[Joint Training] num_negatives: preranking={pre_num_negatives}, reranking={re_num_negatives}")
 
     label_col = dataset_config.get('label_col', {}).get('name', 'label')
@@ -558,6 +564,7 @@ def run_joint_training_stage(preranking_stage, reranking_stage, pipeline_config,
         create_test=False,
         num_negatives=pre_num_negatives,
         label_col=label_col,
+        force_positive_train_data=pre_use_in_batch_negatives,
         logger=logger,
     )
     preranking_train_loader = pre_loaders['train_loader']
@@ -672,6 +679,7 @@ def run_dtcn_preranking_stage(pipeline_config, dataset_config, fg_manager, featu
     paths = prepare_debug_paths(paths, dataset_config, logger)
 
     num_negatives = preranking_config.get('model_params', {}).get('num_negatives', 0)
+    use_in_batch_negatives = preranking_config.get('model_params', {}).get('use_in_batch_negatives', False)
     label_col = dataset_config.get('label_col', {}).get('name', 'label')
 
     # 2. Build feature maps
@@ -707,6 +715,7 @@ def run_dtcn_preranking_stage(pipeline_config, dataset_config, fg_manager, featu
         create_test=False,
         num_negatives=num_negatives,
         label_col=label_col,
+        force_positive_train_data=use_in_batch_negatives,
         logger=logger
     )
 
@@ -719,6 +728,7 @@ def run_dtcn_preranking_stage(pipeline_config, dataset_config, fg_manager, featu
         create_test=False,
         num_negatives=num_negatives,
         label_col=label_col,
+        force_positive_train_data=use_in_batch_negatives,
         logger=logger
     )
 
