@@ -92,6 +92,13 @@ class RetrievalStage(BaseStage):
         self.item_embeddings: Optional[torch.Tensor] = None
         self.item_ids: Optional[torch.Tensor] = None
         self.item_id_to_idx: Optional[Dict] = None
+        # Popularity baseline cache aligned with self.item_ids
+        self.item_popularity: Optional[np.ndarray] = None
+        default_pop_metrics = model_params.get('popularity_metrics_k', [100])
+        self.popularity_metrics_k = sorted({
+            int(k) for k in default_pop_metrics
+            if isinstance(k, (int, float)) and int(k) > 0
+        })
 
     def build_model(self) -> DualTowerRetrieval:
         """Build and initialize the retrieval model using unified registry"""
@@ -377,6 +384,72 @@ class RetrievalStage(BaseStage):
 
         self.logger.info(f"Index Built: {self.item_embeddings.shape} items on {self.item_embeddings.device}")
 
+    def _ensure_item_popularity(self) -> bool:
+        """
+        Load train-split item popularity aligned with the retrieval item index.
+
+        The resulting ``self.item_popularity`` array shares the same order as
+        ``self.item_ids`` so chunk-time popularity lookups stay vectorized.
+        """
+        if self.item_popularity is not None:
+            return True
+        if self.item_ids is None:
+            self.logger.warning("Cannot build popularity cache before item index exists.")
+            return False
+
+        dataset_config = getattr(self.feature_map, 'dataset_config', {}) or {}
+        processed_paths = dataset_config.get('processed_paths', {}) or {}
+        train_path = processed_paths.get('train')
+        if not train_path:
+            processed_root = dataset_config.get('processed_data_root')
+            if processed_root:
+                train_path = os.path.join(processed_root, 'train.parquet')
+
+        item_id_col = dataset_config.get('item_id_col', 'cand_item_id')
+        if not train_path or not os.path.exists(train_path):
+            self.logger.warning(
+                f"Popularity metrics disabled: train split not found at {train_path!r}."
+            )
+            return False
+
+        pop_dict = None
+        try:
+            import polars as pl
+
+            pop_df = (
+                pl.scan_parquet(train_path)
+                .group_by(item_id_col)
+                .agg(pl.len().alias('popularity'))
+                .collect()
+            )
+            pop_dict = dict(zip(pop_df[item_id_col].to_list(), pop_df['popularity'].to_list()))
+        except Exception as ex:
+            self.logger.warning(
+                f"Polars popularity loading failed ({ex}); falling back to pandas."
+            )
+            try:
+                counts = pd.read_parquet(train_path, columns=[item_id_col])[item_id_col].value_counts()
+                pop_dict = counts.to_dict()
+            except Exception as fallback_ex:
+                self.logger.warning(
+                    f"Popularity metrics disabled: failed to load {train_path} ({fallback_ex})."
+                )
+                return False
+
+        item_ids_np = self.item_ids.cpu().numpy()
+        self.item_popularity = np.fromiter(
+            (float(pop_dict.get(item_id.item() if hasattr(item_id, 'item') else item_id, 0.0))
+             for item_id in item_ids_np),
+            dtype=np.float32,
+            count=len(item_ids_np)
+        )
+        self.logger.info(
+            "Loaded train popularity for %d indexed items from %s",
+            len(self.item_popularity),
+            train_path,
+        )
+        return True
+
     def _retrieve_and_score(
         self,
         input_data: Any,
@@ -420,6 +493,17 @@ class RetrievalStage(BaseStage):
         self.model.eval()
         metrics_k = self.metrics_k if metrics_k is None else metrics_k
         total_recall = {k: 0.0 for k in metrics_k} if compute_metrics else None
+        popularity_metrics_k = []
+        total_popularity_recall = None
+        if compute_metrics and return_output:
+            popularity_metrics_k = sorted({
+                k for k in self.popularity_metrics_k + [k for k in metrics_k if k <= self.top_k]
+                if k > 0
+            })
+            if popularity_metrics_k and self._ensure_item_popularity():
+                total_popularity_recall = {k: 0.0 for k in popularity_metrics_k}
+            elif popularity_metrics_k:
+                self.logger.warning("Popularity recall metrics requested but popularity cache is unavailable.")
         model_device = next(self.model.parameters()).device
 
         # Setup output
@@ -640,10 +724,50 @@ class RetrievalStage(BaseStage):
                     else:
                         neg_item_ids = np.empty(0, dtype=item_ids_np.dtype)
                         neg_scores = np.empty(0, dtype=np.float32)
+                    neg_pop = np.empty(0, dtype=np.float32)
+                    if negatives_needed > 0 and total_popularity_recall is not None:
+                        if len(tp_item_ids) > 0:
+                            negative_mask = ~np.isin(user_topk_item_ids, tp_item_ids, assume_unique=False)
+                            neg_indices = user_topk_indices[negative_mask][:negatives_needed]
+                        else:
+                            neg_indices = user_topk_indices[:negatives_needed]
+                        neg_pop = self.item_popularity[neg_indices]
 
                     total_candidates = len(tp_item_ids) + len(neg_item_ids)
                     if total_candidates == 0:
                         continue
+
+                    if total_popularity_recall is not None:
+                        if len(tp_item_ids) > 0:
+                            tp_pop = np.fromiter(
+                                (
+                                    self.item_popularity[self.item_id_to_idx[tp_item_id]]
+                                    if tp_item_id in self.item_id_to_idx else 0.0
+                                    for tp_item_id in tp_item_ids
+                                ),
+                                dtype=np.float32,
+                                count=len(tp_item_ids)
+                            )
+                        else:
+                            tp_pop = np.empty(0, dtype=np.float32)
+
+                        popularity_scores = np.concatenate([tp_pop, neg_pop])
+                        popularity_labels = np.concatenate([
+                            np.ones(len(tp_item_ids), dtype=np.int8),
+                            np.zeros(len(neg_item_ids), dtype=np.int8),
+                        ])
+                        popularity_item_ids = np.concatenate([tp_item_ids, neg_item_ids])
+                        # Tie-break by item_id to avoid favoring prepended positives.
+                        popularity_order = np.lexsort((
+                            popularity_item_ids.astype(np.float64, copy=False),
+                            -popularity_scores
+                        ))
+                        best_positive_rank = np.flatnonzero(popularity_labels[popularity_order] == 1)
+                        if best_positive_rank.size > 0:
+                            best_positive_rank = int(best_positive_rank[0]) + 1
+                            for k in popularity_metrics_k:
+                                if best_positive_rank <= min(k, total_candidates):
+                                    total_popularity_recall[k] += 1
 
                     chunk_request_blocks.append(np.full(total_candidates, req_id, dtype=request_id_dtype))
                     chunk_item_blocks.append(np.concatenate([tp_item_ids, neg_item_ids]))
@@ -670,6 +794,11 @@ class RetrievalStage(BaseStage):
         metrics = None
         if compute_metrics:
             metrics = {f"Recall@{k}": v / num_requests for k, v in total_recall.items()}
+            if total_popularity_recall is not None:
+                metrics.update({
+                    f"PopularityRecall@{k}": v / num_requests
+                    for k, v in total_popularity_recall.items()
+                })
             self.logger.info(f"Metrics: {metrics}")
             
             # Save metrics to CSV
